@@ -1,0 +1,29 @@
+# Today-runnable smoke audit. Uses ONLY assets already on the dev box:
+#   - MMR1-7B-RL    (teacher)
+#   - MMR1-3B-SFT   (student)
+#   - MathVista-mini  + POPE-adversarial  (eval data)
+#
+# MMR1-7B-SFT is intentionally absent here — it isn't on the server yet, so
+# RL-vs-SFT teacher comparison waits until download_missing.sh fills it in.
+
+name: audit_v0_smoke
+total_size: 500
+seed: 20260514
+
+benchmarks:
+  MathVista:        { weight: 0.60, local_path_env: MATHVISTA_PATH }
+  POPE_adversarial: { weight: 0.40, local_path_env: POPE_PATH      }
+
+passes:
+  - { tag: T_RL_full,   model_env: MMR1_7B_RL_CKPT,  mode: full_image      }
+  - { tag: T_RL_blank,  model_env: MMR1_7B_RL_CKPT,  mode: blank_image     }
+  - { tag: S_full,      model_env: MMR1_3B_SFT_CKPT, mode: full_image      }
+  - { tag: S_blank,     model_env: MMR1_3B_SFT_CKPT, mode: blank_image     }
+  - { tag: S_text_only, model_env: MMR1_3B_SFT_CKPT, mode: text_only       }
+
+# Notes:
+# - `model_env` resolves to $ENV at run time; e.g. MMR1_7B_RL_CKPT points at
+#   /home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL (set in .env).
+# - oracle_caption mode is omitted in smoke because MathVista-mini doesn't ship
+#   gold captions — needs a caption synthesis pass first.
+# - 5 passes × 500 prompts × ~1024 tokens ≈ ~1–2 h on a single H800.

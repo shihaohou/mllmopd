@@ -1,0 +1,56 @@
+# --- Local env / secrets ---
+.env
+.env.local
+*.local
+
+# --- Third-party submodules (tracked as submodules, not raw files) ---
+# When submodules are configured via `git submodule add`, git only records the
+# pointer in .gitmodules + a gitlink commit; the file tree itself is untracked.
+# This rule keeps raw clones (before submodule conversion) out of git.
+third_party/*/
+!third_party/.gitkeep
+
+# --- Big artifacts (live on dev box / scratch, symlinked in) ---
+# Leading slash = only at repo root. Without it, gitignore would also match
+# scripts/data/, src/mllmopd/data/, etc.
+/runs/
+/data/
+/models/
+wandb/
+outputs/
+checkpoints/
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# --- Logs ---
+*.log
+logs/

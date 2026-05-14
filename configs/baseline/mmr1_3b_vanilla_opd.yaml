@@ -1,0 +1,45 @@
+# Vanilla OPD baseline config.
+#
+# Consumed by Uni-OPD's ray_launcher.py. Field names below are best-effort and
+# WILL need reconciliation against an upstream MLLM example
+# (third_party/Uni-OPD/exps/scripts/OPD/...). Diff before first run.
+#
+# All paths use ${VAR} so the same file works on Mac (no values, harmless) and
+# on the dev box (values come from .env, see docs/server-inventory.md).
+
+name: mmr1_3b_vanilla_opd_v0
+
+student:
+  model_path: ${MMR1_3B_SFT_CKPT}        # /home/.../datasets/MMR1-3B-SFT
+  trust_remote_code: true
+
+teachers:
+  - name: MMR1-7B-RL
+    model_path: ${MMR1_7B_RL_CKPT}       # served by scripts/train/start_teacher_server.sh
+    url: http://localhost:30000/v1
+
+data:
+  train_set_path: ${MMR1_RL_DATA}        # /home/.../datasets/MMR1-RL
+  subset_size: 2000                      # start small; scale once stable
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+opd:
+  reward_type: token_level               # see miles/Uni_OPD_utils/OPD_reward/
+  margin_shift: false                    # leave Uni-OPD's new features OFF in baseline
+  greedy_margin_mask: false
+  online_data_balance: false
+
+optimization:
+  lr: 1.0e-6
+  rollout_batch_size: 32                 # fits 6-GPU trainer
+  sample_n: 8
+  ppo_minibatch_size: 8
+  max_steps: 500
+  save_every: 100
+  eval_every: 100
+
+logging:
+  output_dir: ${MLLMOPD_RUNS}/vanilla_opd_mmr1_3b_v0
+  wandb_project: mllmopd
+  wandb_run_group: vanilla_opd_baseline
