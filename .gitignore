@@ -3,12 +3,17 @@
 .env.local
 *.local
 
-# --- Third-party submodules (tracked as submodules, not raw files) ---
-# When submodules are configured via `git submodule add`, git only records the
-# pointer in .gitmodules + a gitlink commit; the file tree itself is untracked.
-# This rule keeps raw clones (before submodule conversion) out of git.
-third_party/*/
-!third_party/.gitkeep
+# --- Third-party submodules ---
+# Submodules listed in .gitmodules are tracked by gitlink, not by gitignore.
+# This block ignores ad-hoc clones / downloads under third_party/ while
+# explicitly re-including the four upstream paths we register as submodules.
+/third_party/*
+!/third_party/.gitkeep
+!/third_party/Uni-OPD
+!/third_party/Megatron-LM
+!/third_party/sglang
+!/third_party/lmms-eval
+!/third_party/G-OPD
 
 # --- Big artifacts (live on dev box / scratch, symlinked in) ---
 # Leading slash = only at repo root. Without it, gitignore would also match

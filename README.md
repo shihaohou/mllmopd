@@ -44,53 +44,62 @@ mllmopd/
 
 ## Quickstart
 
-### On Mac (now — scaffold + plan)
+Submodules (`Uni-OPD`, `Megatron-LM` @ `3714d81`, `sglang` @ `24c9100`, `lmms-eval`) are already wired in `.gitmodules`. We're pointing at upstream WenjinHou/Uni-OPD read-only for now — when you need to commit changes to OPD reward / loss, fork it and re-point (see [`docs/workflow.md`](docs/workflow.md)).
+
+### On the 8×H800 devbox (start here)
 
 ```bash
-cp .env.example .env       # edit paths as needed
-# Read these in order:
-#   docs/research-plan.md
-#   docs/experiment-protocol.md
-#   docs/teacher-student-matrix.md
-#   docs/upstream-cheatsheet.md
-#   docs/workflow.md
+# 1. Clone with all submodules
+cd /home/web_server/antispam/project/houshihao
+git clone --recurse-submodules https://github.com/shihaohou/mllmopd.git
+cd mllmopd
+
+# 2. .env defaults already match your server paths; just copy
+cp .env.example .env && source .env
+
+# 3. Sanity check what's already on disk
+bash scripts/data/check_inventory.sh
+
+# 4. Build the lighter conda env first (lmms-eval; ~30 min)
+bash scripts/init/02_devbox_bootstrap.sh
+bash scripts/env/setup_lmmseval_env.sh
+
+# 5. Smoke audit — uses ONLY MMR1 checkpoints + MathVista-mini + POPE-adversarial
+#    that are already on disk. ~1-2 h on a single H800.
+bash scripts/audit/run_smoke.sh
 ```
 
-When you're ready to set up submodules:
+The smoke audit is the fastest way to a real datapoint. It doesn't need the full training env, doesn't need Megatron, doesn't need any downloads.
+
+### Later — full Level-1 audit + training
+
+After the smoke audit gives a signal:
 
 ```bash
-# 1. Fork Uni-OPD into your account (one-time)
-gh repo fork WenjinHou/Uni-OPD --clone=false
+# Build the heavy training env (Megatron + SGLang; 1-2 h)
+bash scripts/env/setup_train_env.sh
 
-# 2. Wire up all four submodules pinned to the right commits
-bash scripts/init/01_fork_and_submodules.sh
+# Download missing benchmarks for full Level-1 (see docs/server-inventory.md)
+# Also download MMR1-7B-SFT (needed for H3 control / Fig 1)
 
-# 3. Commit + push
-git add .gitmodules third_party/
-git commit -m "Add upstream submodules (Uni-OPD fork, Megatron-LM, sglang, lmms-eval)"
-git push -u origin main
-```
+# Then: full audit
+bash scripts/audit/run_level1.sh
 
-### On the 8×H800 devbox (when you're ready to train)
-
-```bash
-git clone --recursive <your-mllmopd-repo> mllmopd && cd mllmopd
-cp .env.example .env && $EDITOR .env       # set CONDA_PATH, HF_HOME, MLLMOPD_RUNS
-
-bash scripts/init/02_devbox_bootstrap.sh   # makes scratch dirs, sanity-checks CUDA
-bash scripts/env/setup_train_env.sh        # conda env: Uni-OPD (Megatron + SGLang)
-bash scripts/env/setup_lmmseval_env.sh     # conda env: Uni-OPD-LMMS-Eval
-
-bash scripts/data/download_mmr1.sh         # MMR1-RL-15K + 3B/7B SFT/RL checkpoints
-bash scripts/audit/run_level1.sh           # Level-1 audit (no training)
-```
-
-After Level-1 produces phenomena worth modeling:
-
-```bash
-bash scripts/train/start_teacher_server.sh
-bash scripts/train/opd_mmr1_3b_baseline.sh
+# Then: training
+bash scripts/train/start_teacher_server.sh        # in one tmux pane
+bash scripts/train/opd_mmr1_3b_baseline.sh        # in another
 bash scripts/eval/run_lmmseval.sh
+```
+
+### On Mac
+
+Mac is for editing + figure generation. After pulling JSONL results from the devbox:
+
+```bash
+rsync -avh devbox:/home/web_server/antispam/project/houshihao/mllmopd_runs/audit/<run_id>/ ./runs/audit/<run_id>/
+pip install -e .
+python -m mllmopd.reporting.audit_table --run_dir runs/audit/<run_id>
+python -m mllmopd.reporting.figures --summary runs/audit/<run_id>/summary.json --out_dir runs/audit/<run_id>/figures
 ```
 
 ---
