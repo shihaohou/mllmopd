@@ -75,7 +75,9 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--mode", required=True, choices=[
         "full_image", "blank_image", "text_only",
-        "oracle_caption", "swap_image", "irrelevant_image",
+        "caption_only_blank", "image_plus_caption",
+        "swap_image", "irrelevant_image",
+        "oracle_caption",  # back-compat alias for caption_only_blank
     ])
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--max-new-tokens", type=int, default=1024)

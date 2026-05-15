@@ -66,7 +66,7 @@ Inputs (all already on disk):
 - Student: `MMR1-3B-SFT` (`/home/.../datasets/MMR1-3B-SFT`)
 - Eval data: `MathVista-mini`, `POPE-adversarial`
 
-Driver: `scripts/audit/run_smoke.sh` (READY) + `configs/audit/audit_v0_smoke.yaml`. Calls `src/mllmopd/diagnostics/run_audit_pass.py` (STUB — see §5.3) for 5 passes:
+Driver: `scripts/audit/run_smoke.sh` (READY) + `configs/audit/audit_v0_smoke.yaml`. Calls `src/mllmopd/diagnostics/run_audit_pass.py` (DEPENDS-on-GPU — see §5.3; inference path implemented for Qwen2.5-VL, forced-decoding for H2 still missing) for 5 passes:
 
 | Pass tag | Model | Mode |
 |---|---|---|
@@ -93,7 +93,7 @@ Adds the missing benchmarks and the SFT-teacher control:
 
 Required additions: MMR1-7B-SFT; benchmarks MathVision, MathVerse, LogicVista, ChartQA, HallusionBench, CharXiv, MMMU.
 
-Driver: `scripts/audit/run_level1.sh` (READY but slow) + `configs/audit/audit_v0.yaml`. Six passes × 2000 prompts.
+Driver: `scripts/audit/run_level1.sh` (READY but slow) + `configs/audit/audit_v0.yaml`. Seven passes × 2000 prompts (full / blank teachers, full / blank / caption-only-blank / image+caption student).
 
 This is where Fig 1 (RL vs SFT teacher: accuracy gain vs length gain) and Fig 4 (full/blank/oracle table) become computable. Time: ~6–12 h on 1 H800; can be parallelized across GPUs.
 
@@ -119,9 +119,9 @@ Tasks (default set): `mathvista_testmini`, `mathvision`, `mathverse_testmini`, `
 
 These are not in code yet; they're listed here so they're not forgotten.
 
-- **H1 probe** — perception-hard vs reasoning-hard quadrant classifier. Requires `(image, question) → image-only correctness` and `(caption, question) → text-only correctness`. Two new audit modes.
-- **H2 probe** — per-token visual-dependency KL extractor. Forced-decoding the teacher over a fixed completion while toggling image full↔blank; record per-position KL. Needs ~20 lines added to `run_audit_pass.py`.
-- **H3 probe** — modality shortcut. Already partially supported via `blank_image`, `irrelevant_image`, `swap_image` in `mllm_corruptions.py`; needs an aggregation script.
+- **H1 probe** — perception-hard vs reasoning-hard classifier built from the three caption-decomposed modes (`full_image`, `caption_only_blank`, `image_plus_caption`). Modes themselves are implemented in `mllm_corruptions.apply_mode`; the classifier and the captioning pass that feeds them are not. See §7.4 for the rewritten quadrant definition.
+- **H2 probe** — per-token visual-dependency scalar extractor. Forced-decoding the teacher over a fixed completion while toggling image full↔blank; record `logp_full[t]` and `logp_blank[t]` for the generated token only (not the full vocab — see §7.4 for cost). Needs ~30 lines added to `run_audit_pass.py` under a new `--score_completion` mode.
+- **H3 probe** — modality shortcut. The `blank_image` / `irrelevant_image` / `swap_image` corruption modes are implemented; the paired full-vs-blank 2×2 contingency lands in `summary.json["paired_full_blank"]` automatically. What's still TODO is the irrelevant/swap variants in the smoke config and the paired metric for those.
 
 ---
 
@@ -162,8 +162,8 @@ All three are verbatim transcripts of `third_party/Uni-OPD/docs/{build_env,build
 
 | Script | Status | What it does |
 |---|---|---|
-| `run_smoke.sh` | READY | Builds smoke subset (500 prompts, MathVista + POPE), runs the 5 passes from §3.1, aggregates, prints table. Reads model + dataset paths from env vars. Hard-codes `CUDA_VISIBLE_DEVICES=${SMOKE_GPU:-0}` for single-GPU sequential. |
-| `run_level1.sh` | READY-but-slow | Same pattern but 6 passes × 2000 prompts. Includes T_SFT_full and S_oracle_caption. Will fail until MMR1-7B-SFT and oracle captions exist (gracefully — single pass exits non-zero, others continue if `set -e` is removed). |
+| `run_smoke.sh` | READY | Builds smoke subset (500 prompts, MathVista + POPE), runs the 5 passes from §3.1, aggregates, prints table. Reads model + dataset paths from env vars. Hard-codes `CUDA_VISIBLE_DEVICES=${SMOKE_GPU:-0}` for single-GPU sequential. **Recommended cold-start ramp: `--limit 2 --debug`, then `--limit 20`, then `--limit 100`, then full 500.** |
+| `run_level1.sh` | READY-but-slow | Same pattern but 7 passes × 2000 prompts. Includes T_SFT_full plus `S_caption_blank` and `S_image_plus_cap` (the two modes that make H1 quadrant classification possible). Will fail until MMR1-7B-SFT and captions exist (gracefully — single pass exits non-zero, others continue if `set -e` is removed). |
 
 ### 4.5 `scripts/train/` — OPD training (Stage T1)
 
@@ -197,7 +197,8 @@ Mode → (image_out, prefix_text):
 - `full_image` → `(image, None)`
 - `blank_image` → `(255×W×H white, None)` (preserves dims so vision tokenizer produces same patch count)
 - `text_only` → `(None, None)`
-- `oracle_caption` → `(blank, "[Image description: <caption>]\n")` — requires non-empty caption
+- `caption_only_blank` → `(blank, "[Image description: <caption>]\n")` — requires non-empty caption (this is the new name for what was previously called `oracle_caption`; the old name is kept as an alias)
+- `image_plus_caption` → `(image, "[Image description: <caption>]\n")` — the four-quadrant H1 classifier needs *both* blank+caption and image+caption to disambiguate perception-hard from reasoning-hard prompts
 - `swap_image` → `(other_image, None)`
 - `irrelevant_image` → `(noise_with_seed, None)` (per-pixel uniform RGB)
 
@@ -205,9 +206,18 @@ Mode → (image_out, prefix_text):
 
 Math utilities for H2 ("loss mass landing on low-visual-dependency tokens").
 
+Two flavors, very different storage costs:
+
 ```python
+# Default — cheap (T,) scalar per sample.
+vis_dep_generated(logp_full: np.ndarray, logp_blank: np.ndarray) -> np.ndarray
+    # both (T,) log-probs of the actually-generated token y_t under each
+    # image conditioning; returns (T,) |Δ logp| per token
+
+# Case-study — expensive, full-vocab KL over (T, V) log-probs.
 kl_per_token(logp_a: np.ndarray, logp_b: np.ndarray) -> np.ndarray
-    # both (T, V) log-probs; returns (T,) KL(P_a || P_b) per token
+    # ~1.2 GB float32 per Qwen2.5-VL sample at T=1024, V≈152K — only feasible
+    # on ~10-100 hand-picked examples, never at audit scale
 
 quantile_bins(values: np.ndarray, n_bins: int = 5) -> np.ndarray
     # equal-frequency binning
@@ -222,24 +232,28 @@ summarize_records(records: Iterable[dict]) -> dict
 **Gap:** no script currently produces the `(vis_dep, opd_loss)` paired arrays. Need to extend `run_audit_pass.py` (or write a new `extract_token_logprobs.py`) to:
 1. Force-decode the teacher over a fixed completion `y` with image `x`.
 2. Re-decode the same `y` with `x` blanked.
-3. Take per-position softmax → log_softmax of both.
-4. Save `(logp_full, logp_blank)` per token.
+3. Gather `logp(y_t)` at each position from both decodes (scalar; **do not** materialize (T, V) full-vocab log-probs in the default path).
+4. Save `(logp_full, logp_blank)` as two (T,) float32 arrays per sample.
 
-After that, downstream callers compute `kl_per_token(logp_full, logp_blank)`. Plus OPD loss attribution requires the actual training loss tensor, which lives in miles — not yet wired.
+After that, audit-scale callers compute `vis_dep_generated(logp_full, logp_blank)`. The full-vocab `kl_per_token` is reserved for explicit case studies that pass `--full_vocab_kl 1`. OPD loss attribution requires the actual training loss tensor, which lives in miles — not yet wired.
 
-### 5.3 `mllmopd.diagnostics.run_audit_pass` — STUB
+### 5.3 `mllmopd.diagnostics.run_audit_pass` — DEPENDS-on-GPU (inference path done; forced-decoding for H2 still TODO)
 
-Loads a model with `AutoProcessor` + `AutoModelForVision2Seq`, iterates the subset, applies a perception mode, generates with `do_sample=False`, scores with a loose contains/exact match, writes one JSONL line per prompt.
+Loads a model with `AutoProcessor` + `Qwen2_5_VLForConditionalGeneration` (auto-falls back to `AutoModelForVision2Seq` for older transformers; auto-falls back from `flash_attention_2` to `sdpa` if FA2 unavailable). Iterates the subset, applies a perception mode, generates with `do_sample=False`, scores with the benchmark-aware dispatcher in `mllmopd.diagnostics.scorers`, writes one JSONL line per prompt.
 
 CLI:
 ```bash
 python -m mllmopd.diagnostics.run_audit_pass \
     --subset SUBSET.jsonl \
-    --model MMR1/MMR1-7B-RL  # or local path
-    --mode full_image        # full_image|blank_image|text_only|oracle_caption|swap_image|irrelevant_image
+    --model $MMR1_7B_RL_CKPT  # local path or HF id
+    --mode full_image         # full_image|blank_image|text_only|
+                              # caption_only_blank|image_plus_caption|
+                              # swap_image|irrelevant_image|oracle_caption(alias)
     --out OUT.jsonl
-    [--max-new-tokens 1024] [--limit 0]
+    [--max-new-tokens 1024] [--limit 0] [--debug]
 ```
+
+`--debug` dumps prompt + raw prediction + scoring decision to stderr per sample; pair it with `--limit 2` for cold-start sanity, then ramp 20 → 100 → 500.
 
 Per-prompt output schema:
 ```python
@@ -252,15 +266,33 @@ Per-prompt output schema:
   "num_tokens": int,    # generated only, prompt excluded
   "prompt_len": int,
   "gold": str | None,
-  "is_correct": bool | None,   # NOTE: loose match — see §8
-  "finish_reason": (not yet populated)
+  "is_correct": bool | None,
+  "scorer": str,        # which scorer fired: yesno | mcq_letter |
+                        # numeric | loose_contains | skip_empty_gold
 }
 ```
 
-Known issues (see §8):
-- The generic `AutoModelForVision2Seq` loader may not produce correct outputs for MMR1 / Qwen2.5-VL — Qwen2.5-VL needs `qwen_vl_utils.process_vision_info` + `Qwen2_5_VLForConditionalGeneration`. Will be obvious on first run.
-- Correctness scoring is a placeholder (exact / contains). Real per-benchmark scorers live in lmms-eval; we should run lmms-eval for the official numbers and use this only for triage.
-- The subset loader assumes `image` is either a PIL object (HF datasets default) or a path. Local benchmark dirs that store raw image files + a JSON answer file will need a custom loader added under `mllmopd.data.audit_subset` (currently empty).
+The `scorer` field lets downstream code filter `loose_contains` cells out of any plot — those are the cells where the dispatcher didn't recognize the gold shape and fell back to substring matching. Real headline numbers still come from lmms-eval at Stage E1.
+
+### 5.3.1 `mllmopd.diagnostics.scorers` — READY
+
+Benchmark-aware lightweight scorers, all numpy-free so they run on Mac.
+
+```python
+score_for_benchmark(benchmark: str, pred: str, gold) -> tuple[bool | None, str]
+    # returns (is_correct, scorer_name); name is one of
+    # "yesno" | "mcq_letter" | "numeric" | "loose_contains" | "skip_empty_gold"
+
+score_yesno(pred, gold)        # POPE / HallusionBench style
+score_mcq_letter(pred, gold)   # gold like "A", "B", ...
+score_numeric(pred, gold, rel_tol=0.01, abs_tol=1e-3)  # gold parses as float
+```
+
+Dispatch logic: benchmark name (`pope*`, `hallusionbench*` → yesno) takes priority; otherwise gold shape determines scorer (single A-H letter → mcq, parses as float → numeric, else loose). Empty pred against a non-empty gold scores `False`, not `None` — we know the model failed, that's not "unscoreable".
+
+Known caveats (see §8):
+- The subset loader assumes `image` is either a PIL object (HF datasets default) or a path. `prep_audit_subset.py` now persists PIL images to disk so the JSONL only stores paths; multi-image samples take the first frame only.
+- Real per-benchmark scorers live in lmms-eval; the dispatchers above are triage tools. Cells dominated by `scorer=loose_contains` should not be quoted in any figure.
 
 ### 5.4 `mllmopd.analysis.aggregate_audit` — READY
 
@@ -274,14 +306,28 @@ Walks `*.jsonl` in a run dir, groups by `(model, mode, benchmark)`, computes:
   "tokens_mean":   float | None,          # mean generated tokens
   "tokens_median": float | None,
   "acc_per_token": float | None,          # ~ accuracy / mean tokens (efficiency proxy)
+  "scorers":       dict[str, int],        # which scorer fired how often
+                                          # (filter out cells dominated by "loose_contains")
 }
 ```
 
-Written to `summary.json` as `{"cells": [<row>, ...]}`.
+In addition, a second list is computed per `(model, benchmark)` cross-cell: the prompt-id-paired full-image vs blank-image contingency, which is what we actually use for H3 modality-shortcut diagnosis. See §7.3.
+
+```python
+# summary.json["paired_full_blank"] entries
+{
+  "model": str, "benchmark": str, "n_paired": int,
+  "both_correct": int, "full_only": int, "blank_only": int, "both_wrong": int,
+  "image_lift_rate": float,        # full_only / n_paired
+  "blank_shortcut_rate": float,    # blank_only / n_paired
+}
+```
+
+Written to `summary.json` as `{"cells": [...], "paired_full_blank": [...]}`.
 
 ### 5.5 `mllmopd.reporting.audit_table` — READY
 
-Pretty-prints `summary.json` cells as a fixed-width table. No file output.
+Pretty-prints `summary.json` as two fixed-width tables: the per-cell stats and the per-(model, benchmark) full-vs-blank paired contingency. No file output.
 
 ### 5.6 `mllmopd.reporting.figures` — partial (Fig 1 only)
 
@@ -326,22 +372,44 @@ For each `(model, mode, benchmark)`:
 
 | Metric | Formula | Hypothesis use |
 |---|---|---|
-| Full−blank accuracy gap | `acc(model, full_image, b) - acc(model, blank_image, b)` | H3 modality shortcut (small gap on RL teacher = teacher answers without looking) |
+| Full−blank accuracy gap | `acc(model, full_image, b) - acc(model, blank_image, b)` | H3 modality shortcut — **weak signal**; per-prompt paired counts below are stronger |
+| **Paired image lift** | `full_only / n_paired` | H3 — fraction of prompts where the image actually changed the model's decision toward correct |
+| **Paired blank shortcut** | `blank_only / n_paired` | H3 — fraction of prompts where blanking the image flipped a wrong answer to a correct one (pure prior / spurious shortcut) |
 | RL−SFT accuracy gain | `acc(MMR1-7B-RL, full, b) - acc(MMR1-7B-SFT, full, b)` | H3 capability vs artifact (paired with length gain) |
 | RL−SFT length gain (rel) | `(tokens_mean_RL - tokens_mean_SFT) / tokens_mean_SFT` | H3 overthinking transfer |
-| Acc(blank) / Acc(full) | `acc_blank / acc_full` | Inverse of full−blank gap; high ratio = low visual dependency |
+| Acc(blank) / Acc(full) | `acc_blank / acc_full` | Inverse of full−blank gap; only valid when used alongside paired counts above |
 
 ### 7.4 Per-token visual dependency (planned, §5.2 + §5.3 extension)
 
+**Default (audit-scale)** — scalar from generated tokens only:
+
 ```
-vis_dep[t] = KL( softmax(z_teacher(x_full, y_<t))  ||  softmax(z_teacher(x_blank, y_<t)) )
+vis_dep_gen[t] = | logp_full(y_t | x, y_<t) - logp_blank(y_t | x, y_<t) |
 ```
 
-For Fig 2: bin tokens by quantile of `vis_dep`, plot `sum(opd_loss[bin]) / sum(opd_loss)`.
+Storage: (T,) float32 per sample. This is what runs at audit scale.
 
-For Fig 3: classify each prompt by `(perception_hard, reasoning_hard)`:
-- `perception_hard` = student fails on image+question but succeeds on oracle_caption+question.
-- `reasoning_hard` = student fails on oracle_caption+question but succeeds on (oracle_caption+blank_image)+question (= text-only).
+**Case study (≤100 samples)** — full-vocab KL:
+
+```
+vis_dep_kl[t] = KL( softmax(z_teacher(x_full, y_<t))  ||  softmax(z_teacher(x_blank, y_<t)) )
+```
+
+Storage: (T, V) float32 per sample (~1.2 GB on Qwen2.5-VL). Only enabled per-case-study via an explicit flag, never on the full audit.
+
+For Fig 2: bin tokens by quantile of `vis_dep_gen`, plot `sum(opd_loss[bin]) / sum(opd_loss)`.
+
+For Fig 3 — H1 quadrant from the (image × caption) decomposition. Let `C_full = correct(full_image)`, `C_capblank = correct(caption_only_blank)`, `C_imgcap = correct(image_plus_caption)`. Per-prompt buckets:
+
+| Bucket | Condition | Interpretation |
+|---|---|---|
+| **perception-hard** | `not C_full and C_capblank` | Model needs visual *facts*, can't see them; gold caption rescues it |
+| **reasoning-hard** | `C_full and not C_imgcap` (or both fail) | Visual facts are accessible but the reasoning fails even when the caption is also given |
+| **both-easy** | `C_full and C_capblank` | Trivial — exclude from any frontier plot |
+| **shortcut-prone** | `not C_full and not C_capblank and correct(blank_image)` | Both visual and caption inputs fail but blank still scores correct — pure prior / option distribution |
+| residual | none of the above | Mixed / inconsistent; report as a single "other" bucket and inspect manually |
+
+The earlier H1 definition collapsed "caption-only" and "blank-image+caption" into the single `oracle_caption` mode, which made the second bucket incoherent (the success condition was the same input as the failure condition). Splitting into `caption_only_blank` and `image_plus_caption` is what fixes it.
 
 ### 7.5 Hypothesis decision table
 
@@ -365,21 +433,21 @@ Honest list, in order of how likely each is to bite us.
 
 ### 8.1 First-run blockers (likely)
 
-1. **MMR1 model loading**: `AutoModelForVision2Seq` is too generic for Qwen2.5-VL-derived checkpoints. Will probably need `Qwen2_5_VLForConditionalGeneration` + `qwen_vl_utils.process_vision_info`. Fix: 5-line swap in `run_audit_pass.py::_build_model`.
+1. ~~**MMR1 model loading**: `AutoModelForVision2Seq` is too generic.~~ **Fixed in P0**: `_build_model` now tries `Qwen2_5_VLForConditionalGeneration` first and falls back. Still uses the HF chat template + processor, not `qwen_vl_utils.process_vision_info`; if generations look wrong on the first 2-sample debug run, swap to `process_vision_info`.
 2. **MathVista-mini / POPE-adversarial local format**: `prep_audit_subset.py` calls `datasets.load_dataset(local_path, split=...)`. If the local dirs aren't HF-formatted, it tries `parquet` as a fallback. If neither works, the user will see a clear traceback and we add a custom loader.
 3. **`opd_mmr1_3b_baseline.sh` argument names**: the wrapper calls `python ray_launcher.py --config ... --output-dir ... --run-name ...`. These flag names are unverified — `ray_launcher.py` may use `--config-file` or YAML-only configuration. Plan: read `ray_launcher.py` arg parser before first attempt.
 4. **`run_lmmseval.sh` model adapter**: `--model qwen2_5_vl` only works if lmms-eval ships a wrapper for the MMR1 family; otherwise switch to `--model hf-multimodal` with custom `model_args`.
 
 ### 8.2 Correctness / methodology gaps
 
-5. **Loose correctness scoring**: `is_correct = (pred == gold) or (gold in pred)` is fine for headline triage but **not** for paper numbers. Always re-run lmms-eval at evaluation time and use this only for cell-level debugging.
+5. ~~**Loose correctness scoring**: `pred == gold or gold in pred`.~~ **Improved in P0**: dispatcher in `mllmopd.diagnostics.scorers` routes POPE/HallusionBench to yes/no, MCQ-letter gold to letter parser, numeric gold to a 1%-relative-tolerance numeric parser. `loose_contains` is still the fallback for unknown gold shapes — JSONL records which scorer fired so loose cells can be filtered out of plots. Headline numbers still come from lmms-eval at Stage E1.
 6. **`acc_per_token` is a crude efficiency proxy.** Real efficiency for H3 should be measured on a controlled-difficulty subset, not a benchmark mean.
-7. **Full−blank ≠ "visual dependency"**. A model that always outputs `(A)` for a multiple-choice question has zero accuracy gap but no visual dependency at all. We need a paired metric — e.g., correctness AND probability mass shift — before claiming "modality shortcut" rigorously.
-8. **Oracle-caption uncertainty**: captions need to be either gold-shipped, synthesized by a known captioner, or extracted from the question itself. Synthesized captions become a confound.
+7. ~~**Full−blank ≠ "visual dependency"**.~~ **Improved in P1**: `summary.json["paired_full_blank"]` now records per-(model, benchmark) 2×2 contingency counts and `image_lift_rate` / `blank_shortcut_rate`, so the "always answers (A)" pathology shows up as `image_lift_rate ≈ 0` with non-zero `both_correct` rather than as a misleadingly small accuracy gap. Probability-mass shift (Δ logp on the predicted token) is the next step and lands when forced-decoding (§5.2) is wired.
+8. **Caption-only / image-plus-caption uncertainty**: captions need to be either gold-shipped (e.g., ChartQA descriptions, MathVerse Vision Only metadata), synthesized by a known captioner, or extracted from the question itself. Synthesized captions become a confound. Until a captioning pass exists, both `caption_only_blank` and `image_plus_caption` modes will error out at runtime.
 
 ### 8.3 Unimplemented features (planned, blocking H1/H2 figures)
 
-9. **Per-token logprob extraction** (for Fig 2 / H2). Concretely: `run_audit_pass.py` must accept a `--score_completion` mode that forced-decodes a given response and emits per-position log-probs under both `full_image` and `blank_image`. Then `visual_dependency.kl_per_token` is callable.
+9. **Per-token logprob extraction** (for Fig 2 / H2). Concretely: `run_audit_pass.py` must accept a `--score_completion` mode that forced-decodes a given response and emits the per-position log-prob of the generated token under both `full_image` and `blank_image`. That feeds `visual_dependency.vis_dep_generated` (scalar form). The full-vocab `visual_dependency.kl_per_token` is only invoked on case-study examples behind an explicit flag — never at audit scale.
 10. **OPD loss attribution** (for Fig 2 / H2). The OPD reward in Uni-OPD is computed in `miles/Uni_OPD_utils/OPD_reward/` per generated token. To plot loss mass by visual-dep bin, we need to dump the per-token reward alongside the corresponding visual-dep value. Likely a small hook in `OPD_reward/` that writes a sidecar JSON during training.
 11. **Perception-hard / reasoning-hard classifier** (for Fig 3 / H1). Needs the oracle-caption pass implemented robustly first.
 
@@ -391,7 +459,7 @@ Honest list, in order of how likely each is to bite us.
 
 ### 8.5 Infrastructure debt
 
-15. **No CI / no tests.** Acceptable while the repo is < 5 KLOC of glue; the moment we add a real OPD reward variant, we should add a couple of golden-output tests for `visual_dependency.kl_per_token` and `mllm_corruptions.apply_mode`.
+15. **No CI / no tests.** Acceptable while the repo is < 5 KLOC of glue; the moment we add a real OPD reward variant, we should add a couple of golden-output tests for `visual_dependency.vis_dep_generated`, `mllm_corruptions.apply_mode`, and the new `diagnostics.scorers` dispatcher.
 16. **Submodule pinning for nested submodules.** `Megatron-LM` has its own submodules that are NOT initialized by `git clone --recurse-submodules`. The build script does an explicit `git clone --recursive` in upstream docs; our `setup_train_env.sh` skips that because we use submodules. Will fail at compile of Apex's CUDA extensions unless we add a `cd third_party/Megatron-LM && git submodule update --init --recursive` step.
 
 ---

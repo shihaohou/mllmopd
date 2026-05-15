@@ -1,10 +1,28 @@
 """Token-level visual dependency utilities.
 
-`vis_dep(t)` = KL( p(.|x, image)[t]  ||  p(.|x, blank)[t] )
+Two flavors of per-token visual dependency are supported, with very different
+storage costs. The audit pipeline saves the cheap one by default and uses the
+expensive one only for hand-picked case studies.
 
-Operates on numpy log-prob arrays so it's import-friendly on Mac. The actual
-log-prob extraction (forced-decoding the teacher over a fixed response while
-varying the image) belongs in run_audit_pass.py on the devbox.
+(1) Default — `vis_dep_generated`:
+
+    vd[t] = | logp_full(y_t | x, y_<t) - logp_blank(y_t | x, y_<t) |
+
+    Only the log-prob of the *actually generated* token is stored under each
+    image conditioning. Cost: (T,) scalar arrays per sample. This is what
+    `summarize_records` consumes and what audit JSONL writes.
+
+(2) Case study — `kl_per_token`:
+
+    vd[t] = KL( p_full(.|x, y_<t) || p_blank(.|x, y_<t) )
+
+    Full-vocab KL. Cost: (T, V) log-prob arrays per sample — for Qwen2.5-VL
+    with V≈152K and T≈1024 that's ~1.2 GB float32 per sample, so this is only
+    feasible on ~10-100 case study examples, not at audit scale.
+
+Operates on numpy arrays so it's import-friendly on Mac. The log-prob
+extraction itself (forced-decoding the teacher over a fixed response while
+varying the image) lives in run_audit_pass.py on the devbox.
 """
 
 from __future__ import annotations
@@ -14,8 +32,21 @@ from typing import Iterable
 import numpy as np
 
 
+def vis_dep_generated(logp_full: np.ndarray, logp_blank: np.ndarray) -> np.ndarray:
+    """Cheap scalar visual dependency from generated-token log-probs.
+
+    Both inputs are 1-D arrays of shape (T,) — the log-prob of the actually
+    generated token y_t under (a) full-image and (b) blank-image conditioning.
+    """
+    assert logp_full.shape == logp_blank.shape, f"shape mismatch: {logp_full.shape} vs {logp_blank.shape}"
+    return np.abs(np.asarray(logp_full) - np.asarray(logp_blank))
+
+
 def kl_per_token(logp_a: np.ndarray, logp_b: np.ndarray) -> np.ndarray:
-    """KL(P_a || P_b) per token. Both inputs shape (T, V) of log-probabilities."""
+    """KL(P_a || P_b) per token. Both inputs shape (T, V) of log-probabilities.
+
+    Case-study only — storage is (T, V) per sample. Use `vis_dep_generated` for
+    the audit pipeline."""
     assert logp_a.shape == logp_b.shape, f"shape mismatch: {logp_a.shape} vs {logp_b.shape}"
     pa = np.exp(logp_a)
     return (pa * (logp_a - logp_b)).sum(axis=-1)

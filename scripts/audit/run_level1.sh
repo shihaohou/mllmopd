@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Orchestrate the Level-1 audit on the devbox (no training).
-# Runs four passes: T_RL, T_SFT, S full-image, S blank-image and oracle-caption variants.
+# Runs seven passes covering the (image × caption) decomposition + RL/SFT teacher.
 # Each pass writes a JSONL of per-prompt records under $MLLMOPD_RUNS/audit/<run_id>/.
 set -euo pipefail
 
@@ -34,12 +34,13 @@ run() {
     --out "${RUN_DIR}/${tag}.jsonl"
 }
 
-run "T_RL_full"        "MMR1/MMR1-7B-RL"  "full_image"
-run "T_SFT_full"       "MMR1/MMR1-7B-SFT" "full_image"
-run "S_full"           "MMR1/MMR1-3B-SFT" "full_image"
-run "S_blank"          "MMR1/MMR1-3B-SFT" "blank_image"
-run "T_RL_blank"       "MMR1/MMR1-7B-RL"  "blank_image"
-run "S_oracle_caption" "MMR1/MMR1-3B-SFT" "oracle_caption"
+run "T_RL_full"          "MMR1/MMR1-7B-RL"  "full_image"
+run "T_SFT_full"         "MMR1/MMR1-7B-SFT" "full_image"
+run "S_full"             "MMR1/MMR1-3B-SFT" "full_image"
+run "S_blank"            "MMR1/MMR1-3B-SFT" "blank_image"
+run "T_RL_blank"         "MMR1/MMR1-7B-RL"  "blank_image"
+run "S_caption_blank"    "MMR1/MMR1-3B-SFT" "caption_only_blank"
+run "S_image_plus_cap"   "MMR1/MMR1-3B-SFT" "image_plus_caption"
 
 # Aggregate to per-cell metrics
 python -m mllmopd.analysis.aggregate_audit \

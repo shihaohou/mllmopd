@@ -24,6 +24,7 @@ passes:
 # Notes:
 # - `model_env` resolves to $ENV at run time; e.g. MMR1_7B_RL_CKPT points at
 #   /home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL (set in .env).
-# - oracle_caption mode is omitted in smoke because MathVista-mini doesn't ship
-#   gold captions — needs a caption synthesis pass first.
+# - caption_only_blank / image_plus_caption modes are omitted in smoke because
+#   MathVista-mini doesn't ship gold captions — needs a caption synthesis pass
+#   first (see docs/implementation.md P1 plan).
 # - 5 passes × 500 prompts × ~1024 tokens ≈ ~1–2 h on a single H800.
