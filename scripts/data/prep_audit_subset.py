@@ -65,8 +65,10 @@ BENCHMARK_MIX = {
 }
 
 
-def load_records(name: str, n: int, seed: int) -> Iterable[dict]:
-    """Load `n` records from `name`. Tries $<NAME>_PATH first, falls back to HF id."""
+def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict]:
+    """Load `n` records from `name`. Tries $<NAME>_PATH first, falls back to HF id.
+    PIL images in the source dataset are persisted under `image_dir/<benchmark>/`
+    and the JSONL stores the resulting path (not the PIL object)."""
     if load_dataset is None:
         raise RuntimeError("Install `datasets` first:  pip install datasets")
     if name not in BENCHMARK_REGISTRY:
@@ -88,10 +90,39 @@ def load_records(name: str, n: int, seed: int) -> Iterable[dict]:
     rng.shuffle(indices)
     for idx in indices[:n]:
         rec = ds[idx]
-        yield _normalize(name, idx, rec)
+        yield _normalize(name, idx, rec, image_dir)
 
 
-def _normalize(benchmark: str, idx: int, rec: dict) -> dict:
+def _save_image(img, image_dir: Path, benchmark: str, idx) -> str | list[str] | None:
+    """Persist a PIL image (or list of them) to disk; return the path(s).
+
+    No-op for None / already-string paths."""
+    if img is None:
+        return None
+    if isinstance(img, str):
+        return img
+    if isinstance(img, list):
+        out = []
+        for j, item in enumerate(img):
+            saved = _save_image(item, image_dir, benchmark, f"{idx}_{j}")
+            if saved is not None:
+                out.append(saved)
+        return out or None
+    if hasattr(img, "save"):
+        sub = image_dir / benchmark
+        sub.mkdir(parents=True, exist_ok=True)
+        path = sub / f"{idx}.png"
+        if not path.exists():
+            try:
+                img.convert("RGB").save(path, format="PNG")
+            except Exception as e:
+                print(f"!! could not save {benchmark}/{idx}: {e}", flush=True)
+                return None
+        return str(path)
+    return None
+
+
+def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
     """Map heterogeneous benchmark schemas to the audit schema."""
     img = rec.get("image") or rec.get("images") or rec.get("decoded_image")
     question = (
@@ -102,13 +133,19 @@ def _normalize(benchmark: str, idx: int, rec: dict) -> dict:
         or ""
     )
     answer = rec.get("answer") or rec.get("label") or rec.get("solution")
+    image_path = _save_image(img, image_dir, benchmark, idx)
+    # Drop the PIL image from meta (json.dumps default=str would mangle it)
+    meta = {
+        k: v for k, v in rec.items()
+        if k not in {"image", "images", "decoded_image", "question", "answer"}
+    }
     return {
         "id": f"{benchmark}/{idx}",
         "benchmark": benchmark,
-        "image": img if isinstance(img, (str, list)) else None,
+        "image": image_path,
         "question": question,
         "answer": answer,
-        "meta": {k: v for k, v in rec.items() if k not in {"image", "images", "question", "answer"}},
+        "meta": meta,
     }
 
 
@@ -118,7 +155,11 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260514)
     ap.add_argument("--only", nargs="*", help="optional: restrict to a subset of benchmarks")
+    ap.add_argument("--image-dir", type=Path, default=None,
+                    help="where to persist PIL images (default: <out_dir>/images/)")
     args = ap.parse_args()
+    image_dir = args.image_dir or (args.out.parent / "images")
+    image_dir.mkdir(parents=True, exist_ok=True)
 
     if args.only:
         # Treat --only as a uniform mix over the named benchmarks. This lets us
@@ -140,9 +181,9 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w") as f:
         for bench, n in plan.items():
-            for rec in load_records(bench, n, seed=args.seed):
+            for rec in load_records(bench, n, seed=args.seed, image_dir=image_dir):
                 f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
-    print(f">>> Wrote {args.out}")
+    print(f">>> Wrote {args.out}  (images under {image_dir})")
 
 
 if __name__ == "__main__":

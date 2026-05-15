@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from mllmopd.data import mllm_corruptions
+from mllmopd.diagnostics import scorers
 
 
 def _load_subset(path: Path):
@@ -35,31 +36,37 @@ def _load_subset(path: Path):
 
 
 def _build_model(model_id: str):
-    """Lazy-import heavy deps so module-level import works on Mac."""
+    """Qwen2.5-VL / MMR1 loader. Falls back to AutoModelForVision2Seq if the
+    transformers install doesn't expose the Qwen2.5-VL class yet (older
+    versions). Falls back from flash_attention_2 to sdpa if FA2 isn't built."""
     import torch  # type: ignore
-    from transformers import AutoProcessor, AutoModelForVision2Seq  # type: ignore
+    from transformers import AutoProcessor  # type: ignore
 
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    model = AutoModelForVision2Seq.from_pretrained(
-        model_id,
+    try:
+        from transformers import Qwen2_5_VLForConditionalGeneration as ModelCls  # type: ignore
+        proc_kwargs = {
+            "trust_remote_code": True,
+            "min_pixels": 256 * 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        }
+    except ImportError:
+        from transformers import AutoModelForVision2Seq as ModelCls  # type: ignore
+        proc_kwargs = {"trust_remote_code": True}
+
+    processor = AutoProcessor.from_pretrained(model_id, **proc_kwargs)
+
+    common = dict(
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
+    try:
+        model = ModelCls.from_pretrained(model_id, attn_implementation="flash_attention_2", **common)
+    except (ImportError, ValueError, RuntimeError) as e:
+        print(f">>> flash_attention_2 unavailable ({e!s:.80}); falling back to sdpa", file=sys.stderr)
+        model = ModelCls.from_pretrained(model_id, attn_implementation="sdpa", **common)
     model.eval()
     return processor, model
-
-
-def _is_correct(pred: str, gold) -> bool | None:
-    """Very loose match — exact / contains. Real eval should run lmms-eval; this
-    is just to keep something computable in the JSONL for triage."""
-    if gold is None:
-        return None
-    g = str(gold).strip().lower()
-    p = pred.strip().lower()
-    if not g:
-        return None
-    return g == p or g in p
 
 
 def main() -> None:
@@ -73,6 +80,8 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit")
+    ap.add_argument("--debug", action="store_true",
+                    help="dump prompt + raw generation + scoring to stderr (use with --limit 2)")
     args = ap.parse_args()
 
     processor, model = _build_model(args.model)
@@ -85,15 +94,16 @@ def main() -> None:
             if args.limit and written >= args.limit:
                 break
 
-            # Hand the per-mode image transform here. Real model-specific
-            # input formatting (chat template, image placeholders, processor)
-            # lives below — adapt to your processor.
-            from PIL import Image  # noqa
             image_field = rec.get("image")
-            pil_image = image_field if hasattr(image_field, "convert") else None
-            # NB: when subset stores paths/URLs, load with mllm_corruptions.load()
+            if isinstance(image_field, list) and image_field:
+                # multi-image not supported yet — take the first
+                image_field = image_field[0]
             if isinstance(image_field, (str, Path)):
                 pil_image = mllm_corruptions.load(image_field)
+            elif hasattr(image_field, "convert"):
+                pil_image = image_field
+            else:
+                pil_image = None
 
             transformed, prefix = mllm_corruptions.apply_mode(
                 pil_image,
@@ -121,6 +131,9 @@ def main() -> None:
             gen_ids = out_ids[0, prompt_len:]
             pred = processor.decode(gen_ids, skip_special_tokens=True)
 
+            is_correct, scorer_used = scorers.score_for_benchmark(
+                rec["benchmark"], pred, rec.get("answer"),
+            )
             row = {
                 "id": rec["id"],
                 "benchmark": rec["benchmark"],
@@ -130,10 +143,17 @@ def main() -> None:
                 "num_tokens": int(gen_ids.shape[0]),
                 "prompt_len": int(prompt_len),
                 "gold": rec.get("answer"),
-                "is_correct": _is_correct(pred, rec.get("answer")),
+                "is_correct": is_correct,
+                "scorer": scorer_used,
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             written += 1
+            if args.debug:
+                print(f"=== [{rec['id']}] mode={args.mode} ===", file=sys.stderr)
+                print(f"PROMPT: {chat!r}", file=sys.stderr)
+                print(f"PREDICTION: {pred!r}", file=sys.stderr)
+                print(f"GOLD: {rec.get('answer')!r}  ->  is_correct={is_correct} via {scorer_used}",
+                      file=sys.stderr)
             if written % 25 == 0:
                 rate = written / max(1.0, time.time() - t0)
                 print(f"... {written} ({rate:.2f}/s)", file=sys.stderr)
