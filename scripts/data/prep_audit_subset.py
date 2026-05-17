@@ -159,6 +159,7 @@ def _save_image(img, image_dir: Path, benchmark: str, idx) -> str | list[str] | 
 
 
 _CHOICE_MARKERS = (" A)", " A.", "(A)", "(A.", "\nA)", "\nA.")
+_LETTER_LABELS = "ABCDEFGHIJ"
 
 
 def _maybe_append_choices(question: str, rec: dict) -> str:
@@ -172,9 +173,24 @@ def _maybe_append_choices(question: str, rec: dict) -> str:
         return question
     if any(marker in question for marker in _CHOICE_MARKERS):
         return question
-    labels = "ABCDEFGHIJ"
-    lines = [f"({labels[i]}) {c}" for i, c in enumerate(choices) if i < len(labels)]
+    lines = [f"({_LETTER_LABELS[i]}) {c}" for i, c in enumerate(choices) if i < len(_LETTER_LABELS)]
     return question.rstrip() + "\nChoices:\n" + "\n".join(lines)
+
+
+def _maybe_letter_gold(answer, rec: dict) -> tuple[object, object]:
+    """For MCQ benchmarks (MathVista, MMMU, ...) where gold is the choice TEXT
+    rather than a letter, convert gold to the matching letter so the scorer
+    can route to mcq_letter cleanly. Return (new_gold, original_gold)."""
+    choices = rec.get("choices") or rec.get("options")
+    if not choices or not isinstance(choices, list) or answer is None:
+        return answer, None
+    try:
+        idx = choices.index(answer)
+    except ValueError:
+        return answer, None
+    if idx >= len(_LETTER_LABELS):
+        return answer, None
+    return _LETTER_LABELS[idx], answer
 
 
 def _pick_image(rec: dict):
@@ -211,12 +227,15 @@ def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
     )
     question = _maybe_append_choices(question, rec)
     answer = rec.get("answer") or rec.get("label") or rec.get("solution")
+    answer, original_answer = _maybe_letter_gold(answer, rec)
     image_path = _save_image(img, image_dir, benchmark, idx)
     # Drop the PIL image from meta (json.dumps default=str would mangle it)
     meta = {
         k: v for k, v in rec.items()
         if k not in {"image", "images", "decoded_image", "question", "answer"}
     }
+    if original_answer is not None:
+        meta["original_answer"] = original_answer
     return {
         "id": f"{benchmark}/{idx}",
         "benchmark": benchmark,
