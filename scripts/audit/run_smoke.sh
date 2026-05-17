@@ -52,33 +52,12 @@ if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
   EXTRA_ARGS+=(--debug)
 fi
 
-run_pass() {
-  local tag="$1" model="$2" mode="$3"
-  local out="${RUN_DIR}/${tag}.jsonl"
-  if [ -f "${out}" ]; then
-    echo ">>> [${tag}] already exists — skipping"
-    return
-  fi
-  echo ">>> [${tag}] model=${model} mode=${mode}"
-  python -m mllmopd.diagnostics.run_audit_pass \
-    --subset "${SUBSET}" \
-    --model "${model}" \
-    --mode "${mode}" \
-    --out "${out}" \
-    "${EXTRA_ARGS[@]}"
-}
+PASS_TAGS=(T_RL_full              T_RL_blank             S_full                 S_blank                S_text_only)
+PASS_MODELS=("${MMR1_7B_RL_CKPT}" "${MMR1_7B_RL_CKPT}"  "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}")
+PASS_MODES=(full_image            blank_image            full_image             blank_image            text_only)
 
-# Each pass uses one GPU; runs sequentially so they share a single H800.
-CUDA_VISIBLE_DEVICES="${SMOKE_GPU:-0}" \
-  run_pass T_RL_full   "${MMR1_7B_RL_CKPT}"  full_image
-CUDA_VISIBLE_DEVICES="${SMOKE_GPU:-0}" \
-  run_pass T_RL_blank  "${MMR1_7B_RL_CKPT}"  blank_image
-CUDA_VISIBLE_DEVICES="${SMOKE_GPU:-0}" \
-  run_pass S_full      "${MMR1_3B_SFT_CKPT}" full_image
-CUDA_VISIBLE_DEVICES="${SMOKE_GPU:-0}" \
-  run_pass S_blank     "${MMR1_3B_SFT_CKPT}" blank_image
-CUDA_VISIBLE_DEVICES="${SMOKE_GPU:-0}" \
-  run_pass S_text_only "${MMR1_3B_SFT_CKPT}" text_only
+# shellcheck source=../env/_dispatch_passes.sh disable=SC1091
+source scripts/env/_dispatch_passes.sh
 
 # --- Aggregate ---------------------------------------------------------------
 python -m mllmopd.analysis.aggregate_audit \

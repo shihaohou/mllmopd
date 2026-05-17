@@ -35,31 +35,23 @@ if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
   EXTRA_ARGS+=(--debug)
 fi
 
-run() {
-  local tag="$1" model="$2" mode="$3"
-  echo ">>> [${tag}] model=${model} mode=${mode}"
-  python -m mllmopd.diagnostics.run_audit_pass \
-    --subset "${SUBSET}" \
-    --model "${model}" \
-    --mode "${mode}" \
-    --out "${RUN_DIR}/${tag}.jsonl" \
-    "${EXTRA_ARGS[@]}"
-}
+PASS_TAGS=(T_RL_full              T_SFT_full             S_full                 S_blank                T_RL_blank)
+PASS_MODELS=("${MMR1_7B_RL_CKPT}" "${MMR1_7B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_7B_RL_CKPT}")
+PASS_MODES=(full_image            full_image             full_image             blank_image            blank_image)
 
-run "T_RL_full"          "${MMR1_7B_RL_CKPT}"  "full_image"
-run "T_SFT_full"         "${MMR1_7B_SFT_CKPT}" "full_image"
-run "S_full"             "${MMR1_3B_SFT_CKPT}" "full_image"
-run "S_blank"            "${MMR1_3B_SFT_CKPT}" "blank_image"
-run "T_RL_blank"         "${MMR1_7B_RL_CKPT}"  "blank_image"
-
-# Caption-based modes require a captioning pass that's still TODO; gate them
-# behind an explicit env var so a Level-1 run doesn't crash on the first prompt.
+# Caption-based modes are gated behind ENABLE_CAPTION_MODES because the
+# captioning pass that feeds them is still TODO; without that flag the audit
+# would crash on the first caption-only prompt.
 if [ "${ENABLE_CAPTION_MODES:-0}" = "1" ]; then
-  run "S_caption_blank"    "${MMR1_3B_SFT_CKPT}" "caption_only_blank"
-  run "S_image_plus_cap"   "${MMR1_3B_SFT_CKPT}" "image_plus_caption"
+  PASS_TAGS+=(S_caption_blank          S_image_plus_cap)
+  PASS_MODELS+=("${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}")
+  PASS_MODES+=(caption_only_blank       image_plus_caption)
 else
   echo ">>> caption modes skipped (set ENABLE_CAPTION_MODES=1 once captions are present in the subset)"
 fi
+
+# shellcheck source=../env/_dispatch_passes.sh disable=SC1091
+source scripts/env/_dispatch_passes.sh
 
 # Aggregate to per-cell metrics
 python -m mllmopd.analysis.aggregate_audit \
