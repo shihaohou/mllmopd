@@ -65,6 +65,40 @@ BENCHMARK_MIX = {
 }
 
 
+def _open_dataset(local: str, hf_id: str, split: str):
+    """Load a benchmark, trying loaders in order:
+
+    (a) `load_from_disk(local)` when `local` contains `dataset_info.json`
+        — this is the `Dataset.save_to_disk()` format (`data-*.arrow +
+        dataset_info.json + state.json`), produced by e.g. an earlier
+        `ds.save_to_disk(...)` snapshot. **Most of the local MMR1 dataset
+        dumps on the dev box are this format.**
+    (b) `load_dataset(local, split=split)` for a HF repo unpacked on disk.
+    (c) `load_dataset("parquet", data_dir=local)` for a raw parquet dump.
+    (d) `load_dataset(hf_id, split=split)` over the network as a last resort.
+
+    When (a) returns a `DatasetDict`, we pick the matching split or the first
+    available; when it returns a single `Dataset`, we use it as-is (and ignore
+    `split` since `save_to_disk` outputs are already split-specific in practice).
+    """
+    from datasets import Dataset  # type: ignore
+
+    if local and os.path.isdir(local):
+        if os.path.isfile(os.path.join(local, "dataset_info.json")):
+            from datasets import load_from_disk  # type: ignore
+            ds = load_from_disk(local)
+            if hasattr(ds, "keys"):
+                key = split if split in ds else next(iter(ds.keys()))
+                ds = ds[key]
+            return ds
+        try:
+            return load_dataset(local, split=split)
+        except Exception as e:
+            print(f"!! load_dataset({local!r}) failed ({e}); trying parquet fallback", flush=True)
+            return load_dataset("parquet", data_dir=local, split="train")
+    return load_dataset(hf_id, split=split)
+
+
 def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict]:
     """Load `n` records from `name`. Tries $<NAME>_PATH first, falls back to HF id.
     PIL images in the source dataset are persisted under `image_dir/<benchmark>/`
@@ -77,14 +111,8 @@ def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict
 
     hf_id, env_var, split = BENCHMARK_REGISTRY[name]
     local = os.environ.get(env_var, "")
-    if local and os.path.isdir(local):
-        try:
-            ds = load_dataset(local, split=split)
-        except Exception:
-            # local dir is not in HF-loadscript form — try loading parquet/arrow files directly
-            ds = load_dataset("parquet", data_dir=local, split="train")
-    else:
-        ds = load_dataset(hf_id, split=split)
+    ds = _open_dataset(local, hf_id, split)
+    print(f">>> {name}: {len(ds)} rows  ({'local' if local else 'hf'} {local or hf_id})", flush=True)
 
     indices = list(range(len(ds)))
     rng.shuffle(indices)
