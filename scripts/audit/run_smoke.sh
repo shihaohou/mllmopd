@@ -40,7 +40,7 @@ fi
 
 # --- Activate eval env -------------------------------------------------------
 # shellcheck disable=SC1091
-source "${CONDA_PATH}/bin/activate" Uni-OPD-LMMS-Eval
+source scripts/env/_activate.sh
 
 # Ramp-up: set AUDIT_LIMIT=2 AUDIT_DEBUG=1 RUN_ID=debug2 for the first dry run,
 # then AUDIT_LIMIT=20 RUN_ID=debug20, then full 500 (no env vars).

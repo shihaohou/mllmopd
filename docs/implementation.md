@@ -145,15 +145,17 @@ All scripts live under `scripts/`. Permissions: `*.sh` are `chmod +x`; `*.py` ar
 | `devbox_sync.sh` | READY | `git pull --ff-only --recurse-submodules` then `git submodule update --init --recursive`. | dev box, anytime |
 | `switch_to_fork.sh` | READY | Future-use: re-point `third_party/Uni-OPD` submodule from upstream to a personal fork once you start committing changes to OPD reward / loss. Verifies `https://github.com/$GH_USER/Uni-OPD` is reachable. | Mac, once when needed |
 
-### 4.2 `scripts/env/` — conda env builders
+### 4.2 `scripts/env/` — env builders
 
-All three are verbatim transcripts of `third_party/Uni-OPD/docs/{build_env,build_eval_env}.md` with paths sourced from `.env`. No invented commands.
+Three flavors. The audit pipeline needs only one of them; T1 training needs the heavy one.
 
 | Script | Status | Builds | Time |
 |---|---|---|---|
-| `setup_train_env.sh` | READY | conda env `Uni-OPD` — torch 2.9.1+cu128, flash-attn 2.7.4.post1, apex, transformer_engine 2.10.0, Megatron-LM, miles. Calls `apply_patches.sh` at the end. | ~1–2 h |
-| `setup_lmmseval_env.sh` | READY | conda env `Uni-OPD-LMMS-Eval` — vllm, lmms-eval, qwen-vl-utils, math-verify, latex2sympy2_extended, nltk wordnet. | ~30 min |
+| `setup_uv_env.sh` | READY | UV venv on fast local disk (default `/root/shihao_project/mllmopd-env/.venv`) with torch 2.5.1+cu124, transformers 4.49–4.54, qwen-vl-utils, hf-transfer, optional flash-attn 2.7.4 (sm_80). Symlinks `${REPO}/.venv` to the fast-disk venv. **Use this on A800 or any non-H800 box where the upstream Uni-OPD recipe doesn't apply.** | ~5–10 min |
+| `setup_train_env.sh` | READY | conda env `Uni-OPD` — torch 2.9.1+cu128, flash-attn 2.7.4.post1, apex, transformer_engine 2.10.0, Megatron-LM, miles. Calls `apply_patches.sh` at the end. **H800 only** (`TORCH_CUDA_ARCH_LIST=9.0` is wired in upstream). | ~1–2 h |
+| `setup_lmmseval_env.sh` | READY | conda env `Uni-OPD-LMMS-Eval` — vllm, lmms-eval, qwen-vl-utils, math-verify, latex2sympy2_extended, nltk wordnet. Required for **headline lmms-eval numbers at Stage E1**; not needed for the audit pipeline itself. | ~30 min |
 | `apply_patches.sh` | READY | Idempotently `git apply` the two patch files `miles/docker/patch/v0.5.7/{sglang_psp,megatron}.patch`. Detects already-applied via `git apply --reverse --check`. | <1 s |
+| `_activate.sh` | READY | Sourceable helper used by the audit scripts. Picks venv in order: `$MLLMOPD_VENV` → `${REPO}/.venv` → `${CONDA_PATH}/bin/activate ${CONDA_ENV:-Uni-OPD-LMMS-Eval}`. Bails with a clear message if none exists. | — |
 
 ### 4.3 `scripts/data/` — data wrangling
 

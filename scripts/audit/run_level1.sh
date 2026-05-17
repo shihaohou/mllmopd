@@ -23,9 +23,9 @@ if [ ! -f "${SUBSET}" ]; then
   python scripts/data/prep_audit_subset.py --out "${SUBSET}" --size 2000
 fi
 
-# Activate eval env (lmms-eval) for inference
+# Activate eval env (lmms-eval / uv venv)
 # shellcheck disable=SC1091
-source "${CONDA_PATH}/bin/activate" Uni-OPD-LMMS-Eval
+source scripts/env/_activate.sh
 
 EXTRA_ARGS=()
 if [ "${AUDIT_LIMIT:-0}" != "0" ]; then
