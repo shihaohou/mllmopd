@@ -19,6 +19,22 @@ def _model_short(name: str) -> str:
     return name.split("/")[-1] if "/" in name else name
 
 
+_SCORER_ABBR = {
+    "mcq_letter": "mcq",
+    "loose_contains": "loose",
+    "skip_empty_gold": "skip",
+    "skip_missing_image": "noimg",
+    "numeric": "num",
+    "yesno": "y/n",
+}
+
+
+def _scorers_str(d) -> str:
+    if not d:
+        return "-"
+    return " ".join(f"{_SCORER_ABBR.get(k, k)}={v}" for k, v in sorted(d.items()))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run_dir", required=True, type=Path)
@@ -30,8 +46,8 @@ def main() -> None:
     def _f(x):
         return "-" if x is None else (f"{x:.3f}" if isinstance(x, float) else str(x))
 
-    headers = ["model", "mode", "benchmark", "n", "acc", "tokens_mean", "acc/tok"]
-    widths = [22, 20, 16, 5, 6, 11, 9]
+    headers = ["model", "mode", "benchmark", "n", "acc", "tokens_mean", "acc/tok", "scorers"]
+    widths = [14, 18, 18, 5, 6, 11, 9, 30]
     fmt = "  ".join(f"%-{w}s" for w in widths)
     print(fmt % tuple(headers))
     print("-" * (sum(widths) + 2 * (len(widths) - 1)))
@@ -45,6 +61,7 @@ def main() -> None:
             _f(c["accuracy"]),
             _f(c["tokens_mean"]),
             _f(c["acc_per_token"]),
+            _scorers_str(c.get("scorers"))[:widths[7]],
         ))
 
     paired = s.get("paired_full_blank", [])
