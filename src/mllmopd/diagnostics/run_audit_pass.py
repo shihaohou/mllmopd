@@ -26,6 +26,15 @@ from pathlib import Path
 from mllmopd.data import mllm_corruptions
 from mllmopd.diagnostics import scorers
 
+# Every audit mode except text_only needs a real image; if the subset loader
+# couldn't materialize one, skip that prompt with a marker row instead of
+# crashing the whole pass.
+_IMAGE_REQUIRED_MODES = {
+    "full_image", "blank_image",
+    "caption_only_blank", "image_plus_caption", "oracle_caption",
+    "swap_image", "irrelevant_image",
+}
+
 
 def _load_subset(path: Path):
     with path.open() as f:
@@ -106,6 +115,18 @@ def main() -> None:
                 pil_image = image_field
             else:
                 pil_image = None
+
+            if pil_image is None and args.mode in _IMAGE_REQUIRED_MODES:
+                fout.write(json.dumps({
+                    "id": rec["id"], "benchmark": rec["benchmark"],
+                    "mode": args.mode, "model": args.model,
+                    "prediction": "", "num_tokens": 0, "prompt_len": 0,
+                    "gold": rec.get("answer"),
+                    "is_correct": None, "scorer": "skip_missing_image",
+                    "error": "missing_image",
+                }, ensure_ascii=False) + "\n")
+                written += 1
+                continue
 
             transformed, prefix = mllm_corruptions.apply_mode(
                 pil_image,

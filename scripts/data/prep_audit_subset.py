@@ -122,6 +122,25 @@ def _save_image(img, image_dir: Path, benchmark: str, idx) -> str | list[str] | 
     return None
 
 
+_CHOICE_MARKERS = (" A)", " A.", "(A)", "(A.", "\nA)", "\nA.")
+
+
+def _maybe_append_choices(question: str, rec: dict) -> str:
+    """If the benchmark provides MCQ choices that aren't already in the question
+    text, append them with letter labels so the model knows what to pick.
+
+    Conservative: only triggered when `choices` / `options` is a non-empty list
+    AND the question doesn't already show standalone letter markers."""
+    choices = rec.get("choices") or rec.get("options")
+    if not choices or not isinstance(choices, list):
+        return question
+    if any(marker in question for marker in _CHOICE_MARKERS):
+        return question
+    labels = "ABCDEFGHIJ"
+    lines = [f"({labels[i]}) {c}" for i, c in enumerate(choices) if i < len(labels)]
+    return question.rstrip() + "\nChoices:\n" + "\n".join(lines)
+
+
 def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
     """Map heterogeneous benchmark schemas to the audit schema."""
     img = rec.get("image") or rec.get("images") or rec.get("decoded_image")
@@ -132,6 +151,7 @@ def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
         or rec.get("prompt")
         or ""
     )
+    question = _maybe_append_choices(question, rec)
     answer = rec.get("answer") or rec.get("label") or rec.get("solution")
     image_path = _save_image(img, image_dir, benchmark, idx)
     # Drop the PIL image from meta (json.dumps default=str would mangle it)

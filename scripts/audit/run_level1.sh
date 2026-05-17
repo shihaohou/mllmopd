@@ -9,6 +9,9 @@ cd "$(git rev-parse --show-toplevel)"
 source .env
 
 : "${MLLMOPD_RUNS:?}"
+: "${MMR1_7B_RL_CKPT:?}"
+: "${MMR1_7B_SFT_CKPT:?MMR1-7B-SFT not on disk yet; download before running Level-1}"
+: "${MMR1_3B_SFT_CKPT:?}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${MLLMOPD_RUNS}/audit/${RUN_ID}"
@@ -24,6 +27,14 @@ fi
 # shellcheck disable=SC1091
 source "${CONDA_PATH}/bin/activate" Uni-OPD-LMMS-Eval
 
+EXTRA_ARGS=()
+if [ "${AUDIT_LIMIT:-0}" != "0" ]; then
+  EXTRA_ARGS+=(--limit "${AUDIT_LIMIT}")
+fi
+if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
+  EXTRA_ARGS+=(--debug)
+fi
+
 run() {
   local tag="$1" model="$2" mode="$3"
   echo ">>> [${tag}] model=${model} mode=${mode}"
@@ -31,16 +42,24 @@ run() {
     --subset "${SUBSET}" \
     --model "${model}" \
     --mode "${mode}" \
-    --out "${RUN_DIR}/${tag}.jsonl"
+    --out "${RUN_DIR}/${tag}.jsonl" \
+    "${EXTRA_ARGS[@]}"
 }
 
-run "T_RL_full"          "MMR1/MMR1-7B-RL"  "full_image"
-run "T_SFT_full"         "MMR1/MMR1-7B-SFT" "full_image"
-run "S_full"             "MMR1/MMR1-3B-SFT" "full_image"
-run "S_blank"            "MMR1/MMR1-3B-SFT" "blank_image"
-run "T_RL_blank"         "MMR1/MMR1-7B-RL"  "blank_image"
-run "S_caption_blank"    "MMR1/MMR1-3B-SFT" "caption_only_blank"
-run "S_image_plus_cap"   "MMR1/MMR1-3B-SFT" "image_plus_caption"
+run "T_RL_full"          "${MMR1_7B_RL_CKPT}"  "full_image"
+run "T_SFT_full"         "${MMR1_7B_SFT_CKPT}" "full_image"
+run "S_full"             "${MMR1_3B_SFT_CKPT}" "full_image"
+run "S_blank"            "${MMR1_3B_SFT_CKPT}" "blank_image"
+run "T_RL_blank"         "${MMR1_7B_RL_CKPT}"  "blank_image"
+
+# Caption-based modes require a captioning pass that's still TODO; gate them
+# behind an explicit env var so a Level-1 run doesn't crash on the first prompt.
+if [ "${ENABLE_CAPTION_MODES:-0}" = "1" ]; then
+  run "S_caption_blank"    "${MMR1_3B_SFT_CKPT}" "caption_only_blank"
+  run "S_image_plus_cap"   "${MMR1_3B_SFT_CKPT}" "image_plus_caption"
+else
+  echo ">>> caption modes skipped (set ENABLE_CAPTION_MODES=1 once captions are present in the subset)"
+fi
 
 # Aggregate to per-cell metrics
 python -m mllmopd.analysis.aggregate_audit \

@@ -42,6 +42,16 @@ fi
 # shellcheck disable=SC1091
 source "${CONDA_PATH}/bin/activate" Uni-OPD-LMMS-Eval
 
+# Ramp-up: set AUDIT_LIMIT=2 AUDIT_DEBUG=1 RUN_ID=debug2 for the first dry run,
+# then AUDIT_LIMIT=20 RUN_ID=debug20, then full 500 (no env vars).
+EXTRA_ARGS=()
+if [ "${AUDIT_LIMIT:-0}" != "0" ]; then
+  EXTRA_ARGS+=(--limit "${AUDIT_LIMIT}")
+fi
+if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
+  EXTRA_ARGS+=(--debug)
+fi
+
 run_pass() {
   local tag="$1" model="$2" mode="$3"
   local out="${RUN_DIR}/${tag}.jsonl"
@@ -54,7 +64,8 @@ run_pass() {
     --subset "${SUBSET}" \
     --model "${model}" \
     --mode "${mode}" \
-    --out "${out}"
+    --out "${out}" \
+    "${EXTRA_ARGS[@]}"
 }
 
 # Each pass uses one GPU; runs sequentially so they share a single H800.

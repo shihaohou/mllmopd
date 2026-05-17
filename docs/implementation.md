@@ -76,7 +76,15 @@ Driver: `scripts/audit/run_smoke.sh` (READY) + `configs/audit/audit_v0_smoke.yam
 | `S_blank` | MMR1-3B-SFT | blank_image |
 | `S_text_only` | MMR1-3B-SFT | text_only |
 
-Time: ~1–2 h on a single H800. No fine-tuning, no SGLang server, no Megatron.
+Time: ~1–2 h on a single H800 at full 500. Ramp protocol on the dev box, in order:
+
+```bash
+AUDIT_LIMIT=2  AUDIT_DEBUG=1 RUN_ID=debug2  bash scripts/audit/run_smoke.sh   # ~30 s; inspect stderr
+AUDIT_LIMIT=20               RUN_ID=debug20 bash scripts/audit/run_smoke.sh   # ~5 min; sanity-check the table
+                             RUN_ID=smoke500 bash scripts/audit/run_smoke.sh   # full 500
+```
+
+No fine-tuning, no SGLang server, no Megatron.
 
 Output: `$MLLMOPD_RUNS/audit/<run_id>/{*.jsonl, summary.json}`.
 
@@ -162,8 +170,8 @@ All three are verbatim transcripts of `third_party/Uni-OPD/docs/{build_env,build
 
 | Script | Status | What it does |
 |---|---|---|
-| `run_smoke.sh` | READY | Builds smoke subset (500 prompts, MathVista + POPE), runs the 5 passes from §3.1, aggregates, prints table. Reads model + dataset paths from env vars. Hard-codes `CUDA_VISIBLE_DEVICES=${SMOKE_GPU:-0}` for single-GPU sequential. **Recommended cold-start ramp: `--limit 2 --debug`, then `--limit 20`, then `--limit 100`, then full 500.** |
-| `run_level1.sh` | READY-but-slow | Same pattern but 7 passes × 2000 prompts. Includes T_SFT_full plus `S_caption_blank` and `S_image_plus_cap` (the two modes that make H1 quadrant classification possible). Will fail until MMR1-7B-SFT and captions exist (gracefully — single pass exits non-zero, others continue if `set -e` is removed). |
+| `run_smoke.sh` | READY-for-debug | Builds smoke subset, runs the 5 passes from §3.1, aggregates, prints table. Reads model + dataset paths from env vars. Hard-codes `CUDA_VISIBLE_DEVICES=${SMOKE_GPU:-0}` for single-GPU sequential. **Full 500-prompt run must be gated by a successful `AUDIT_LIMIT=2 AUDIT_DEBUG=1` dry-run and an `AUDIT_LIMIT=20` checkpoint** — see §3.1 ramp protocol. |
+| `run_level1.sh` | READY-but-slow | Same pattern but up to 7 passes × 2000 prompts. T_SFT_full requires `MMR1_7B_SFT_CKPT` to point at a real path. The two caption-based modes (`S_caption_blank`, `S_image_plus_cap`) are gated behind `ENABLE_CAPTION_MODES=1` because the captioning pass that feeds them is still TODO; without that flag, Level-1 runs the 5 non-caption passes. Inherits `AUDIT_LIMIT` / `AUDIT_DEBUG` from the same env-var convention as the smoke script. |
 
 ### 4.5 `scripts/train/` — OPD training (Stage T1)
 
