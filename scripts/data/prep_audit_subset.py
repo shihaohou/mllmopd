@@ -242,12 +242,13 @@ def main() -> None:
     if args.only:
         # Treat --only as a uniform mix over the named benchmarks. This lets us
         # request POPE_adversarial / VLMBias / etc. without them being in the
-        # default math/reasoning BENCHMARK_MIX.
-        only_set = set(args.only)
-        unknown = only_set - set(BENCHMARK_REGISTRY)
+        # default math/reasoning BENCHMARK_MIX. dict.fromkeys preserves the
+        # user-supplied order; set() would randomize it via hash randomization.
+        only_keys = list(dict.fromkeys(args.only))
+        unknown = [k for k in only_keys if k not in BENCHMARK_REGISTRY]
         if unknown:
-            raise SystemExit(f"Unknown benchmark(s) in --only: {sorted(unknown)}")
-        weights = {k: 1.0 / len(only_set) for k in only_set}
+            raise SystemExit(f"Unknown benchmark(s) in --only: {unknown}")
+        weights = {k: 1.0 / len(only_keys) for k in only_keys}
     else:
         weights = BENCHMARK_MIX
 
@@ -256,12 +257,24 @@ def main() -> None:
     for k, v in plan.items():
         print(f"    {k:<16s} {v}")
 
+    # Collect every benchmark's normalized records, then shuffle across
+    # benchmarks before writing so that `run_audit_pass --limit N` gets a
+    # mixed sample instead of just the first benchmark's rows. Within each
+    # benchmark, load_records() already shuffles indices.
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    all_rows: list[dict] = []
+    for bench, n in plan.items():
+        all_rows.extend(load_records(bench, n, seed=args.seed, image_dir=image_dir))
+    random.Random(args.seed).shuffle(all_rows)
+
+    counts: dict[str, int] = {}
     with args.out.open("w") as f:
-        for bench, n in plan.items():
-            for rec in load_records(bench, n, seed=args.seed, image_dir=image_dir):
-                f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
-    print(f">>> Wrote {args.out}  (images under {image_dir})")
+        for rec in all_rows:
+            counts[rec["benchmark"]] = counts.get(rec["benchmark"], 0) + 1
+            f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
+    print(f">>> Wrote {args.out}  ({len(all_rows)} rows, images under {image_dir})")
+    for bench, n in sorted(counts.items()):
+        print(f"    {bench:<20s} {n}")
 
 
 if __name__ == "__main__":
