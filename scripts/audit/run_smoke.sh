@@ -26,6 +26,10 @@ mkdir -p "${RUN_DIR}"
 SUBSET="${SUBSET:-${MLLMOPD_DATA}/audit/smoke_subset_v0.jsonl}"
 mkdir -p "$(dirname "${SUBSET}")"
 
+# --- Activate eval env (must happen BEFORE subset build, which needs `datasets`)
+# shellcheck disable=SC1091
+source scripts/env/_activate.sh
+
 # --- Build subset ------------------------------------------------------------
 if [ ! -f "${SUBSET}" ]; then
   echo ">>> Building smoke subset at ${SUBSET}"
@@ -37,10 +41,6 @@ if [ ! -f "${SUBSET}" ]; then
 else
   echo ">>> Reusing subset at ${SUBSET}"
 fi
-
-# --- Activate eval env -------------------------------------------------------
-# shellcheck disable=SC1091
-source scripts/env/_activate.sh
 
 # Ramp-up: set AUDIT_LIMIT=2 AUDIT_DEBUG=1 RUN_ID=debug2 for the first dry run,
 # then AUDIT_LIMIT=20 RUN_ID=debug20, then full 500 (no env vars).

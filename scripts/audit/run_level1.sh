@@ -17,15 +17,15 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${MLLMOPD_RUNS}/audit/${RUN_ID}"
 mkdir -p "${RUN_DIR}"
 
+# Activate eval env (must happen BEFORE subset build, which needs `datasets`)
+# shellcheck disable=SC1091
+source scripts/env/_activate.sh
+
 SUBSET="${SUBSET:-data/audit/audit_subset_v0.jsonl}"
 if [ ! -f "${SUBSET}" ]; then
   echo "Building audit subset at ${SUBSET}"
   python scripts/data/prep_audit_subset.py --out "${SUBSET}" --size 2000
 fi
-
-# Activate eval env (lmms-eval / uv venv)
-# shellcheck disable=SC1091
-source scripts/env/_activate.sh
 
 EXTRA_ARGS=()
 if [ "${AUDIT_LIMIT:-0}" != "0" ]; then
