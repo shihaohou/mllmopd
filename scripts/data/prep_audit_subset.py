@@ -116,6 +116,14 @@ def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict
 
     indices = list(range(len(ds)))
     rng.shuffle(indices)
+    if indices:
+        # One-shot schema sniff: print field types of the first row so the
+        # next time some benchmark stores `image` as a relative path string,
+        # or `answer` as a list, we see it before generation, not at audit time.
+        sample = ds[indices[0]]
+        print(f">>> {name} fields: " + ", ".join(
+            f"{k}={type(v).__name__}" for k, v in sample.items()
+        ), flush=True)
     for idx in indices[:n]:
         rec = ds[idx]
         yield _normalize(name, idx, rec, image_dir)
@@ -169,9 +177,31 @@ def _maybe_append_choices(question: str, rec: dict) -> str:
     return question.rstrip() + "\nChoices:\n" + "\n".join(lines)
 
 
+def _pick_image(rec: dict):
+    """Pick the best image representation across benchmark schemas.
+
+    MathVista ships BOTH `image` (relative string like "images/657.jpg",
+    which is meaningless without knowing the dataset root) and `decoded_image`
+    (the actual PIL). POPE ships `image` directly as PIL. Always prefer a
+    PIL-bearing field; only fall back to a string when nothing else exists.
+    """
+    string_fallback = None
+    for key in ("decoded_image", "image", "images"):
+        c = rec.get(key)
+        if c is None:
+            continue
+        if hasattr(c, "save"):
+            return c
+        if isinstance(c, list) and c and hasattr(c[0], "save"):
+            return c
+        if string_fallback is None and isinstance(c, str):
+            string_fallback = c
+    return string_fallback
+
+
 def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
     """Map heterogeneous benchmark schemas to the audit schema."""
-    img = rec.get("image") or rec.get("images") or rec.get("decoded_image")
+    img = _pick_image(rec)
     question = (
         rec.get("question")
         or rec.get("query")
