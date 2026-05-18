@@ -38,16 +38,27 @@ for sub in Uni-OPD Megatron-LM sglang lmms-eval; do
   fi
 done
 
-# --- Scratch dirs ------------------------------------------------------------
+# --- Output dirs -------------------------------------------------------------
 mkdir -p "${HF_HOME}" "${MLLMOPD_RUNS}" "${MLLMOPD_DATA}"
-echo ">>> Scratch dirs ready under /scratch/${USER}"
+echo ">>> Output dirs ready (runs / data / hf_cache)"
 
-# Symlink mllmopd/{runs,data,models} -> scratch so local tooling can `ls runs/`
-ln -sfn "${MLLMOPD_RUNS}"  "${MLLMOPD_ROOT}/runs"
-ln -sfn "${MLLMOPD_DATA}"  "${MLLMOPD_ROOT}/data"
-ln -sfn "${HF_HOME}"        "${MLLMOPD_ROOT}/models"
-
-echo ">>> Symlinked: runs/  data/  models/  ->  scratch"
+# Symlink ${REPO}/{runs,data,models} -> canonical location, but only if they
+# differ from the canonical location (otherwise we'd make a self-referencing
+# symlink). This lets users either keep runs/data inside the repo (default)
+# or point them at a separate fast disk.
+_maybe_link() {
+  local target="$1" name="$2"
+  local link="${MLLMOPD_ROOT}/${name}"
+  if [ "$(readlink -f "${target}" 2>/dev/null)" = "$(readlink -f "${link}" 2>/dev/null || echo NONE)" ]; then
+    echo ">>> ${name}/ is already at ${target}; no symlink needed"
+    return
+  fi
+  ln -sfn "${target}" "${link}"
+  echo ">>> symlinked ${link} -> ${target}"
+}
+_maybe_link "${MLLMOPD_RUNS}" runs
+_maybe_link "${MLLMOPD_DATA}" data
+_maybe_link "${HF_HOME}" models
 
 cat <<EOF
 
