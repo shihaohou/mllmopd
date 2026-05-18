@@ -471,6 +471,7 @@ Honest list, in order of how likely each is to bite us.
 
 15. **No CI / no tests.** Acceptable while the repo is < 5 KLOC of glue; the moment we add a real OPD reward variant, we should add a couple of golden-output tests for `visual_dependency.vis_dep_generated`, `mllm_corruptions.apply_mode`, and the new `diagnostics.scorers` dispatcher.
 16. **Submodule pinning for nested submodules.** `Megatron-LM` has its own submodules that are NOT initialized by `git clone --recurse-submodules`. The build script does an explicit `git clone --recursive` in upstream docs; our `setup_train_env.sh` skips that because we use submodules. Will fail at compile of Apex's CUDA extensions unless we add a `cd third_party/Megatron-LM && git submodule update --init --recursive` step.
+17. **Reboot-volatile disk on the container devbox.** Lesson burned on 2026-05-18: an earlier `.env.example` put `MLLMOPD_RUNS` and `MLLMOPD_DATA` under `/root/shihao_project/` because that's the fast nvme. The container's nvme gets wiped on reboot, so the `smoke500` results disappeared with it. The current `.env.example` puts runs/data under NFS (`/home/web_server/...`) and explicitly comments which paths must be persistent vs may be volatile. Venv + HF cache are still on nvme — those are cheap to rebuild.
 
 ---
 
