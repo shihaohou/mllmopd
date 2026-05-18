@@ -107,7 +107,11 @@ uv pip install \
     "qwen-vl-utils" \
     "hf-transfer"
 
-echo ">>> Installing flash-attn (sm_80 prebuilt wheel; skipping on failure)..."
+echo ">>> Installing flash-attn (sm_80; --no-build-isolation needs `wheel` pre-installed)..."
+# --no-build-isolation reuses our venv torch (avoids the NGC-torch ABI leak
+# described in docs/migrate-env.md Q2), but it also skips auto-install of
+# wheel / ninja / packaging — we have to provide them ourselves.
+uv pip install wheel ninja packaging
 uv pip install --no-build-isolation "flash-attn==2.7.4.post1" \
   || echo ">>> flash-attn unavailable; runtime falls back to sdpa attention"
 
