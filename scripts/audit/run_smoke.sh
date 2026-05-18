@@ -51,6 +51,9 @@ fi
 if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
   EXTRA_ARGS+=(--debug)
 fi
+if [ "${AUDIT_BATCH:-1}" != "1" ]; then
+  EXTRA_ARGS+=(--batch-size "${AUDIT_BATCH}")
+fi
 
 PASS_TAGS=(T_RL_full              T_RL_blank             S_full                 S_blank                S_text_only)
 PASS_MODELS=("${MMR1_7B_RL_CKPT}" "${MMR1_7B_RL_CKPT}"  "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}")
