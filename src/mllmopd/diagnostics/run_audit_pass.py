@@ -79,6 +79,114 @@ def _build_model(model_id: str):
     return processor, model
 
 
+def _build_messages(rec: dict, transformed, prefix):
+    """Build the chat-template message list for a single sample."""
+    question = rec.get("question", "")
+    if prefix:
+        question = prefix + question
+    return [{
+        "role": "user",
+        "content": [
+            *([{"type": "image", "image": transformed}] if transformed is not None else []),
+            {"type": "text", "text": question},
+        ],
+    }]
+
+
+def _emit_skip_missing_image(rec: dict, args, fout):
+    fout.write(json.dumps({
+        "id": rec["id"], "benchmark": rec["benchmark"],
+        "mode": args.mode, "model": args.model,
+        "prediction": "", "num_tokens": 0, "prompt_len": 0,
+        "gold": rec.get("answer"),
+        "is_correct": None, "scorer": "skip_missing_image",
+        "error": "missing_image",
+    }, ensure_ascii=False) + "\n")
+    fout.flush()
+    os.fsync(fout.fileno())
+
+
+def _emit_row(rec: dict, args, fout, pred: str, num_tok: int, prompt_len: int):
+    is_correct, scorer_used = scorers.score_for_benchmark(
+        rec["benchmark"], pred, rec.get("answer"),
+    )
+    row = {
+        "id": rec["id"],
+        "benchmark": rec["benchmark"],
+        "mode": args.mode,
+        "model": args.model,
+        "prediction": pred,
+        "num_tokens": int(num_tok),
+        "prompt_len": int(prompt_len),
+        "gold": rec.get("answer"),
+        "is_correct": is_correct,
+        "scorer": scorer_used,
+    }
+    fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+    fout.flush()
+    os.fsync(fout.fileno())
+    return is_correct, scorer_used
+
+
+def _process_batch(processor, model, args, batch, fout):
+    """batch: list of (rec, transformed, prefix). Runs one batched generate(),
+    emits JSONL rows for each sample. Returns the number of rows written."""
+    if not batch:
+        return 0
+
+    import torch  # noqa: F401
+
+    chats = [
+        processor.apply_chat_template(_build_messages(rec, t, p),
+                                      add_generation_prompt=True, tokenize=False)
+        for rec, t, p in batch
+    ]
+    images = [t for _, t, _ in batch if t is not None]
+
+    # Left-pad so generated tokens line up across the batch.
+    processor.tokenizer.padding_side = "left"
+    if processor.tokenizer.pad_token_id is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+
+    inputs = processor(
+        text=chats,
+        images=images if images else None,
+        return_tensors="pt",
+        padding=True,
+    ).to(model.device)
+
+    out_ids = model.generate(
+        **inputs,
+        max_new_tokens=args.max_new_tokens,
+        do_sample=False,
+        pad_token_id=processor.tokenizer.pad_token_id,
+    )
+
+    input_len = inputs["input_ids"].shape[1]
+    eos_id = processor.tokenizer.eos_token_id
+
+    for i, (rec, transformed, prefix) in enumerate(batch):
+        gen_ids = out_ids[i, input_len:]
+        # Trim at first EOS so num_tokens reflects real output, not padding.
+        if eos_id is not None:
+            eos_positions = (gen_ids == eos_id).nonzero(as_tuple=True)[0]
+            if len(eos_positions) > 0:
+                gen_ids = gen_ids[:eos_positions[0].item() + 1]
+        num_tok = int(gen_ids.shape[0])
+        pred = processor.decode(gen_ids, skip_special_tokens=True)
+        # Per-sample real prompt length (un-padded).
+        sample_attn = inputs["attention_mask"][i]
+        real_prompt_len = int(sample_attn.sum().item())
+        is_correct, scorer_used = _emit_row(rec, args, fout, pred, num_tok, real_prompt_len)
+        if args.debug:
+            print(f"=== [{rec['id']}] mode={args.mode} ===", file=sys.stderr)
+            print(f"PROMPT: {chats[i]!r}", file=sys.stderr)
+            print(f"PREDICTION: {pred!r}", file=sys.stderr)
+            print(f"GOLD: {rec.get('answer')!r}  ->  is_correct={is_correct} via {scorer_used}",
+                  file=sys.stderr)
+    return len(batch)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset", required=True, type=Path)
@@ -92,6 +200,9 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit")
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="K prompts per generate() call. K=4-8 on 80GB A800 is "
+                         "usually safe for 7B bf16 and gives 3-5x throughput.")
     ap.add_argument("--debug", action="store_true",
                     help="dump prompt + raw generation + scoring to stderr (use with --limit 2)")
     args = ap.parse_args()
@@ -101,9 +212,11 @@ def main() -> None:
 
     written = 0
     t0 = time.time()
+    batch: list = []
+
     with args.out.open("w") as fout:
         for rec in _load_subset(args.subset):
-            if args.limit and written >= args.limit:
+            if args.limit and written + len(batch) >= args.limit:
                 break
 
             image_field = rec.get("image")
@@ -115,22 +228,12 @@ def main() -> None:
                 try:
                     pil_image = mllm_corruptions.load(image_field)
                 except Exception as e:
-                    # Truncated/corrupt PNG, missing file, unreadable codec —
-                    # log and let the IMAGE_REQUIRED check below emit a skip
-                    # marker row, so one bad image doesn't kill the whole pass.
                     print(f"!! could not load image {image_field}: {e}", file=sys.stderr)
             elif hasattr(image_field, "convert"):
                 pil_image = image_field
 
             if pil_image is None and args.mode in _IMAGE_REQUIRED_MODES:
-                fout.write(json.dumps({
-                    "id": rec["id"], "benchmark": rec["benchmark"],
-                    "mode": args.mode, "model": args.model,
-                    "prediction": "", "num_tokens": 0, "prompt_len": 0,
-                    "gold": rec.get("answer"),
-                    "is_correct": None, "scorer": "skip_missing_image",
-                    "error": "missing_image",
-                }, ensure_ascii=False) + "\n")
+                _emit_skip_missing_image(rec, args, fout)
                 written += 1
                 continue
 
@@ -139,57 +242,22 @@ def main() -> None:
                 args.mode,
                 caption=rec.get("meta", {}).get("caption"),
             )
-            question = rec.get("question", "")
-            if prefix:
-                question = prefix + question
+            batch.append((rec, transformed, prefix))
 
-            messages = [{
-                "role": "user",
-                "content": [
-                    *([{"type": "image", "image": transformed}] if transformed is not None else []),
-                    {"type": "text", "text": question},
-                ],
-            }]
-            chat = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            inputs = processor(text=[chat],
-                               images=[transformed] if transformed is not None else None,
-                               return_tensors="pt").to(model.device)
+            if len(batch) >= args.batch_size:
+                written += _process_batch(processor, model, args, batch, fout)
+                batch.clear()
+                if written // 25 != (written - args.batch_size) // 25:
+                    rate = written / max(1.0, time.time() - t0)
+                    print(f"... {written} ({rate:.2f}/s)", file=sys.stderr)
 
-            out_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, do_sample=False)
-            prompt_len = inputs["input_ids"].shape[1]
-            gen_ids = out_ids[0, prompt_len:]
-            pred = processor.decode(gen_ids, skip_special_tokens=True)
+        # Trailing partial batch
+        if batch:
+            written += _process_batch(processor, model, args, batch, fout)
+            batch.clear()
 
-            is_correct, scorer_used = scorers.score_for_benchmark(
-                rec["benchmark"], pred, rec.get("answer"),
-            )
-            row = {
-                "id": rec["id"],
-                "benchmark": rec["benchmark"],
-                "mode": args.mode,
-                "model": args.model,
-                "prediction": pred,
-                "num_tokens": int(gen_ids.shape[0]),
-                "prompt_len": int(prompt_len),
-                "gold": rec.get("answer"),
-                "is_correct": is_correct,
-                "scorer": scorer_used,
-            }
-            fout.write(json.dumps(row, ensure_ascii=False) + "\n")
-            fout.flush()                  # Python buffer -> OS
-            os.fsync(fout.fileno())       # OS buffer -> disk/NFS server
-            written += 1
-            if args.debug:
-                print(f"=== [{rec['id']}] mode={args.mode} ===", file=sys.stderr)
-                print(f"PROMPT: {chat!r}", file=sys.stderr)
-                print(f"PREDICTION: {pred!r}", file=sys.stderr)
-                print(f"GOLD: {rec.get('answer')!r}  ->  is_correct={is_correct} via {scorer_used}",
-                      file=sys.stderr)
-            if written % 25 == 0:
-                rate = written / max(1.0, time.time() - t0)
-                print(f"... {written} ({rate:.2f}/s)", file=sys.stderr)
-
-    print(f">>> wrote {written} -> {args.out}")
+    rate = written / max(1.0, time.time() - t0)
+    print(f">>> wrote {written} -> {args.out}  ({rate:.2f} prompts/s overall)")
 
 
 if __name__ == "__main__":
