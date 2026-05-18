@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -175,7 +176,8 @@ def main() -> None:
                 "scorer": scorer_used,
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
-            fout.flush()  # so `wc -l` and `tail` see records in real time
+            fout.flush()                  # Python buffer -> OS
+            os.fsync(fout.fileno())       # OS buffer -> disk/NFS server
             written += 1
             if args.debug:
                 print(f"=== [{rec['id']}] mode={args.mode} ===", file=sys.stderr)
