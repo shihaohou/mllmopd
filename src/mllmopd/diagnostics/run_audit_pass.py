@@ -175,6 +175,7 @@ def main() -> None:
                 "scorer": scorer_used,
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fout.flush()  # so `wc -l` and `tail` see records in real time
             written += 1
             if args.debug:
                 print(f"=== [{rec['id']}] mode={args.mode} ===", file=sys.stderr)
