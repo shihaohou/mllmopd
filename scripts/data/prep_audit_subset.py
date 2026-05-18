@@ -149,10 +149,21 @@ def _save_image(img, image_dir: Path, benchmark: str, idx) -> str | list[str] | 
         sub.mkdir(parents=True, exist_ok=True)
         path = sub / f"{idx}.png"
         if not path.exists():
+            # Atomic write: save to .tmp then rename. If we're interrupted
+            # mid-write the .tmp file is orphaned but `path` doesn't exist,
+            # so the next run rebuilds it cleanly instead of leaving a
+            # truncated PNG that the audit later trips over.
+            tmp = path.with_suffix(path.suffix + ".tmp")
             try:
-                img.convert("RGB").save(path, format="PNG")
+                img.convert("RGB").save(tmp, format="PNG")
+                os.replace(tmp, path)
             except Exception as e:
                 print(f"!! could not save {benchmark}/{idx}: {e}", flush=True)
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
                 return None
         return str(path)
     return None

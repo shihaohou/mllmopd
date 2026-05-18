@@ -109,12 +109,17 @@ def main() -> None:
             if isinstance(image_field, list) and image_field:
                 # multi-image not supported yet — take the first
                 image_field = image_field[0]
+            pil_image = None
             if isinstance(image_field, (str, Path)):
-                pil_image = mllm_corruptions.load(image_field)
+                try:
+                    pil_image = mllm_corruptions.load(image_field)
+                except Exception as e:
+                    # Truncated/corrupt PNG, missing file, unreadable codec —
+                    # log and let the IMAGE_REQUIRED check below emit a skip
+                    # marker row, so one bad image doesn't kill the whole pass.
+                    print(f"!! could not load image {image_field}: {e}", file=sys.stderr)
             elif hasattr(image_field, "convert"):
                 pil_image = image_field
-            else:
-                pil_image = None
 
             if pil_image is None and args.mode in _IMAGE_REQUIRED_MODES:
                 fout.write(json.dumps({
