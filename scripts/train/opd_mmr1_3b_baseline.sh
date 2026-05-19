@@ -250,6 +250,38 @@ echo ">>> parallelism: ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}  TP=${
 SAVE_INTERVAL="${SAVE_INTERVAL:-50}"  # ~5 ckpts over 250 steps; recoverable on crash
 DEBUG_MODE="${DEBUG_MODE:-0}"
 
+# --- Train actor env override (smoke #14 root cause analysis) ---
+# Uni-OPD's miles/ray/actor_group.py sets
+# `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` (plus 6 sibling
+# NOSET_*_VISIBLE_DEVICES flags) on every train actor by default.
+# Those flags tell Ray "don't rewrite CUDA_VISIBLE_DEVICES inside the
+# actor", which means each actor inherits the launcher's full
+# `CUDA_VISIBLE_DEVICES=1,2,3,4` and sees device_count==4. Four ranks
+# then end up logically on the same cuda:0, and any NCCL collective
+# (e.g., the first all_gather_object inside _get_param_groups) fails
+# because they're all on the same physical GPU.
+#
+# Override the NOSET flags to empty strings via Uni-OPD's
+# `--train-env-vars` JSON argument, so Ray DOES perform its normal
+# per-actor CUDA_VISIBLE_DEVICES rewrite. Each actor then sees exactly
+# one logical GPU.
+TRAIN_ENV_VARS_JSON="${TRAIN_ENV_VARS_JSON:-$(python -c '
+import json
+print(json.dumps({
+    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "",
+    "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "",
+    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "",
+    "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES": "",
+    "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES": "",
+    "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS": "",
+    "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR": "",
+}))
+')}"
+TRAIN_ENV_ARGS=(
+  --train-env-vars "${TRAIN_ENV_VARS_JSON}"
+  --num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}"
+)
+
 # --- Custom reward (T1 dual-teacher) ---
 RM_ARGS=(
   --custom-rm-path mllmopd.training.dual_teacher_get_reward.get_reward
@@ -339,6 +371,15 @@ MISC_ARGS=(
   --attention-softmax-in-fp32
   --attention-backend flash
   --colocate
+  # Smoke #14 root cause analysis: --colocate defaults --offload-train
+  # to True; with that, miles/ray/actor_group.py injects
+  # `LD_PRELOAD=...torch_memory_saver_hook_mode_preload.abi3.so` into
+  # every train actor's runtime_env. The TMS hook intercepts cudaMalloc
+  # and breaks NCCL's collective allocations, producing the misleading
+  # "ncclUnhandledCudaError: CUDA driver insufficient" we've been
+  # chasing for hours. Disable offload for now — re-enable later if
+  # full run OOMs.
+  --no-offload-train
   # Apex's `fused_weight_gradient_mlp_cuda` extension isn't compiled in
   # this venv (we'd need `pip install --global-option=... apex` with
   # CUDA toolchain). Megatron defaults to gradient_accumulation_fusion=True
@@ -449,6 +490,7 @@ python "${LAUNCHER_SCRIPT}" train.py \
     --actor-num-nodes "${ACTOR_NUM_NODES}" \
     --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}" \
+    "${TRAIN_ENV_ARGS[@]}" \
     "${TENSORBOARD_ARGS[@]}" \
     "${OPTIMIZER_ARGS[@]}" \
     "${ROLLOUT_ARGS[@]}" \
