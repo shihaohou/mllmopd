@@ -58,10 +58,21 @@ if ! python -c "import sglang" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Memory knobs. The pre-G1 score_completion defaults (mem_fraction=0.85,
+# max_running=64) OOM'd on A800-80GB even though there's only ~96k tokens
+# of forced-decode work total — sglang grabs static reservation up front
+# plus per-request KV cache. Conservative defaults below; override via env
+# for tuning. `expandable_segments` helps fragmentation if KV cache churns.
+MEM_FRACTION="${MEM_FRACTION:-0.70}"
+MAX_RUNNING_REQUESTS="${MAX_RUNNING_REQUESTS:-16}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 echo ">>> rerun_h2_sysprompt: scoring ${SOURCE} against opd_target_ids.json"
 echo ">>> output: ${OUT_SCORED}"
 echo ">>> using MMR1_SYSTEM_PROMPT (first 60 chars):"
 echo "    ${MMR1_SYSTEM_PROMPT:0:60}..."
+echo ">>> mem_fraction=${MEM_FRACTION}  max_running_requests=${MAX_RUNNING_REQUESTS}"
+echo ">>> PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
 
 # Forced-decode rerun. Both --system-prompt-text and --id-filter are
 # the post-G1 additions to score_completion.py.
@@ -71,6 +82,8 @@ python -m mllmopd.diagnostics.score_completion \
   --model "${MMR1_7B_RL_CKPT}" \
   --system-prompt-text "${MMR1_SYSTEM_PROMPT}" \
   --id-filter "${ID_FILTER}" \
+  --mem-fraction "${MEM_FRACTION}" \
+  --max-running-requests "${MAX_RUNNING_REQUESTS}" \
   --out "${OUT_SCORED}"
 
 echo
