@@ -62,54 +62,47 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
-# Per docs/common-pitfalls.md E1 + smoke-#10 follow-up: the NGC base
-# image ships system NCCL 2.29.7 at /usr/lib/x86_64-linux-gnu/libnccl.so.2
-# via ld.so.cache, and that lib is incompatible with driver 535. The
-# venv has its own NCCL 2.27.5 at .venv/lib/python3.12/site-packages/
-# nvidia/nccl/lib/libnccl.so.2 (= the version torch 2.9.1+cu128 was
-# compiled against), but it loses the dlopen race because it's not on
-# LD_LIBRARY_PATH while the system one is in ld.so.cache.
+# NGC base image provides CUDA forward-compat at /usr/local/cuda-12.9/compat/lib.real
+# (with /usr/local/cuda/compat/lib as a symlink to it). Driver 535.129 cannot
+# run cu128 runtime without this compat layer. Independent diagnostic
+# (smoke #11) confirmed:
+#   - torch 2.9.1+cu128 ships its own bundled NCCL 2.27.5 + cuDNN at
+#     .venv/lib/python3.12/site-packages/nvidia/*/lib/. Those libs win
+#     dlopen via libtorch_cuda.so's DT_RPATH, which is HIGHER priority
+#     than LD_LIBRARY_PATH or ld.so.cache. No LD prepending needed.
+#   - In a normal login shell the compat-lib is auto-injected by the
+#     NGC image init (somewhere under /etc/profile.d or similar). But
+#     `ray start --head` daemonizes the raylet at the moment of invocation,
+#     and Ray actor processes inherit env from THAT moment. If LD_LIBRARY_PATH
+#     lacks compat-lib when ray start fires, every actor on this raylet
+#     gets a CUDA context where libcudart's symbol resolution fails on
+#     driver 535. NCCL collective ops then bail with the misleading
+#     "CUDA driver version is insufficient" error.
 #
-# Two-step fix:
-#   (a) Surgically strip NGC sys-torch dirs from LD_LIBRARY_PATH so
-#       NGC torch's libs don't sneak back in. Keep /usr/local/cuda/compat
-#       (required for cu128 runtime on driver 535) and /usr/local/nvidia
-#       (driver libs).
-#   (b) Prepend the venv's bundled nvidia/* lib dirs (NCCL, cuDNN,
-#       cublas, ...) so dlopen finds them BEFORE ld.so.cache. This is
-#       the deterministic fix for the "system 2.29.7 vs venv 2.27.5"
-#       mismatch — the system NCCL never gets a chance.
+# Minimal correct fix: ensure compat lib.real (plus its symlink for
+# belt-and-suspenders) is in LD_LIBRARY_PATH BEFORE `ray start`. Don't
+# touch anything else — torch's DT_RPATH handles venv NCCL/cuDNN on its
+# own.
+COMPAT_LIB_REAL=""
+for d in /usr/local/cuda-12.9/compat/lib.real /usr/local/cuda-12.8/compat/lib.real /usr/local/cuda/compat/lib.real; do
+  [ -d "${d}" ] && COMPAT_LIB_REAL="${d}" && break
+done
+COMPAT_LIB_SYMLINK=""
+[ -d /usr/local/cuda/compat/lib ] && COMPAT_LIB_SYMLINK="/usr/local/cuda/compat/lib"
+
 LD_BEFORE="${LD_LIBRARY_PATH:-(unset)}"
-if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
-      | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
-      | tr '\n' ':' | sed 's/:$//')
+COMPAT_PREFIX=""
+[ -n "${COMPAT_LIB_REAL}" ] && COMPAT_PREFIX="${COMPAT_LIB_REAL}"
+[ -n "${COMPAT_LIB_SYMLINK}" ] && COMPAT_PREFIX="${COMPAT_PREFIX:+${COMPAT_PREFIX}:}${COMPAT_LIB_SYMLINK}"
+if [ -n "${COMPAT_PREFIX}" ]; then
+  LD_LIBRARY_PATH="${COMPAT_PREFIX}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export LD_LIBRARY_PATH
 fi
-# Discover venv-bundled nvidia/* libs (defensive: only prepend ones that
-# actually exist in this venv's site-packages).
-VENV_SITE=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || true)
-VENV_BUNDLED=()
-if [ -n "${VENV_SITE}" ]; then
-  for d in \
-      "${VENV_SITE}/nvidia/nccl/lib" \
-      "${VENV_SITE}/nvidia/cudnn/lib" \
-      "${VENV_SITE}/nvidia/cublas/lib" \
-      "${VENV_SITE}/nvidia/cusolver/lib" \
-      "${VENV_SITE}/nvidia/cuda_runtime/lib" \
-      "${VENV_SITE}/nvidia/cuda_nvrtc/lib" \
-      "${VENV_SITE}/torch/lib" \
-  ; do
-    [ -d "${d}" ] && VENV_BUNDLED+=("${d}")
-  done
-fi
-if [ "${#VENV_BUNDLED[@]}" -gt 0 ]; then
-  BUNDLED_PREFIX=$(IFS=:; echo "${VENV_BUNDLED[*]}")
-  LD_LIBRARY_PATH="${BUNDLED_PREFIX}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-fi
-export LD_LIBRARY_PATH
-echo ">>> LD_LIBRARY_PATH rewrite (per E1 + smoke-#10):"
-echo "    before: ${LD_BEFORE}"
-echo "    after : ${LD_LIBRARY_PATH:-(empty)}"
+echo ">>> CUDA forward-compat prepended (driver 535 ↔ cu128 runtime):"
+echo "    compat real    : ${COMPAT_LIB_REAL:-(not found)}"
+echo "    compat symlink : ${COMPAT_LIB_SYMLINK:-(not found)}"
+echo "    LD_LIBRARY_PATH before : ${LD_BEFORE}"
+echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
