@@ -210,7 +210,12 @@ def main() -> None:
         "oracle_caption",  # back-compat alias for caption_only_blank
     ])
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
+    ap.add_argument("--max-new-tokens", type=int, default=4096,
+                    help="Generation cap. MMR1-style long-CoT models commonly need "
+                         "2-4k+ tokens to reach their final-answer phrase; the original "
+                         "1024 default truncated ~60% of MathVision and ~30% of MathVerse "
+                         "outputs before the answer was emitted, artificially depressing "
+                         "their measured accuracy.")
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit")
     ap.add_argument("--batch-size", type=int, default=1,
                     help="K prompts per generate() call. K=4-8 on 80GB A800 is "

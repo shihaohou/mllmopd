@@ -51,6 +51,12 @@ fi
 if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
   EXTRA_ARGS+=(--debug)
 fi
+# Override generation cap. Long-CoT models (MMR1-style) need 2-4k+; the prior
+# 1024 default was truncating 30-60% of math-bench outputs before the final
+# answer was emitted, so the runner defaults are now 4096.
+if [ -n "${AUDIT_MAX_NEW_TOKENS:-}" ]; then
+  EXTRA_ARGS+=(--max-new-tokens "${AUDIT_MAX_NEW_TOKENS}")
+fi
 
 # Backend selection: AUDIT_BACKEND=sglang switches to the sglang engine path
 # (must be in train venv). AUDIT_BATCH means different things per backend:

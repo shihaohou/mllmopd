@@ -171,7 +171,10 @@ def main() -> None:
         "oracle_caption",
     ])
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
+    ap.add_argument("--max-new-tokens", type=int, default=4096,
+                    help="Generation cap. MMR1-style long-CoT models commonly need "
+                         "2-4k+ tokens to reach their final-answer phrase; 1024 truncated "
+                         "majority of MathVision / MathVerse outputs before the answer.")
     ap.add_argument("--limit", type=int, default=0, help="0 = no limit; use 4 for smoke test")
     ap.add_argument("--chunk-size", type=int, default=50,
                     help="Submit requests in chunks of K for progress visibility "
