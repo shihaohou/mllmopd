@@ -4,32 +4,36 @@
 independently analyze the smoke500 results in `runs/audit/smoke500/` without
 prior context.
 
-**Captured at**: 2026-05-19. **Updated**: 2026-05-19 (scorer fix + diagnostics).
+**Captured at**: 2026-05-19. **Updated**: 2026-05-19 (scorer fix + choices backfill).
 
 > **Update notes (2026-05-19, post external review)**
 >
 > 1. **MathVista `mcq_letter` scorer was upgraded** to use priority patterns
 >    (`\boxed{X}` → `final answer is X` → `correct answer is X` → `option X` →
->    parenthesized-in-tail → legacy last-letter fallback). 85/4500 records
->    rescored; per-cell impact is +0.4 ~ +3.2pt acc. **Records where the model
->    only states option *text* (e.g., "Serrulate") in conclusion remain
->    unrecoverable** without choices in the JSONL — flagged below.
-> 2. **`summary.json` now also carries**: `hit_max_tokens_rate`, `refusal_rate`,
->    `mcq_high_conf_rate` (fraction of MCQ rows parsed via a high-confidence
->    answer phrase, not the fallback), and `rescore_changed` (#rows whose
->    is_correct flipped after the scorer upgrade).
-> 3. **One prior interpretation was wrong**: the brief said RL had *higher*
->    MathVista `blank_shortcut` than SFT (0.088 vs 0.068). After scorer fix it's
->    0.072 vs 0.076 — **essentially tied / RL slightly lower**. The
->    "post-training raises BOTH image_lift AND blank_shortcut on MathVista"
->    framing was a scorer artifact. Cleaner statement: post-training raises
->    `image_lift` (real signal), shortcut rate is noisy.
-> 4. **Base (Qwen2.5-VL-7B-Instruct) is contaminated as a control**: 16-22% of
->    Base `full_image` MathVista predictions are degenerate (<30 tokens,
->    "are an language model", "addCriterion" artifacts). `mcq_high_conf_rate`
->    is only 9% for Base_full vs 42-52% for MMR1. **All Base-vs-MMR1
->    comparisons should be treated as suggestive only** until the Base
->    inference setup (prompt template / decoding) is fixed.
+>    `choice_text` → parenthesized-in-tail → legacy last-letter fallback).
+> 2. **`choices` were backfilled** into the smoke500 JSONLs from the source
+>    subset (`scripts/data/backfill_choices.py`). Combined effect: **233/4500
+>    records rescored** vs. on-disk `is_correct` (148 of those recovered via
+>    the new `choice_text` path — predictions that conclude with option text
+>    only like "Serrulate is the correct answer"). Per-cell MathVista acc
+>    shifts +0.4 ~ +3.6pt. `mcq_high_conf_rate` now sits at **0.56-0.90**
+>    across all cells (previously 0.09-0.52); scorer no longer leans on
+>    weak fallbacks.
+> 3. **`summary.json` now also carries**: `hit_max_tokens_rate`,
+>    `refusal_rate`, `mcq_high_conf_rate`, `parse_paths`, `rescore_changed`.
+> 4. **The "post-training raises both image_lift AND blank_shortcut" framing
+>    is now fully refuted.** Post-backfill MathVista `blank_shortcut` is
+>    essentially flat across models (Base 0.048 / SFT 0.064 / RL 0.052). It
+>    was entirely a scorer artifact. The `image_lift` hierarchy survives
+>    (Base 0.233 < SFT 0.365 < RL 0.422), so the "post-training adds visual
+>    grounding" claim is real.
+> 5. **Base (Qwen2.5-VL-7B-Instruct) is contaminated as a control**: 16-22%
+>    of Base `full_image` MathVista predictions are degenerate (<30 tokens,
+>    "are an language model", "addCriterion" artifacts). Even after backfill
+>    Base `mcq_high_conf_rate` (0.56) lags MMR1 (0.83-0.89). Most likely
+>    chat template / prompt format mismatch. **All Base-vs-MMR1 deltas
+>    should be read as suggestive only** until Base inference is fixed and
+>    re-run.
 
 ---
 
@@ -173,17 +177,17 @@ not in these jsonl rows.
       "mode": "full_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.663,
+      "accuracy": 0.683,
       "n_scored": 249,
       "tokens_mean": 479.348,
       "tokens_median": 391.0,
-      "acc_per_token": 0.00138,
+      "acc_per_token": 0.00143,
       "scorers": {"mcq_letter": 131, "numeric": 117, "loose_contains": 1, "skip_missing_image": 1},
-      "parse_paths": {"final_answer": 32, "correct_answer": 18, "paren_tail": 41, "last_letter_fallback": 38, "none": 2, "numeric": 117, "loose_contains": 1, "skip_missing_image": 1},
-      "rescore_changed": 12,
+      "parse_paths": {"final_answer": 36, "correct_answer": 22, "choice_text": 56, "paren_tail": 9, "last_letter_fallback": 7, "none": 1, "numeric": 117, "loose_contains": 1, "skip_missing_image": 1},
+      "rescore_changed": 33,
       "hit_max_tokens_rate": 0.152,
       "refusal_rate": 0.000,
-      "mcq_high_conf_rate": 0.42
+      "mcq_high_conf_rate": 0.89
     }
   ],
   "paired_full_blank": [
@@ -191,12 +195,12 @@ not in these jsonl rows.
       "model": "...",
       "benchmark": "MathVista",
       "n_paired": 249,
-      "both_correct": 59,
-      "full_only": 106,
-      "blank_only": 18,
+      "both_correct": 65,
+      "full_only": 105,
+      "blank_only": 13,
       "both_wrong": 66,
-      "image_lift_rate": 0.426,
-      "blank_shortcut_rate": 0.072
+      "image_lift_rate": 0.422,
+      "blank_shortcut_rate": 0.052
     }
   ]
 }
@@ -220,15 +224,15 @@ re-scores in memory.
 
 | Model | Mode | MathVista | POPE_adv |
 |---|---|---|---|
-| Base (Qwen2.5-VL-7B) | full | 0.430 | 0.876 |
-| MMR1-3B-SFT          | full | 0.574 | 0.896 |
-| MMR1-7B-RL           | full | **0.663** | **0.900** |
-| Base                 | blank | 0.237 | 0.516 |
-| MMR1-3B-SFT          | blank | 0.261 | 0.516 |
-| MMR1-7B-RL           | blank | 0.309 | 0.516 |
-| Base                 | text_only | 0.196 | 0.000 |
-| MMR1-3B-SFT          | text_only | 0.268 | 0.172 |
-| MMR1-7B-RL           | text_only | 0.288 | 0.272 |
+| Base (Qwen2.5-VL-7B) | full | 0.442 | 0.876 |
+| MMR1-3B-SFT          | full | 0.598 | 0.896 |
+| MMR1-7B-RL           | full | **0.683** | **0.900** |
+| Base                 | blank | 0.257 | 0.516 |
+| MMR1-3B-SFT          | blank | 0.297 | 0.516 |
+| MMR1-7B-RL           | blank | 0.313 | 0.516 |
+| Base                 | text_only | 0.204 | 0.000 |
+| MMR1-3B-SFT          | text_only | 0.284 | 0.172 |
+| MMR1-7B-RL           | text_only | 0.308 | 0.272 |
 
 **Per-cell mean output tokens:**
 
@@ -238,13 +242,13 @@ re-scores in memory.
 | SFT  | 379 | 41 | 377 | 384 |
 | RL   | **479** | **61** | 453 | **473** |
 
-**Paired image_lift / blank_shortcut (rescored):**
+**Paired image_lift / blank_shortcut (post-backfill):**
 
 | Model | Bench | img_lift | blank_shortcut |
 |---|---|---|---|
-| Base | MathVista | 0.237 | 0.044 |
-| SFT  | MathVista | 0.390 | 0.076 |
-| RL   | MathVista | **0.426** | 0.072 |
+| Base | MathVista | 0.233 | 0.048 |
+| SFT  | MathVista | 0.365 | 0.064 |
+| RL   | MathVista | **0.422** | 0.052 |
 | Base | POPE | 0.360 | 0.000 |
 | SFT  | POPE | 0.428 | 0.048 |
 | RL   | POPE | 0.408 | 0.024 |
@@ -253,15 +257,15 @@ re-scores in memory.
 
 | Model | Mode | hit_max_tokens | refusal | mcq_high_conf |
 |---|---|---|---|---|
-| Base | full | 0.4% | 0.0% | **0.09** |
-| SFT  | full | 10.8% | 0.0% | 0.49 |
-| RL   | full | **15.2%** | 0.0% | 0.42 |
-| Base | blank | 0.0% | 0.0% | 0.14 |
-| SFT  | blank | **20.0%** | **15.2%** | 0.49 |
-| RL   | blank | 17.2% | 4.0% | 0.52 |
-| Base | text_only | 0.8% | 3.2% | 0.21 |
-| SFT  | text_only | 18.8% | 9.6% | 0.37 |
-| RL   | text_only | 18.4% | 8.0% | 0.45 |
+| Base | full | 0.4% | 0.0% | 0.56 |
+| SFT  | full | 10.8% | 0.0% | 0.89 |
+| RL   | full | **15.2%** | 0.0% | 0.89 |
+| Base | blank | 0.0% | 0.0% | 0.64 |
+| SFT  | blank | **20.0%** | **15.2%** | 0.88 |
+| RL   | blank | 17.2% | 4.0% | 0.83 |
+| Base | text_only | 0.8% | 3.2% | 0.68 |
+| SFT  | text_only | 18.8% | 9.6% | 0.79 |
+| RL   | text_only | 18.4% | 8.0% | 0.90 |
 
 **POPE refusal_rate (text_only, separately interesting):**
 Base 65.6%, SFT 95.2%, RL **37.2%**. RL teacher is markedly less willing to
@@ -323,10 +327,10 @@ refuse, even without an image.
      POPE refusal 95.2% vs RL 37.2%. RL "presses on regardless" — possibly
      another facet of H3 (RL training shifts behavior toward always-respond).
    - **`image_lift` is consistently RL > SFT > Base** on MathVista
-     (0.426 > 0.390 > 0.237). On POPE the post-training lift is real but
+     (0.422 > 0.365 > 0.233). On POPE the post-training lift is real but
      RL ≈ SFT. Post-training reliably **adds visual lift**.
    - **`blank_shortcut` is essentially flat** Base/SFT/RL on MathVista
-     after scorer fix (0.044 / 0.076 / 0.072) and decreasing on POPE
+     after backfill (0.048 / 0.064 / 0.052) and decreasing on POPE
      (0.000 / 0.048 / 0.024). RL teacher is **not** more shortcut-prone
      than SFT — earlier framing was a scorer artifact.
 2. **Look for signals we missed**, especially:
