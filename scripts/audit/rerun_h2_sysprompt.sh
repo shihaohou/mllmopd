@@ -45,9 +45,18 @@ for f in "${SUBSET}" "${SOURCE}" "${ID_FILTER}"; do
   fi
 done
 
-# Activate the train venv (sglang). Adjust path per host.
-# shellcheck disable=SC1091
-source scripts/env/_activate.sh
+# Venv: do NOT call scripts/env/_activate.sh here — that hard-prefers the
+# project-local .venv (audit/HF env), which lacks sglang. The operator must
+# pre-activate the train venv (the one with sglang + Uni-OPD installed).
+# Typical devbox path: /root/shihao_project/mllmopd-train-env/.venv/bin/activate
+# Override via MLLMOPD_VENV if you want _activate.sh-style selection later.
+if ! python -c "import sglang" >/dev/null 2>&1; then
+  echo "ERROR: sglang not importable in the current Python env." >&2
+  echo "  current python: $(command -v python)" >&2
+  echo "  fix: source /root/shihao_project/mllmopd-train-env/.venv/bin/activate" >&2
+  echo "       (or your local equivalent train-venv path)" >&2
+  exit 1
+fi
 
 echo ">>> rerun_h2_sysprompt: scoring ${SOURCE} against opd_target_ids.json"
 echo ">>> output: ${OUT_SCORED}"
