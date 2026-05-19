@@ -143,11 +143,40 @@ ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-2048}"
 
 # --- Parallelism (8-GPU host; teacher already binds GPU 0) ---
+# Megatron requires GBS % (MICRO_BATCH_SIZE * DP) == 0 where DP = N_GPU / TP.
+# With GBS=64, TP=1, MBS=1 the valid N_GPU values are {1,2,4,8,16,32,64} —
+# anything not a power-of-2 factor of 64 (like 7) fails the divisibility
+# assertion in Megatron's num_microbatches_calculator.
+#
+# Default to 4 trainer GPUs: gives DP=4, 64/(1*4)=16 micro-batches per
+# optimizer step. We waste 3 GPUs (5,6,7 idle) but the plan-§6 estimate
+# of ~4-5 h/arm is dominated by rollout time, not optimizer steps, so
+# this is the right trade-off for T1-v0. Full-paper runs can bump
+# ACTOR_NUM_GPUS_PER_NODE=6 with TP=2 DP=3 + adjusted GBS.
 ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-1}"
-ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-7}"
-ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-7}"
+ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-4}"
+ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-${ACTOR_NUM_GPUS_PER_NODE}}"
 TP_SIZE="${TP_SIZE:-1}"
-TRAINER_GPUS="${TRAINER_GPUS:-1,2,3,4,5,6,7}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
+TRAINER_GPUS="${TRAINER_GPUS:-1,2,3,4}"
+
+# Divisibility pre-flight — fail loud here rather than wasting Ray init.
+DP_SIZE=$(( ACTOR_NUM_GPUS_PER_NODE / TP_SIZE ))
+if [ "${DP_SIZE}" -le 0 ]; then
+  echo "ERROR: DP_SIZE = ACTOR_NUM_GPUS_PER_NODE / TP_SIZE = ${ACTOR_NUM_GPUS_PER_NODE}/${TP_SIZE} = ${DP_SIZE}; must be >= 1" >&2
+  exit 1
+fi
+MBS_DP=$(( MICRO_BATCH_SIZE * DP_SIZE ))
+if [ "$(( GLOBAL_BATCH_SIZE % MBS_DP ))" -ne 0 ]; then
+  echo "ERROR: GLOBAL_BATCH_SIZE (${GLOBAL_BATCH_SIZE}) is not divisible by MICRO_BATCH_SIZE * DP (${MICRO_BATCH_SIZE} * ${DP_SIZE} = ${MBS_DP})." >&2
+  echo "       Megatron's num_microbatches_calculator will assert. Fix one of:" >&2
+  echo "         - GLOBAL_BATCH_SIZE          (currently ${GLOBAL_BATCH_SIZE}; pick a multiple of ${MBS_DP})" >&2
+  echo "         - MICRO_BATCH_SIZE           (currently ${MICRO_BATCH_SIZE})" >&2
+  echo "         - ACTOR_NUM_GPUS_PER_NODE    (currently ${ACTOR_NUM_GPUS_PER_NODE})" >&2
+  echo "         - TP_SIZE                    (currently ${TP_SIZE})" >&2
+  exit 1
+fi
+echo ">>> parallelism: ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}  TP=${TP_SIZE}  DP=${DP_SIZE}  MBS=${MICRO_BATCH_SIZE}  GBS=${GLOBAL_BATCH_SIZE}  ${GLOBAL_BATCH_SIZE}/${MBS_DP}=$(( GLOBAL_BATCH_SIZE / MBS_DP )) micro-batches/opt-step"
 SAVE_INTERVAL="${SAVE_INTERVAL:-50}"  # ~5 ckpts over 250 steps; recoverable on crash
 DEBUG_MODE="${DEBUG_MODE:-0}"
 
@@ -218,6 +247,7 @@ PERF_ARGS=(
   --recompute-granularity full
   --recompute-method uniform
   --recompute-num-layers 1
+  --micro-batch-size "${MICRO_BATCH_SIZE}"
   --use-dynamic-batch-size
   --max-tokens-per-gpu 16384
 )
