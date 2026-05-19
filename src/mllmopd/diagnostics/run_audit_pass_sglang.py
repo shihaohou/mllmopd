@@ -189,6 +189,15 @@ def main() -> None:
                     help="Print prompt + generation + scoring for each emitted row.")
     args = ap.parse_args()
 
+    # Disable cuDNN before anything imports torch heavily. sglang warns that
+    # torch 2.9.1 + the bundled cuDNN <9.15 can hit `CUDNN_STATUS_NOT_INITIALIZED`
+    # on `nn.Conv3d` (the Qwen2.5-VL visual patch embedding) when multiple
+    # engines initialize in parallel — single-engine smoke runs survive, but
+    # 3-GPU parallel passes crash. Native CUDA convs cost a few ms/image extra
+    # and avoid the race entirely.
+    import torch  # noqa: F401
+    torch.backends.cudnn.enabled = False
+
     # We need the tokenizer's chat template to build the prompt text. Loading
     # the full AutoProcessor is unnecessary since sglang handles image tokens.
     from transformers import AutoTokenizer  # type: ignore
