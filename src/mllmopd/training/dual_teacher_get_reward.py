@@ -38,13 +38,27 @@ from argparse import Namespace
 import aiohttp
 
 # Uni-OPD's own files use stale `from exps.OPD.utils.reward.*` imports
-# that don't resolve in the current layout; the example launcher
-# `exps/scripts/OPD/.../*.sh` uses the canonical `Uni_OPD_utils.OPD_reward.*`
-# paths instead. We follow the launcher convention here.
-from Uni_OPD_utils.OPD_reward.get_reward import REWARD_FAILED_KEY
+# that don't resolve in the current layout. We can't import
+# `Uni_OPD_utils.OPD_reward.{get_reward,rule_base_reward,post_process_rewards}`
+# at all because their module-load triggers the broken chain:
+#   - get_reward.py top-level imports rule_base_reward
+#   - rule_base_reward.py top-level imports `exps.RL.utils.reward.PRIME_code_server.server`
+#     and `Math.generate.verify_deepmath.reward_func` — neither present here.
+#
+# So we import only the two modules whose dependency closure IS satisfied
+# by our minimal `src/exps/OPD/utils/reward/{teacher,utils}.py` shim
+# (the only `exps.OPD.utils.reward.*` paths reward_manager.py needs):
+#   - Uni_OPD_utils.OPD_reward.reward_manager  → uses exps.OPD.utils.reward.{teacher,utils}
+#   - Uni_OPD_utils.OPD_reward.session_manager → clean
+# REWARD_FAILED_KEY is just a string constant; we inline it. The rule-based
+# reward is skipped entirely (response_correct=None is acceptable for T1
+# diagnostics — see comment in get_reward() below).
 from Uni_OPD_utils.OPD_reward.reward_manager import RMSystemManager
-from Uni_OPD_utils.OPD_reward.rule_base_reward import get_rule_based_reward  # noqa: F401
 from Uni_OPD_utils.OPD_reward.session_manager import RewardSessionManager
+
+# Verbatim from Uni_OPD_utils/OPD_reward/get_reward.py:22 — kept in sync
+# manually because that module can't be imported (see chain above).
+REWARD_FAILED_KEY = "__opd_reward_failed__"
 
 from miles.utils.types import Sample
 
@@ -132,7 +146,13 @@ async def get_reward(args: Namespace, sample: Sample, **kwargs) -> dict:
     rm_manager = RMSystemManager(args)
     session_manager = RewardSessionManager()
 
-    response_correct, rule_based_metadata = await get_rule_based_reward(args, sample)
+    # T1 doesn't consume rule-based correctness — `response_correct` is
+    # only a diagnostic tag in the per-step JSONL. The default Uni-OPD
+    # rule_base_reward.py at module-level loads `Math.generate.verify_deepmath`
+    # and `exps.RL.utils.reward.PRIME_code_server.server`, neither of
+    # which is in our checkout. Skipping the call avoids the chain.
+    response_correct: bool | None = None
+    rule_based_metadata: dict = {}
 
     # Canonical full-image payload (drives `payload["input_ids"]`,
     # `image_data`, etc. via Uni-OPD's regular path).

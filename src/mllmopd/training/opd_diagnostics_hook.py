@@ -41,16 +41,82 @@ import os
 import time
 from pathlib import Path
 
-# Uni-OPD path layout — same caveat as dual_teacher_get_reward.py;
-# the example launcher uses `Uni_OPD_utils.OPD_reward.*` even though
-# the .py files themselves contain stale `exps.OPD.utils.reward.*`
-# imports.
-from Uni_OPD_utils.OPD_reward.post_process_rewards import (
-    TEACHER_LOGP_FAILED_SENTINEL,  # noqa: F401  (kept for parity)
-    post_process_rewards,
-)
+import torch
+
+# We can't `from Uni_OPD_utils.OPD_reward.post_process_rewards import ...`
+# because that module's top-level pulls in `exps.OPD.utils.reward.get_reward`
+# which chains into `rule_base_reward.py`'s missing external dependencies
+# (`Math.generate.verify_deepmath`, `exps.RL.utils.reward.PRIME_code_server`).
+# Inline the canonical `post_process_rewards` body verbatim from
+# Uni_OPD_utils/OPD_reward/post_process_rewards.py (~60 lines) — kept in
+# sync manually if upstream changes.
 
 logger = logging.getLogger(__name__)
+
+# Verbatim from Uni_OPD_utils/OPD_reward/post_process_rewards.py:11 and
+# Uni_OPD_utils/OPD_reward/get_reward.py:22 — kept in sync manually
+# (cf. dual_teacher_get_reward.py for the chain-of-failure rationale).
+TEACHER_LOGP_FAILED_SENTINEL = -100.0
+REWARD_FAILED_KEY = "__opd_reward_failed__"
+
+
+def post_process_rewards(args, samples, **kwargs):
+    """Inlined replica of Uni-OPD's canonical post_process_rewards.
+
+    Reads `sample.reward["meta_info"]["input_token_logprobs"]`, slices to
+    the last `response_length` tokens, writes `sample.teacher_log_probs`
+    and `sample.response_correct` in place. Failed samples (REWARD_FAILED_KEY
+    or parse error) get filled with TEACHER_LOGP_FAILED_SENTINEL (-100)
+    which is what Uni-OPD's loss.py mask-detects to zero the PG loss term.
+
+    Returns (teacher_log_probs_list, teacher_log_probs_list) so the
+    caller (miles/ray/rollout.py::_post_process_rewards) treats both
+    "raw" and "processed" rewards as the per-sample teacher logp tensor.
+    """
+    rewards = [sample.reward for sample in samples]
+    num_failed = 0
+    teacher_log_probs_list = []
+
+    for i, (reward, sample) in enumerate(zip(rewards, samples, strict=False)):
+        response_length = sample.response_length
+        response_correct = reward.get("response_correct", None)
+
+        if reward.get(REWARD_FAILED_KEY, False):
+            num_failed += 1
+            t_log_probs = torch.full(
+                (response_length,), TEACHER_LOGP_FAILED_SENTINEL, dtype=torch.float32,
+            )
+            sample.teacher_log_probs = t_log_probs
+            sample.response_correct = response_correct
+            teacher_log_probs_list.append(t_log_probs)
+            continue
+
+        try:
+            t_log_probs = torch.tensor(
+                [item[0] for item in reward["meta_info"]["input_token_logprobs"][1:]],
+                dtype=torch.float32,
+            )
+            t_log_probs = t_log_probs[-response_length:]
+        except Exception as e:
+            num_failed += 1
+            logger.warning(
+                f"[post_process_rewards] sample[{i}] logprob parse error: {e}, "
+                f"filling with sentinel {TEACHER_LOGP_FAILED_SENTINEL}."
+            )
+            t_log_probs = torch.full(
+                (response_length,), TEACHER_LOGP_FAILED_SENTINEL, dtype=torch.float32,
+            )
+
+        sample.response_correct = response_correct
+        sample.teacher_log_probs = t_log_probs
+        teacher_log_probs_list.append(t_log_probs)
+
+    if num_failed > 0:
+        logger.warning(
+            f"[post_process_rewards] {num_failed}/{len(samples)} samples failed, "
+            f"their pg_loss will be zeroed by sentinel mask in loss.py."
+        )
+    return teacher_log_probs_list, teacher_log_probs_list
 
 # Module-level step counter. Reset across runs is implicit (each new
 # launcher invocation re-imports the module), but persists within a
