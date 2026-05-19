@@ -5,17 +5,35 @@
       "mode": "blank_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.24899598393574296,
+      "accuracy": 0.26104417670682734,
       "n_scored": 249,
       "tokens_mean": 376.884,
       "tokens_median": 198.0,
-      "acc_per_token": 0.0006606700822403521,
+      "acc_per_token": 0.0006926379894455306,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "final_answer": 3,
+        "paren_tail": 22,
+        "loose_contains": 1,
+        "numeric": 117,
+        "last_letter_fallback": 44,
+        "option_phrase": 44,
+        "boxed": 5,
+        "answer_phrase": 7,
+        "none": 1,
+        "correct_choice": 4,
+        "skip_missing_image": 1,
+        "correct_answer": 1
+      },
+      "rescore_changed": 13,
+      "hit_max_tokens_rate": 0.2,
+      "refusal_rate": 0.152,
+      "mcq_high_conf_rate": 0.48854961832061067
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
@@ -29,24 +47,49 @@
       "acc_per_token": 0.028190557900428438,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.024,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
       "mode": "full_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.5622489959839357,
+      "accuracy": 0.5742971887550201,
       "n_scored": 249,
       "tokens_mean": 378.56,
       "tokens_median": 311.0,
-      "acc_per_token": 0.0014852308603621747,
+      "acc_per_token": 0.0015170572359413644,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "paren_tail": 39,
+        "option_phrase": 30,
+        "loose_contains": 1,
+        "numeric": 117,
+        "last_letter_fallback": 27,
+        "correct_answer": 3,
+        "final_answer": 1,
+        "boxed": 10,
+        "answer_phrase": 17,
+        "skip_missing_image": 1,
+        "correct_choice": 3,
+        "none": 1
+      },
+      "rescore_changed": 7,
+      "hit_max_tokens_rate": 0.108,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": 0.48854961832061067
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
@@ -60,23 +103,47 @@
       "acc_per_token": 0.021745461077918138,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.004,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
       "mode": "text_only",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.276,
+      "accuracy": 0.268,
       "n_scored": 250,
       "tokens_mean": 383.516,
       "tokens_median": 256.0,
-      "acc_per_token": 0.0007196570658860202,
+      "acc_per_token": 0.0006987974407878748,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 118
-      }
+      },
+      "parse_paths": {
+        "boxed": 3,
+        "paren_tail": 25,
+        "loose_contains": 1,
+        "numeric": 118,
+        "last_letter_fallback": 54,
+        "correct_choice": 5,
+        "option_phrase": 24,
+        "none": 3,
+        "answer_phrase": 15,
+        "correct_answer": 1,
+        "final_answer": 1
+      },
+      "rescore_changed": 14,
+      "hit_max_tokens_rate": 0.188,
+      "refusal_rate": 0.096,
+      "mcq_high_conf_rate": 0.37404580152671757
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
@@ -90,24 +157,48 @@
       "acc_per_token": 0.005544809621379444,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.952,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
       "mode": "blank_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.30120481927710846,
+      "accuracy": 0.3092369477911647,
       "n_scored": 249,
       "tokens_mean": 453.024,
       "tokens_median": 365.5,
-      "acc_per_token": 0.0006648760741422803,
+      "acc_per_token": 0.0006826061027860745,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "correct_answer": 4,
+        "option_phrase": 25,
+        "loose_contains": 1,
+        "numeric": 117,
+        "last_letter_fallback": 36,
+        "answer_phrase": 12,
+        "paren_tail": 27,
+        "boxed": 16,
+        "correct_choice": 9,
+        "skip_missing_image": 1,
+        "final_answer": 2
+      },
+      "rescore_changed": 16,
+      "hit_max_tokens_rate": 0.172,
+      "refusal_rate": 0.04,
+      "mcq_high_conf_rate": 0.5190839694656488
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
@@ -121,24 +212,48 @@
       "acc_per_token": 0.029060597597398197,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
       "mode": "full_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.6546184738955824,
+      "accuracy": 0.6626506024096386,
       "n_scored": 249,
       "tokens_mean": 479.348,
       "tokens_median": 391.0,
-      "acc_per_token": 0.0013656434835024635,
+      "acc_per_token": 0.00138239984526323,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "last_letter_fallback": 31,
+        "paren_tail": 45,
+        "loose_contains": 1,
+        "numeric": 117,
+        "answer_phrase": 12,
+        "correct_choice": 8,
+        "option_phrase": 25,
+        "boxed": 8,
+        "skip_missing_image": 1,
+        "correct_answer": 1,
+        "final_answer": 1
+      },
+      "rescore_changed": 12,
+      "hit_max_tokens_rate": 0.152,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": 0.4198473282442748
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
@@ -152,23 +267,45 @@
       "acc_per_token": 0.01477250320444319,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.012,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
       "mode": "text_only",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.256,
+      "accuracy": 0.288,
       "n_scored": 250,
       "tokens_mean": 473.084,
       "tokens_median": 408.5,
-      "acc_per_token": 0.0005411301152836915,
+      "acc_per_token": 0.0006087713796941529,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 118
-      }
+      },
+      "parse_paths": {
+        "last_letter_fallback": 43,
+        "option_phrase": 26,
+        "loose_contains": 1,
+        "numeric": 118,
+        "answer_phrase": 15,
+        "paren_tail": 29,
+        "correct_choice": 5,
+        "boxed": 11,
+        "correct_answer": 2
+      },
+      "rescore_changed": 14,
+      "hit_max_tokens_rate": 0.184,
+      "refusal_rate": 0.08,
+      "mcq_high_conf_rate": 0.45038167938931295
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
@@ -182,24 +319,47 @@
       "acc_per_token": 0.005861563531989408,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.372,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
       "mode": "blank_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.23293172690763053,
+      "accuracy": 0.23694779116465864,
       "n_scored": 249,
       "tokens_mean": 131.98,
       "tokens_median": 95.5,
-      "acc_per_token": 0.00176490169073139,
+      "acc_per_token": 0.0017953310302267589,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "last_letter_fallback": 22,
+        "loose_contains": 1,
+        "numeric": 117,
+        "paren_tail": 59,
+        "answer_phrase": 3,
+        "boxed": 8,
+        "none": 32,
+        "correct_answer": 6,
+        "skip_missing_image": 1,
+        "option_phrase": 1
+      },
+      "rescore_changed": 1,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": 0.13740458015267176
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
@@ -213,24 +373,47 @@
       "acc_per_token": 0.017097414940443506,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
       "mode": "full_image",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.42570281124497994,
+      "accuracy": 0.42971887550200805,
       "n_scored": 249,
       "tokens_mean": 133.476,
       "tokens_median": 104.0,
-      "acc_per_token": 0.0031893584468790006,
+      "acc_per_token": 0.003219446734113708,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 117,
         "skip_missing_image": 1
-      }
+      },
+      "parse_paths": {
+        "none": 39,
+        "last_letter_fallback": 23,
+        "loose_contains": 1,
+        "numeric": 117,
+        "answer_phrase": 1,
+        "final_answer": 1,
+        "paren_tail": 57,
+        "boxed": 7,
+        "correct_answer": 3,
+        "skip_missing_image": 1
+      },
+      "rescore_changed": 1,
+      "hit_max_tokens_rate": 0.004,
+      "refusal_rate": 0.0,
+      "mcq_high_conf_rate": 0.0916030534351145
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
@@ -244,23 +427,45 @@
       "acc_per_token": 0.026645576510354776,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.004,
+      "mcq_high_conf_rate": null
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
       "mode": "text_only",
       "benchmark": "MathVista",
       "n": 250,
-      "accuracy": 0.2,
+      "accuracy": 0.196,
       "n_scored": 250,
       "tokens_mean": 141.44,
       "tokens_median": 55.0,
-      "acc_per_token": 0.0014140271393239033,
+      "acc_per_token": 0.0013857465965374251,
       "scorers": {
         "mcq_letter": 131,
         "loose_contains": 1,
         "numeric": 118
-      }
+      },
+      "parse_paths": {
+        "correct_answer": 2,
+        "boxed": 24,
+        "loose_contains": 1,
+        "numeric": 118,
+        "last_letter_fallback": 20,
+        "paren_tail": 42,
+        "none": 41,
+        "option_phrase": 1,
+        "answer_phrase": 1
+      },
+      "rescore_changed": 7,
+      "hit_max_tokens_rate": 0.008,
+      "refusal_rate": 0.032,
+      "mcq_high_conf_rate": 0.21374045801526717
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
@@ -274,7 +479,14 @@
       "acc_per_token": 0.0,
       "scorers": {
         "yesno": 250
-      }
+      },
+      "parse_paths": {
+        "yesno": 250
+      },
+      "rescore_changed": 0,
+      "hit_max_tokens_rate": 0.0,
+      "refusal_rate": 0.656,
+      "mcq_high_conf_rate": null
     }
   ],
   "paired_full_blank": [
@@ -282,12 +494,12 @@
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
       "benchmark": "MathVista",
       "n_paired": 249,
-      "both_correct": 45,
-      "full_only": 95,
-      "blank_only": 17,
-      "both_wrong": 92,
-      "image_lift_rate": 0.3815261044176707,
-      "blank_shortcut_rate": 0.06827309236947791
+      "both_correct": 46,
+      "full_only": 97,
+      "blank_only": 19,
+      "both_wrong": 87,
+      "image_lift_rate": 0.3895582329317269,
+      "blank_shortcut_rate": 0.07630522088353414
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-3B-SFT",
@@ -304,12 +516,12 @@
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
       "benchmark": "MathVista",
       "n_paired": 249,
-      "both_correct": 53,
-      "full_only": 110,
-      "blank_only": 22,
-      "both_wrong": 64,
-      "image_lift_rate": 0.44176706827309237,
-      "blank_shortcut_rate": 0.08835341365461848
+      "both_correct": 59,
+      "full_only": 106,
+      "blank_only": 18,
+      "both_wrong": 66,
+      "image_lift_rate": 0.42570281124497994,
+      "blank_shortcut_rate": 0.07228915662650602
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/datasets/MMR1-7B-RL",
@@ -326,10 +538,10 @@
       "model": "/home/web_server/antispam/project/houshihao/models/Qwen2.5-VL-7B-Instruct",
       "benchmark": "MathVista",
       "n_paired": 249,
-      "both_correct": 47,
+      "both_correct": 48,
       "full_only": 59,
       "blank_only": 11,
-      "both_wrong": 132,
+      "both_wrong": 131,
       "image_lift_rate": 0.23694779116465864,
       "blank_shortcut_rate": 0.04417670682730924
     },

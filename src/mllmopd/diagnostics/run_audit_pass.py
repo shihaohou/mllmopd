@@ -107,7 +107,7 @@ def _emit_skip_missing_image(rec: dict, args, fout):
 
 
 def _emit_row(rec: dict, args, fout, pred: str, num_tok: int, prompt_len: int):
-    is_correct, scorer_used = scorers.score_for_benchmark(
+    is_correct, scorer_used, parse_path = scorers.score_for_benchmark(
         rec["benchmark"], pred, rec.get("answer"),
     )
     row = {
@@ -121,6 +121,7 @@ def _emit_row(rec: dict, args, fout, pred: str, num_tok: int, prompt_len: int):
         "gold": rec.get("answer"),
         "is_correct": is_correct,
         "scorer": scorer_used,
+        "parse_path": parse_path,
     }
     fout.write(json.dumps(row, ensure_ascii=False) + "\n")
     fout.flush()

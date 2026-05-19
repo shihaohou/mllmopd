@@ -46,13 +46,15 @@ def main() -> None:
     def _f(x):
         return "-" if x is None else (f"{x:.3f}" if isinstance(x, float) else str(x))
 
-    headers = ["model", "mode", "benchmark", "n", "acc", "tokens_mean", "acc/tok", "scorers"]
-    widths = [14, 18, 18, 5, 6, 11, 9, 30]
+    headers = ["model", "mode", "benchmark", "n", "acc", "tokens_mean",
+               "hitmax", "refusal", "mcqHC", "Δresc"]
+    widths = [14, 12, 18, 5, 6, 8, 7, 8, 6, 6]
     fmt = "  ".join(f"%-{w}s" for w in widths)
     print(fmt % tuple(headers))
     print("-" * (sum(widths) + 2 * (len(widths) - 1)))
 
     for c in cells:
+        mcq_hc = c.get("mcq_high_conf_rate")
         print(fmt % (
             _model_short(c["model"])[:widths[0]],
             c["mode"][:widths[1]],
@@ -60,8 +62,10 @@ def main() -> None:
             c["n"],
             _f(c["accuracy"]),
             _f(c["tokens_mean"]),
-            _f(c["acc_per_token"]),
-            _scorers_str(c.get("scorers"))[:widths[7]],
+            _f(c.get("hit_max_tokens_rate")),
+            _f(c.get("refusal_rate")),
+            "-" if mcq_hc is None else f"{mcq_hc:.2f}",
+            _f(c.get("rescore_changed", 0)) if isinstance(c.get("rescore_changed"), int) else "-",
         ))
 
     paired = s.get("paired_full_blank", [])
