@@ -139,6 +139,12 @@ def main() -> None:
     ap.add_argument("--max-running-requests", type=int, default=64)
     ap.add_argument("--debug", action="store_true",
                     help="dump per-row visual-dependency summary to stderr")
+    ap.add_argument("--id-filter", type=Path, default=None,
+                    help="Optional path to a JSON file mapping benchmark→[ids] "
+                         "(or a flat list of ids). Only scores prompts whose id "
+                         "is in this set. Use opd_target_ids.json from "
+                         "paired_vision_critical to focus the H2 audit on the "
+                         "vision-conditioned subset.")
     args = ap.parse_args()
 
     # Same cuDNN init race precaution as run_audit_pass_sglang (see common-pitfalls E1).
@@ -151,6 +157,20 @@ def main() -> None:
     src_by_id = _load_source_index(args.source)
     print(f">>> loaded {len(src_by_id)} source completions from {args.source}", file=sys.stderr)
 
+    id_filter: set[str] | None = None
+    if args.id_filter:
+        raw = json.loads(args.id_filter.read_text())
+        if isinstance(raw, dict):
+            id_filter = set()
+            for ids in raw.values():
+                id_filter.update(ids)
+        elif isinstance(raw, list):
+            id_filter = set(raw)
+        else:
+            sys.exit(f"!! --id-filter expects JSON dict[bench→[ids]] or [ids], got {type(raw)}")
+        print(f">>> id_filter active: {len(id_filter)} ids loaded from {args.id_filter}",
+              file=sys.stderr)
+
     # Build per-record request payload (prefix + response text, full / blank images,
     # and a count of response tokens so we can slice the right tail from logprobs).
     requests: list[dict] = []
@@ -159,6 +179,8 @@ def main() -> None:
         if args.limit and len(requests) >= args.limit:
             break
         rid = rec["id"]
+        if id_filter is not None and rid not in id_filter:
+            continue
         src = src_by_id.get(rid)
         if src is None:
             continue
