@@ -25,13 +25,18 @@ _dispatch_passes() {
     return 1
   fi
 
+  # Backend module: HF transformers (default) or sglang. Caller sets
+  # AUDIT_BACKEND_MODULE (typically via run_smoke.sh interpreting
+  # AUDIT_BACKEND=sglang).
+  local audit_module="${AUDIT_BACKEND_MODULE:-mllmopd.diagnostics.run_audit_pass}"
+
   local gpus_str="${SMOKE_GPUS:-${SMOKE_GPU:-0}}"
   local -a gpus
   IFS=',' read -ra gpus <<<"${gpus_str}"
   local n_gpu="${#gpus[@]}"
 
   if [ "${n_gpu}" -le 1 ]; then
-    echo ">>> sequential mode on GPU ${gpus[0]}"
+    echo ">>> sequential mode on GPU ${gpus[0]} (backend: ${audit_module})"
     local i
     for (( i = 0; i < n_pass; i++ )); do
       local tag="${PASS_TAGS[$i]}" model="${PASS_MODELS[$i]}" mode="${PASS_MODES[$i]}"
@@ -41,7 +46,7 @@ _dispatch_passes() {
         continue
       fi
       echo ">>> [${tag}] GPU=${gpus[0]} model=${model} mode=${mode}"
-      CUDA_VISIBLE_DEVICES="${gpus[0]}" python -m mllmopd.diagnostics.run_audit_pass \
+      CUDA_VISIBLE_DEVICES="${gpus[0]}" python -m "${audit_module}" \
         --subset "${SUBSET}" \
         --model "${model}" \
         --mode "${mode}" \
@@ -51,7 +56,7 @@ _dispatch_passes() {
     return 0
   fi
 
-  echo ">>> parallel mode across ${n_gpu} GPU(s): ${gpus_str}"
+  echo ">>> parallel mode across ${n_gpu} GPU(s): ${gpus_str} (backend: ${audit_module})"
   local -a pids tags logs
   local i
   for (( i = 0; i < n_pass; i++ )); do
@@ -65,7 +70,7 @@ _dispatch_passes() {
     local log="${RUN_DIR}/${tag}.log"
     echo ">>> [${tag}] GPU=${gpu} model=${model} mode=${mode}  log=${log}"
     (
-      CUDA_VISIBLE_DEVICES="${gpu}" python -m mllmopd.diagnostics.run_audit_pass \
+      CUDA_VISIBLE_DEVICES="${gpu}" python -m "${audit_module}" \
         --subset "${SUBSET}" \
         --model "${model}" \
         --mode "${mode}" \

@@ -51,9 +51,33 @@ fi
 if [ "${AUDIT_DEBUG:-0}" = "1" ]; then
   EXTRA_ARGS+=(--debug)
 fi
-if [ "${AUDIT_BATCH:-1}" != "1" ]; then
-  EXTRA_ARGS+=(--batch-size "${AUDIT_BATCH}")
-fi
+
+# Backend selection: AUDIT_BACKEND=sglang switches to the sglang engine path
+# (must be in train venv). AUDIT_BATCH means different things per backend:
+#   hf:     --batch-size       (static batch size for model.generate)
+#   sglang: --max-running-requests (concurrent in-flight requests)
+case "${AUDIT_BACKEND:-hf}" in
+  hf)
+    export AUDIT_BACKEND_MODULE="mllmopd.diagnostics.run_audit_pass"
+    if [ "${AUDIT_BATCH:-1}" != "1" ]; then
+      EXTRA_ARGS+=(--batch-size "${AUDIT_BATCH}")
+    fi
+    ;;
+  sglang)
+    export AUDIT_BACKEND_MODULE="mllmopd.diagnostics.run_audit_pass_sglang"
+    if [ "${AUDIT_BATCH:-1}" != "1" ]; then
+      EXTRA_ARGS+=(--max-running-requests "${AUDIT_BATCH}")
+    fi
+    if [ -n "${AUDIT_MEM_FRACTION:-}" ]; then
+      EXTRA_ARGS+=(--mem-fraction "${AUDIT_MEM_FRACTION}")
+    fi
+    echo ">>> Using sglang backend — make sure you're in the train venv (sglang installed)"
+    ;;
+  *)
+    echo "ERROR: unknown AUDIT_BACKEND=${AUDIT_BACKEND} (use hf or sglang)" >&2
+    exit 1
+    ;;
+esac
 
 # Default: full 3-mode audit for the OPD teacher (T_RL) and student (S).
 # T_RL_text_only is included by default since smoke500 onwards — handoff
