@@ -40,17 +40,18 @@ except ImportError:  # pragma: no cover
 import os
 
 
-# (benchmark name, default HF id, env var that, if set, overrides with a local dir)
+# (benchmark name, default HF id, env var that overrides with a local dir, split,
+#  optional config name — multi-config datasets like MathVerse need this).
 BENCHMARK_REGISTRY = {
-    "MathVista":        ("AI4Math/MathVista",       "MATHVISTA_PATH",         "testmini"),
-    "MathVision":       ("MathLLMs/MathVision",     "MATHVISION_PATH",        "test"),
-    "MathVerse":        ("AI4Math/MathVerse",       "MATHVERSE_PATH",         "testmini"),
-    "LogicVista":       ("renjiepi/LogicVista",     "LOGICVISTA_PATH",        "test"),
-    "ChartQA":          ("HuggingFaceM4/ChartQA",   "CHARTQA_PATH",           "test"),
-    "HallusionBench":   ("PahaII/HallusionBench",   "HALLUSIONBENCH_PATH",    "test"),
-    "CharXiv":          ("princeton-nlp/CharXiv",   "CHARXIV_PATH",           "validation"),
-    "MMMU":             ("MMMU/MMMU",               "MMMU_PATH",              "validation"),
-    "POPE_adversarial": ("lmms-lab/POPE",           "POPE_PATH",              "adversarial"),
+    "MathVista":        ("AI4Math/MathVista",       "MATHVISTA_PATH",         "testmini",    None),
+    "MathVision":       ("MathLLMs/MathVision",     "MATHVISION_PATH",        "testmini",    None),
+    "MathVerse":        ("AI4Math/MathVerse",       "MATHVERSE_PATH",         "testmini",    "testmini"),
+    "LogicVista":       ("renjiepi/LogicVista",     "LOGICVISTA_PATH",        "test",        None),
+    "ChartQA":          ("HuggingFaceM4/ChartQA",   "CHARTQA_PATH",           "test",        None),
+    "HallusionBench":   ("PahaII/HallusionBench",   "HALLUSIONBENCH_PATH",    "image",       None),
+    "CharXiv":          ("princeton-nlp/CharXiv",   "CHARXIV_PATH",           "validation",  None),
+    "MMMU":             ("MMMU/MMMU",               "MMMU_PATH",              "validation",  None),
+    "POPE_adversarial": ("lmms-lab/POPE",           "POPE_PATH",              "adversarial", None),
 }
 
 BENCHMARK_MIX = {
@@ -65,23 +66,25 @@ BENCHMARK_MIX = {
 }
 
 
-def _open_dataset(local: str, hf_id: str, split: str):
+def _open_dataset(local: str, hf_id: str, split: str, config: str | None = None):
     """Load a benchmark, trying loaders in order:
 
     (a) `load_from_disk(local)` when `local` contains `dataset_info.json`
         — this is the `Dataset.save_to_disk()` format (`data-*.arrow +
-        dataset_info.json + state.json`), produced by e.g. an earlier
-        `ds.save_to_disk(...)` snapshot. **Most of the local MMR1 dataset
-        dumps on the dev box are this format.**
-    (b) `load_dataset(local, split=split)` for a HF repo unpacked on disk.
+        dataset_info.json + state.json`).
+    (b) `load_dataset(local, [config,] split=split)` for a HF repo unpacked
+        on disk. Multi-config datasets (e.g., MathVerse) require `config`.
     (c) `load_dataset("parquet", data_dir=local)` for a raw parquet dump.
-    (d) `load_dataset(hf_id, split=split)` over the network as a last resort.
+    (d) `load_dataset(hf_id, [config,] split=split)` over the network as a
+        last resort.
 
-    When (a) returns a `DatasetDict`, we pick the matching split or the first
-    available; when it returns a single `Dataset`, we use it as-is (and ignore
-    `split` since `save_to_disk` outputs are already split-specific in practice).
+    When (a) returns a `DatasetDict`, pick the matching split or the first
+    available; when it returns a single `Dataset`, use it as-is.
     """
-    from datasets import Dataset  # type: ignore
+    from datasets import Dataset  # type: ignore  # noqa: F401
+
+    def _ld(*args, **kw):
+        return load_dataset(*args, **kw)
 
     if local and os.path.isdir(local):
         if os.path.isfile(os.path.join(local, "dataset_info.json")):
@@ -92,11 +95,12 @@ def _open_dataset(local: str, hf_id: str, split: str):
                 ds = ds[key]
             return ds
         try:
-            return load_dataset(local, split=split)
+            return _ld(local, config, split=split) if config else _ld(local, split=split)
         except Exception as e:
-            print(f"!! load_dataset({local!r}) failed ({e}); trying parquet fallback", flush=True)
-            return load_dataset("parquet", data_dir=local, split="train")
-    return load_dataset(hf_id, split=split)
+            print(f"!! load_dataset({local!r}, config={config!r}, split={split!r}) failed "
+                  f"({e}); trying parquet fallback", flush=True)
+            return _ld("parquet", data_dir=local, split="train")
+    return _ld(hf_id, config, split=split) if config else _ld(hf_id, split=split)
 
 
 def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict]:
@@ -109,9 +113,9 @@ def load_records(name: str, n: int, seed: int, image_dir: Path) -> Iterable[dict
         raise ValueError(f"Unknown benchmark: {name}")
     rng = random.Random(seed)
 
-    hf_id, env_var, split = BENCHMARK_REGISTRY[name]
+    hf_id, env_var, split, config = BENCHMARK_REGISTRY[name]
     local = os.environ.get(env_var, "")
-    ds = _open_dataset(local, hf_id, split)
+    ds = _open_dataset(local, hf_id, split, config=config)
     print(f">>> {name}: {len(ds)} rows  ({'local' if local else 'hf'} {local or hf_id})", flush=True)
 
     indices = list(range(len(ds)))
@@ -209,11 +213,12 @@ def _pick_image(rec: dict):
 
     MathVista ships BOTH `image` (relative string like "images/657.jpg",
     which is meaningless without knowing the dataset root) and `decoded_image`
-    (the actual PIL). POPE ships `image` directly as PIL. Always prefer a
-    PIL-bearing field; only fall back to a string when nothing else exists.
+    (the actual PIL). POPE ships `image` directly as PIL. HallusionBench
+    uses `visual_input`. Always prefer a PIL-bearing field; only fall back
+    to a string when nothing else exists.
     """
     string_fallback = None
-    for key in ("decoded_image", "image", "images"):
+    for key in ("decoded_image", "image", "images", "visual_input"):
         c = rec.get(key)
         if c is None:
             continue
@@ -237,13 +242,22 @@ def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
         or ""
     )
     question = _maybe_append_choices(question, rec)
-    answer = rec.get("answer") or rec.get("label") or rec.get("solution")
+    answer = (
+        rec.get("answer")
+        or rec.get("label")
+        or rec.get("solution")
+        or rec.get("gt_answer")  # HallusionBench
+    )
+    # HallusionBench stores yes/no as "0"/"1"; remap so the yesno scorer fires.
+    if benchmark == "HallusionBench" and isinstance(answer, str) and answer.strip() in {"0", "1"}:
+        answer = {"0": "no", "1": "yes"}[answer.strip()]
     answer, original_answer = _maybe_letter_gold(answer, rec)
     image_path = _save_image(img, image_dir, benchmark, idx)
     # Drop the PIL image from meta (json.dumps default=str would mangle it)
     meta = {
         k: v for k, v in rec.items()
-        if k not in {"image", "images", "decoded_image", "question", "answer"}
+        if k not in {"image", "images", "decoded_image", "visual_input",
+                     "question", "answer"}
     }
     if original_answer is not None:
         meta["original_answer"] = original_answer
