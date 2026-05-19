@@ -52,5 +52,107 @@ else
   echo ">>> ${MS}: already patched (no miles.miles.* found)"
 fi
 
+# --- Patch 2: actor.py env-inspect instrumentation -----------------
+# Adds env-dump + /proc/<pid>/maps scan at the top of actor.py AND at
+# the first line of MegatronTrainRayActor.init(). Output goes to
+# /tmp/actor_inspect_<pid>.log. Idempotent via sentinel marker.
+# Reason: diagnosing why Ray actors keep loading the wrong libnccl
+# (NCCL 2.29.7 from system vs venv's 2.27.5) even after launcher-side
+# LD_LIBRARY_PATH manipulation.
+AC="${MILES_DIR}/miles/backends/megatron_utils/actor.py"
+if [ ! -f "${AC}" ]; then
+  echo "ERROR: ${AC} not found" >&2
+  exit 1
+fi
+
+SENTINEL="# === mllmopd actor inspect patch ==="
+if grep -q "${SENTINEL}" "${AC}"; then
+  echo ">>> ${AC}: already patched (inspect sentinel present)"
+else
+  echo ">>> patching ${AC}: inject env-inspect at top + inside .init()"
+  python3 - <<PY
+import io, os, sys
+
+path = "${AC}"
+sentinel = "${SENTINEL}"
+
+with open(path, "r") as f:
+    src = f.read()
+
+top_block = '''${SENTINEL}
+import os as _mllmopd_os
+_mllmopd_pid = _mllmopd_os.getpid()
+_mllmopd_log = f"/tmp/actor_inspect_{_mllmopd_pid}.log"
+try:
+    with open(_mllmopd_log, "w") as _f:
+        _f.write(f"PID={_mllmopd_pid}\\n")
+        _f.write(f"LD_LIBRARY_PATH={_mllmopd_os.environ.get('LD_LIBRARY_PATH','UNSET')}\\n")
+        _f.write(f"LD_PRELOAD={_mllmopd_os.environ.get('LD_PRELOAD','UNSET')}\\n")
+        _f.write(f"CUDA_VISIBLE_DEVICES={_mllmopd_os.environ.get('CUDA_VISIBLE_DEVICES','UNSET')}\\n")
+        _f.write(f"PATH={_mllmopd_os.environ.get('PATH','UNSET')}\\n")
+        _f.write(f"PYTHONPATH={_mllmopd_os.environ.get('PYTHONPATH','UNSET')}\\n")
+except Exception as _e:
+    pass
+# === end mllmopd actor inspect patch (top) ===
+
+'''
+
+init_block = '''        # === mllmopd actor inspect patch (inside init) ===
+        import os as _mllmopd_os2
+        _mp = _mllmopd_os2.getpid()
+        try:
+            with open(f"/tmp/actor_inspect_{_mp}.log", "a") as _f:
+                _f.write("--- inside MegatronTrainRayActor.init() ---\\n")
+                try:
+                    with open(f"/proc/{_mp}/maps") as _m:
+                        _seen = set()
+                        for _line in _m:
+                            _low = _line.lower()
+                            if any(_k in _low for _k in ["nccl", "libcuda.so", "cudart", "compat"]):
+                                _path = _line.strip().split()[-1] if _line.strip().split() else ""
+                                if _path and _path.startswith("/") and _path not in _seen:
+                                    _seen.add(_path)
+                                    _f.write(_path + "\\n")
+                except Exception as _e:
+                    _f.write(f"maps err: {_e}\\n")
+                import torch as _t
+                _f.write(f"torch.cuda.nccl.version()={_t.cuda.nccl.version()}\\n")
+                _f.write(f"torch.version.cuda={_t.version.cuda}\\n")
+                try:
+                    _t.cuda.init()
+                    _x = _t.zeros(1).cuda()
+                    _f.write(f"cuda ok, device={_t.cuda.get_device_name(0)}\\n")
+                except Exception as _e:
+                    _f.write(f"cuda init failed: {type(_e).__name__}: {_e}\\n")
+        except Exception:
+            pass
+        # === end mllmopd actor inspect patch (inside init) ===
+'''
+
+# Insert top block at line 0 (very beginning).
+new_src = top_block + src
+
+# Insert init block as the first body line of def init(.
+# Locate the line:    monkey_patch_torch_dist()
+# which is currently the first statement of init's body, and insert
+# our block BEFORE it.
+target = "        monkey_patch_torch_dist()"
+if target not in new_src:
+    sys.exit(f"ERROR: could not find anchor '{target.strip()}' in {path}")
+new_src = new_src.replace(target, init_block + target, 1)
+
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted both patch blocks")
+PY
+  echo "    after (first 5 lines):"
+  head -5 "${AC}" | sed 's/^/      /'
+fi
+
 echo
-echo ">>> patch_uni_opd done. Re-run after `git submodule update`."
+echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
+echo
+echo "Inspect after smoke:"
+echo "    ls -la /tmp/actor_inspect_*.log"
+echo "    cat /tmp/actor_inspect_*.log"
