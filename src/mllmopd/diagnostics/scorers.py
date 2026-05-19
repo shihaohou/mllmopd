@@ -22,6 +22,20 @@ _YESNO_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
 _MCQ_LETTER_RE = re.compile(r"(?<![A-Za-z])([A-Ha-h])(?![A-Za-z])")
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _LETTER_LABELS = "ABCDEFGHIJ"
+# MMR1 (and similar R1-style multimodal RL models) is trained to wrap its
+# final answer in `<answer>...</answer>` tags. When present, we restrict
+# scorer parsing to just that segment — the surrounding CoT shouldn't be
+# considered when extracting the model's commitment.
+_ANSWER_TAG_RE = re.compile(r"<answer[^>]*>(.+?)</answer>", re.DOTALL | re.IGNORECASE)
+
+
+def _focus_on_answer_tag(text: str) -> tuple[str, bool]:
+    """If `text` contains `<answer>...</answer>`, return (inner, True);
+    otherwise (text, False). Uses the LAST match if multiple."""
+    matches = list(_ANSWER_TAG_RE.finditer(text))
+    if matches:
+        return matches[-1].group(1).strip(), True
+    return text, False
 
 # Benchmarks where gold is yes/no.
 _YESNO_BENCHMARKS = {"pope_adversarial", "pope", "hallusionbench"}
@@ -214,28 +228,55 @@ def score_for_benchmark(
     scorer name. Pass `choices` (a list of option-text strings, in A/B/C/...
     order) when available; the MCQ parser uses them to recover predictions
     that conclude with option text instead of letter.
+
+    When `pred` contains an `<answer>...</answer>` segment (MMR1-trained
+    format), the scorer restricts extraction to that segment first; if no
+    answer can be found there it falls back to scoring against the whole
+    prediction. parse_path is prefixed with `tag:` when the answer-tag
+    segment was used.
     """
     if gold is None or str(gold).strip() == "":
         return None, "skip_empty_gold", "skip_empty_gold"
 
+    focused, used_tag = _focus_on_answer_tag(pred)
+    pred_to_score = focused if used_tag else pred
+
     b = benchmark.lower()
     if any(k in b for k in _YESNO_BENCHMARKS):
-        return score_yesno(pred, gold), "yesno", "yesno"
+        res = score_yesno(pred_to_score, gold)
+        if used_tag and res is False:
+            # Tag scoring failed; fall back to whole prediction in case the
+            # answer leaked outside the (possibly malformed) tag region.
+            res_full = score_yesno(pred, gold)
+            if res_full is True:
+                return True, "yesno", "yesno_after_tag_fallback"
+        return res, "yesno", ("tag:yesno" if used_tag else "yesno")
 
     g = str(gold).strip()
     if len(g) == 1 and "A" <= g.upper() <= "H":
-        res, path = score_mcq_letter_v2(pred, gold, choices=choices)
-        return res, "mcq_letter", path
+        res, path = score_mcq_letter_v2(pred_to_score, gold, choices=choices)
+        if used_tag and res is False:
+            res_full, path_full = score_mcq_letter_v2(pred, gold, choices=choices)
+            if res_full is True:
+                return True, "mcq_letter", f"tag_fallback:{path_full}"
+        return res, "mcq_letter", (f"tag:{path}" if used_tag else path)
 
     try:
         float(g.rstrip("%"))
-        return score_numeric(pred, gold), "numeric", "numeric"
+        res = score_numeric(pred_to_score, gold)
+        if used_tag and res is False:
+            res_full = score_numeric(pred, gold)
+            if res_full is True:
+                return True, "numeric", "numeric_after_tag_fallback"
+        return res, "numeric", ("tag:numeric" if used_tag else "numeric")
     except ValueError:
         pass
 
-    p_low = pred.strip().lower()
+    p_low = pred_to_score.strip().lower()
     g_low = g.lower()
-    return (g_low == p_low or g_low in p_low), "loose_contains", "loose_contains"
+    return (g_low == p_low or g_low in p_low), "loose_contains", (
+        "tag:loose_contains" if used_tag else "loose_contains"
+    )
 
 
 def is_refusal(pred: str) -> bool:

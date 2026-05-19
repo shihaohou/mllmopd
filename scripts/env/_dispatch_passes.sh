@@ -45,13 +45,17 @@ _dispatch_passes() {
         echo ">>> [${tag}] already exists — skipping"
         continue
       fi
+      local -a pass_extra=()
+      if [ -n "${PASS_SYSTEM_PROMPTS+set}" ] && [ -n "${PASS_SYSTEM_PROMPTS[$i]:-}" ]; then
+        pass_extra+=(--system-prompt-text "${PASS_SYSTEM_PROMPTS[$i]}")
+      fi
       echo ">>> [${tag}] GPU=${gpus[0]} model=${model} mode=${mode}"
       CUDA_VISIBLE_DEVICES="${gpus[0]}" python -m "${audit_module}" \
         --subset "${SUBSET}" \
         --model "${model}" \
         --mode "${mode}" \
         --out "${out}" \
-        "${EXTRA_ARGS[@]}"
+        "${EXTRA_ARGS[@]}" "${pass_extra[@]}"
     done
     return 0
   fi
@@ -87,13 +91,21 @@ _dispatch_passes() {
           continue
         fi
         local log="${RUN_DIR}/${tag}.log"
+        # Per-pass overrides: when PASS_SYSTEM_PROMPTS is defined (parallel to
+        # PASS_TAGS), pull this pass's system prompt and forward it to the
+        # runner. Used to inject MMR1's training-time prompt for MMR1 models
+        # only — Base passes get an empty string and the arg is omitted.
+        local -a pass_extra=()
+        if [ -n "${PASS_SYSTEM_PROMPTS+set}" ] && [ -n "${PASS_SYSTEM_PROMPTS[$idx]:-}" ]; then
+          pass_extra+=(--system-prompt-text "${PASS_SYSTEM_PROMPTS[$idx]}")
+        fi
         echo ">>> [${tag}] GPU=${gpu} model=${model} mode=${mode}  log=${log}"
         CUDA_VISIBLE_DEVICES="${gpu}" python -m "${audit_module}" \
           --subset "${SUBSET}" \
           --model "${model}" \
           --mode "${mode}" \
           --out "${out}" \
-          "${EXTRA_ARGS[@]}" >"${log}" 2>&1
+          "${EXTRA_ARGS[@]}" "${pass_extra[@]}" >"${log}" 2>&1
       done
     ) &
     pids+=($!)

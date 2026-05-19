@@ -79,11 +79,20 @@ def _build_model(model_id: str):
     return processor, model
 
 
-def _build_messages(rec: dict, transformed, prefix):
-    """Build the chat-template message list for a single sample."""
+def _build_messages(rec: dict, transformed, prefix, system_prompt: str = ""):
+    """Build the chat-template message list for a single sample.
+
+    `system_prompt`, when non-empty, is **prepended into the user-turn text**
+    (NOT as a separate system role) to match how MMR1's training script wires
+    its system prompt into verl's dataset pipeline. Joining is single-space
+    after `.strip()`, mirroring `verl/utils/dataset.py`:
+        prompt_str = " ".join((system_prompt.strip(), prompt_str))
+    """
     question = rec.get("question", "")
     if prefix:
         question = prefix + question
+    if system_prompt:
+        question = system_prompt.strip() + " " + question
     return [{
         "role": "user",
         "content": [
@@ -149,8 +158,10 @@ def _process_batch(processor, model, args, batch, fout):
     import torch  # noqa: F401
 
     chats = [
-        processor.apply_chat_template(_build_messages(rec, t, p),
-                                      add_generation_prompt=True, tokenize=False)
+        processor.apply_chat_template(
+            _build_messages(rec, t, p, system_prompt=args.system_prompt_text),
+            add_generation_prompt=True, tokenize=False,
+        )
         for rec, t, p in batch
     ]
     images = [t for _, t, _ in batch if t is not None]
@@ -222,6 +233,11 @@ def main() -> None:
                          "usually safe for 7B bf16 and gives 3-5x throughput.")
     ap.add_argument("--debug", action="store_true",
                     help="dump prompt + raw generation + scoring to stderr (use with --limit 2)")
+    ap.add_argument("--system-prompt-text", default="",
+                    help="Text prepended to the user-turn (NOT a separate system "
+                         "role). Use this to inject MMR1's training-time system "
+                         "prompt so MMR1 models emit <think>...</think><answer>... "
+                         "\\boxed{}...</answer>; leave empty for plain Qwen2.5-VL.")
     args = ap.parse_args()
 
     processor, model = _build_model(args.model)

@@ -50,11 +50,11 @@ from mllmopd.diagnostics.run_audit_pass import (
 )
 
 
-def _build_chat_text(tokenizer, rec, transformed, prefix) -> str:
+def _build_chat_text(tokenizer, rec, transformed, prefix, system_prompt: str = "") -> str:
     """Produce chat-template text with image placeholder tokens. We use the
     plain tokenizer (not AutoProcessor) because sglang handles the image
     embedding itself; we only need the textual scaffold here."""
-    messages = _build_messages(rec, transformed, prefix)
+    messages = _build_messages(rec, transformed, prefix, system_prompt=system_prompt)
     return tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False,
     )
@@ -118,7 +118,10 @@ def _prepare_requests(args, tokenizer):
             caption=rec.get("meta", {}).get("caption"),
         )
 
-        prompt_text = _build_chat_text(tokenizer, rec, transformed, prefix)
+        prompt_text = _build_chat_text(
+            tokenizer, rec, transformed, prefix,
+            system_prompt=args.system_prompt_text,
+        )
         image_data = [transformed] if transformed is not None else None
         requests.append((rec, prompt_text, image_data))
     return requests, skipped
@@ -190,6 +193,10 @@ def main() -> None:
                          "Leave unset to use sglang's default for the GPU.")
     ap.add_argument("--debug", action="store_true",
                     help="Print prompt + generation + scoring for each emitted row.")
+    ap.add_argument("--system-prompt-text", default="",
+                    help="Text prepended to the user-turn (NOT a separate system "
+                         "role). Set this to MMR1's training-time system prompt "
+                         "when scoring MMR1 models; leave empty for Qwen2.5-VL.")
     args = ap.parse_args()
 
     # Disable cuDNN before anything imports torch heavily. sglang warns that

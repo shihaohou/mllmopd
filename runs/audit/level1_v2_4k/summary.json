@@ -537,13 +537,15 @@
       },
       "parse_paths": {
         "option_phrase": 34,
-        "loose_contains": 64,
-        "last_letter_fallback": 67,
+        "loose_contains": 61,
+        "last_letter_fallback": 65,
         "answer_phrase": 4,
         "numeric": 21,
+        "tag:loose_contains": 3,
         "final_answer": 2,
         "boxed": 2,
         "none": 5,
+        "tag_fallback:last_letter_fallback": 2,
         "paren_tail": 1
       },
       "rescore_changed": 0,
@@ -570,10 +572,12 @@
         "choice_text": 11,
         "last_letter_fallback": 42,
         "paren_tail": 13,
-        "numeric": 73,
-        "boxed": 18,
+        "numeric": 70,
+        "tag:boxed": 3,
+        "boxed": 15,
         "answer_phrase": 9,
         "option_phrase": 28,
+        "tag:numeric": 3,
         "loose_contains": 1,
         "correct_choice": 4,
         "final_answer": 1
@@ -581,7 +585,7 @@
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.54,
       "refusal_rate": 0.085,
-      "mcq_high_conf_rate": 0.5634920634920635
+      "mcq_high_conf_rate": 0.5396825396825397
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -599,20 +603,22 @@
       },
       "parse_paths": {
         "numeric": 92,
-        "choice_text": 32,
-        "last_letter_fallback": 16,
-        "option_phrase": 30,
+        "choice_text": 30,
+        "last_letter_fallback": 15,
+        "option_phrase": 29,
         "answer_phrase": 10,
         "boxed": 10,
         "paren_tail": 2,
         "final_answer": 1,
+        "tag:none": 1,
         "correct_answer": 4,
-        "correct_choice": 3
+        "correct_choice": 3,
+        "tag:choice_text": 3
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.205,
       "refusal_rate": 0.045,
-      "mcq_high_conf_rate": 0.8333333333333334
+      "mcq_high_conf_rate": 0.8055555555555556
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -695,14 +701,18 @@
         "numeric": 21
       },
       "parse_paths": {
-        "last_letter_fallback": 71,
-        "loose_contains": 64,
+        "last_letter_fallback": 67,
+        "loose_contains": 52,
+        "tag:loose_contains": 12,
         "option_phrase": 35,
-        "numeric": 21,
+        "numeric": 20,
         "final_answer": 1,
+        "tag_fallback:last_letter_fallback": 3,
         "boxed": 3,
+        "tag:numeric": 1,
         "correct_choice": 3,
         "paren_tail": 1,
+        "tag:none": 1,
         "answer_phrase": 1
       },
       "rescore_changed": 0,
@@ -728,11 +738,13 @@
       "parse_paths": {
         "last_letter_fallback": 43,
         "paren_tail": 6,
-        "numeric": 73,
+        "numeric": 69,
         "choice_text": 8,
-        "boxed": 18,
+        "boxed": 16,
         "answer_phrase": 5,
         "option_phrase": 41,
+        "tag:numeric": 4,
+        "tag:boxed": 2,
         "correct_choice": 2,
         "loose_contains": 1,
         "correct_answer": 2,
@@ -741,7 +753,7 @@
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.565,
       "refusal_rate": 0.0,
-      "mcq_high_conf_rate": 0.6031746031746031
+      "mcq_high_conf_rate": 0.5873015873015873
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -758,21 +770,25 @@
         "mcq_letter": 108
       },
       "parse_paths": {
-        "numeric": 92,
+        "numeric": 91,
         "correct_choice": 7,
-        "boxed": 10,
-        "option_phrase": 17,
+        "boxed": 8,
+        "option_phrase": 16,
         "answer_phrase": 10,
         "last_letter_fallback": 12,
-        "choice_text": 45,
+        "choice_text": 43,
+        "tag:choice_text": 2,
         "paren_tail": 3,
         "correct_answer": 3,
-        "final_answer": 1
+        "tag_fallback:option_phrase": 1,
+        "final_answer": 1,
+        "tag:numeric": 1,
+        "tag:boxed": 2
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.17,
       "refusal_rate": 0.0,
-      "mcq_high_conf_rate": 0.8611111111111112
+      "mcq_high_conf_rate": 0.8148148148148148
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -788,7 +804,8 @@
         "yesno": 200
       },
       "parse_paths": {
-        "yesno": 200
+        "yesno": 199,
+        "tag:yesno": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.005,
@@ -855,20 +872,23 @@
         "numeric": 21
       },
       "parse_paths": {
-        "option_phrase": 46,
+        "option_phrase": 45,
         "last_letter_fallback": 36,
         "loose_contains": 64,
-        "numeric": 21,
+        "numeric": 20,
         "paren_tail": 3,
         "none": 22,
-        "boxed": 3,
+        "tag:boxed": 1,
+        "boxed": 2,
+        "tag_fallback:option_phrase": 1,
+        "tag:numeric": 1,
         "answer_phrase": 4,
-        "correct_choice": 1
+        "tag:none": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.22,
       "refusal_rate": 0.06,
-      "mcq_high_conf_rate": 0.46956521739130436
+      "mcq_high_conf_rate": 0.4434782608695652
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -889,17 +909,19 @@
         "last_letter_fallback": 54,
         "numeric": 73,
         "choice_text": 8,
-        "boxed": 16,
+        "tag:boxed": 3,
         "answer_phrase": 7,
-        "option_phrase": 29,
+        "option_phrase": 28,
+        "boxed": 13,
         "paren_tail": 10,
         "correct_choice": 2,
-        "loose_contains": 1
+        "loose_contains": 1,
+        "tag_fallback:option_phrase": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.5,
       "refusal_rate": 0.08,
-      "mcq_high_conf_rate": 0.49206349206349204
+      "mcq_high_conf_rate": 0.4603174603174603
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -920,8 +942,9 @@
         "boxed": 17,
         "last_letter_fallback": 12,
         "choice_text": 41,
-        "option_phrase": 22,
+        "option_phrase": 21,
         "correct_choice": 4,
+        "tag:choice_text": 1,
         "paren_tail": 3,
         "correct_answer": 1,
         "answer_phrase": 5,
@@ -930,7 +953,7 @@
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.145,
       "refusal_rate": 0.085,
-      "mcq_high_conf_rate": 0.8611111111111112
+      "mcq_high_conf_rate": 0.8518518518518519
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-RL",
@@ -1015,16 +1038,18 @@
       "parse_paths": {
         "answer_phrase": 3,
         "last_letter_fallback": 67,
-        "loose_contains": 64,
+        "loose_contains": 63,
         "option_phrase": 40,
         "numeric": 21,
-        "boxed": 2,
-        "none": 3
+        "tag:loose_contains": 1,
+        "boxed": 1,
+        "none": 3,
+        "tag:boxed": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.425,
       "refusal_rate": 0.055,
-      "mcq_high_conf_rate": 0.391304347826087
+      "mcq_high_conf_rate": 0.3826086956521739
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",
@@ -1074,21 +1099,25 @@
         "mcq_letter": 108
       },
       "parse_paths": {
-        "numeric": 92,
+        "numeric": 91,
         "answer_phrase": 9,
-        "option_phrase": 30,
+        "option_phrase": 27,
         "choice_text": 33,
-        "correct_choice": 4,
+        "correct_choice": 3,
         "last_letter_fallback": 16,
-        "boxed": 7,
+        "boxed": 6,
+        "tag:choice_text": 3,
         "correct_answer": 4,
         "final_answer": 2,
-        "paren_tail": 3
+        "paren_tail": 3,
+        "tag:numeric": 1,
+        "tag_fallback:option_phrase": 1,
+        "tag:correct_choice": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.305,
       "refusal_rate": 0.035,
-      "mcq_high_conf_rate": 0.8240740740740741
+      "mcq_high_conf_rate": 0.7777777777777778
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",
@@ -1126,8 +1155,9 @@
         "loose_contains": 49
       },
       "parse_paths": {
-        "numeric": 151,
-        "loose_contains": 49
+        "tag:numeric": 1,
+        "loose_contains": 49,
+        "numeric": 150
       },
       "rescore_changed": 131,
       "hit_max_tokens_rate": 0.115,
@@ -1171,20 +1201,25 @@
         "numeric": 21
       },
       "parse_paths": {
-        "last_letter_fallback": 49,
-        "loose_contains": 64,
-        "option_phrase": 57,
-        "numeric": 21,
+        "last_letter_fallback": 48,
+        "loose_contains": 62,
+        "option_phrase": 55,
+        "numeric": 20,
+        "tag:none": 1,
+        "tag_fallback:last_letter_fallback": 1,
         "answer_phrase": 4,
         "paren_tail": 1,
+        "tag:numeric": 1,
         "correct_choice": 2,
+        "tag:option_phrase": 1,
         "final_answer": 1,
+        "tag:loose_contains": 2,
         "boxed": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.485,
       "refusal_rate": 0.0,
-      "mcq_high_conf_rate": 0.5652173913043478
+      "mcq_high_conf_rate": 0.5478260869565217
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",
@@ -1203,7 +1238,7 @@
       },
       "parse_paths": {
         "last_letter_fallback": 60,
-        "numeric": 73,
+        "numeric": 72,
         "correct_choice": 6,
         "choice_text": 9,
         "answer_phrase": 7,
@@ -1211,6 +1246,7 @@
         "option_phrase": 37,
         "correct_answer": 2,
         "boxed": 2,
+        "tag:numeric": 1,
         "loose_contains": 1
       },
       "rescore_changed": 0,
@@ -1306,7 +1342,8 @@
         "yesno": 200
       },
       "parse_paths": {
-        "yesno": 200
+        "yesno": 199,
+        "tag:yesno": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.045,
@@ -1318,29 +1355,31 @@
       "mode": "text_only",
       "benchmark": "MathVerse",
       "n": 200,
-      "accuracy": 0.24,
+      "accuracy": 0.245,
       "n_scored": 200,
       "tokens_mean": 550.91,
       "tokens_median": 629.5,
-      "acc_per_token": 0.00043564284468308284,
+      "acc_per_token": 0.00044471873728064705,
       "scorers": {
         "mcq_letter": 115,
         "loose_contains": 64,
         "numeric": 21
       },
       "parse_paths": {
-        "last_letter_fallback": 44,
+        "last_letter_fallback": 43,
         "loose_contains": 64,
         "numeric": 21,
-        "option_phrase": 43,
+        "tag:none": 1,
+        "option_phrase": 42,
         "none": 22,
         "correct_choice": 3,
+        "tag:last_letter_fallback": 1,
         "answer_phrase": 3
       },
-      "rescore_changed": 0,
+      "rescore_changed": 1,
       "hit_max_tokens_rate": 0.365,
       "refusal_rate": 0.055,
-      "mcq_high_conf_rate": 0.4260869565217391
+      "mcq_high_conf_rate": 0.41739130434782606
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",
@@ -1360,12 +1399,14 @@
       "parse_paths": {
         "paren_tail": 5,
         "option_phrase": 32,
-        "answer_phrase": 9,
+        "answer_phrase": 8,
         "numeric": 73,
-        "last_letter_fallback": 62,
+        "last_letter_fallback": 61,
+        "tag:last_letter_fallback": 1,
         "boxed": 5,
         "correct_answer": 4,
         "choice_text": 4,
+        "tag:choice_text": 1,
         "loose_contains": 1,
         "none": 2,
         "correct_choice": 3
@@ -1373,7 +1414,7 @@
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.715,
       "refusal_rate": 0.075,
-      "mcq_high_conf_rate": 0.4523809523809524
+      "mcq_high_conf_rate": 0.4444444444444444
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",
@@ -1392,20 +1433,22 @@
       "parse_paths": {
         "numeric": 92,
         "choice_text": 54,
-        "option_phrase": 25,
+        "option_phrase": 23,
         "boxed": 7,
         "last_letter_fallback": 10,
         "correct_choice": 2,
         "answer_phrase": 3,
+        "tag_fallback:option_phrase": 1,
         "final_answer": 1,
         "paren_tail": 3,
         "correct_answer": 2,
-        "none": 1
+        "none": 1,
+        "tag:option_phrase": 1
       },
       "rescore_changed": 0,
       "hit_max_tokens_rate": 0.295,
       "refusal_rate": 0.07,
-      "mcq_high_conf_rate": 0.8703703703703703
+      "mcq_high_conf_rate": 0.8518518518518519
     },
     {
       "model": "/home/web_server/antispam/project/houshihao/models/MMR1-7B-SFT",

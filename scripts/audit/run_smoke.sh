@@ -109,6 +109,25 @@ if [ -n "${BASE_CKPT:-}" ]; then
   PASS_MODES+=(full_image blank_image text_only)
 fi
 
+# Per-pass system prompt (parallel to PASS_TAGS). MMR1 was trained with a
+# specific system prompt that conditions it to emit `<think>...</think>
+# <answer>... \boxed{} ...</answer>`; without it the model goes
+# off-distribution and final-answer extraction misses ~50% of records, which
+# is the cause of the 5-10pt gap to MMR1's paper-reported numbers. The
+# prompt below is verbatim from the MMR1 training repo
+# (LengSicong/MMR1: examples/mmr1/train_qwen2_5_vl_7b.sh, system_prompt
+# field), threaded through verl as a user-turn prepend. Base passes get
+# an empty string and don't receive the prompt.
+MMR1_SYSTEM_PROMPT='A conversation between User and Assistant. The User provides an image and asks a question. The Assistant first analyzes both the image and the question, then carefully thinks about the reasoning process step by step, and finally provides the User with an accurate answer. The Assistant must carefully checkout the correctness and validity of each reasoning step. If any errors or inconsistencies are found during the reasoning process, the Assistant reflects and corrects them logically. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here, with potential reflections and corrections </think><answer> final answer here, with the key result enclosed in \boxed{} </answer>.'
+
+PASS_SYSTEM_PROMPTS=()
+for tag in "${PASS_TAGS[@]}"; do
+  case "${tag}" in
+    Base_*) PASS_SYSTEM_PROMPTS+=("") ;;
+    *)      PASS_SYSTEM_PROMPTS+=("${MMR1_SYSTEM_PROMPT}") ;;
+  esac
+done
+
 # shellcheck source=../env/_dispatch_passes.sh disable=SC1091
 source scripts/env/_dispatch_passes.sh
 
