@@ -282,22 +282,17 @@ echo "  ROLLOUT_MAX_RESPONSE_LEN: ${ROLLOUT_MAX_RESPONSE_LEN}"
 echo "================================================================"
 
 # --- Launch Ray ---
+# Uni-OPD ships a multi-host ray start script at
+# ${MILES_DIR}/Uni_OPD_utils/scripts/ray/start_ray.sh, but it depends on
+# a `network_envs.sh` that isn't part of the submodule checkout AND on
+# a LOCAL_IP env var supplied by Tencent's internal infra (it then runs
+# `ray start --node-ip-address $LOCAL_IP`). On our single-node dev box
+# that script feeds an empty `--node-ip-address ''` and Ray bails with
+# "Malformed host: ". We skip those scripts entirely and bring Ray up
+# locally — single host, all trainer GPUs.
 LAUNCHER_SCRIPT="${MILES_DIR}/Uni_OPD_utils/ray_launcher.py"
-STOP_RAY_SCRIPT="${MILES_DIR}/Uni_OPD_utils/scripts/ray/stop_ray.sh"
-STOP_SGLANG_SCRIPT="${MILES_DIR}/Uni_OPD_utils/scripts/server/stop_server.sh"
-START_RAY_SCRIPT="${MILES_DIR}/Uni_OPD_utils/scripts/ray/start_ray.sh"
-NETWORK_ENV_SCRIPT="${MILES_DIR}/Uni_OPD_utils/scripts/ray/network_envs.sh"
 
-# Stop stale Ray (don't stop sglang — our teacher server is separate
-# from rollout sglang; killing it would kill the teacher).
-bash "${STOP_RAY_SCRIPT}" || true
-bash "${START_RAY_SCRIPT}"
-
-# Network envs
-# shellcheck disable=SC1090
-source "${NETWORK_ENV_SCRIPT}"
-
-# NVLink detection (mirror reference launcher). NCCL prefers NVLS only if available.
+# NVLink detection — auto-set NCCL_NVLS_ENABLE.
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 HAS_NVLINK=$([ "$NVLINK_COUNT" -gt 0 ] && echo 1 || echo 0)
 echo ">>> NVLink links detected: ${NVLINK_COUNT}  (NCCL_NVLS_ENABLE=${HAS_NVLINK})"
@@ -310,6 +305,15 @@ export NCCL_NVLS_ENABLE="${HAS_NVLINK}"
 # NCCL_DEBUG is set above by DEBUG_MODE=1; otherwise default WARN.
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
+# Pin trainer-visible GPUs before ray-start so Ray and Megatron see the
+# same device set. Teacher server uses its own CUDA_VISIBLE_DEVICES.
+export CUDA_VISIBLE_DEVICES="${TRAINER_GPUS}"
+echo ">>> trainer CUDA_VISIBLE_DEVICES=${TRAINER_GPUS} (--num-gpus ${ACTOR_NUM_GPUS_PER_NODE})"
+
+# Stop stale Ray, then start a local single-node cluster.
+ray stop --force >/dev/null 2>&1 || true
+ray start --head --num-gpus "${ACTOR_NUM_GPUS_PER_NODE}" --disable-usage-stats
+
 # Diagnostic-hook outputs are keyed on these:
 export MLLMOPD_RUNS OPD_RUN_NAME OPD_TEACHER_IMAGE_MODE
 
@@ -318,8 +322,8 @@ TRAIN_LOG_FILE="${LOG_DIR}/train_${CUR_TIME}.log"
 cd "${MILES_DIR}"  # train.py expects miles/ as cwd
 
 set -x
-CUDA_VISIBLE_DEVICES="${TRAINER_GPUS}" \
-  python "${LAUNCHER_SCRIPT}" train.py \
+# CUDA_VISIBLE_DEVICES is already exported above (before ray start).
+python "${LAUNCHER_SCRIPT}" train.py \
     --actor-num-nodes "${ACTOR_NUM_NODES}" \
     --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}" \
