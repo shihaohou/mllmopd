@@ -139,7 +139,12 @@ def aggregate(run_dir: Path) -> dict:
                 refusal += 1
             if scorer_used == "mcq_letter":
                 n_mcq += 1
-                if parse_path in scorers.HIGH_CONFIDENCE_PATHS:
+                # parse_path is prefixed with "tag:" when the answer came from
+                # inside an <answer>...</answer> segment (MMR1-style); strip
+                # the prefix before checking against HIGH_CONFIDENCE_PATHS
+                # since extraction within the tag is equally (more) reliable.
+                bare_path = parse_path.removeprefix("tag:") if parse_path else parse_path
+                if bare_path in scorers.HIGH_CONFIDENCE_PATHS:
                     high_conf += 1
 
         acc = (sum(1 for c in correct_new if c) / len(correct_new)) if correct_new else None

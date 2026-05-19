@@ -24,6 +24,8 @@
 !/runs/audit/smoke500/
 !/runs/audit/level1_smoke/
 !/runs/audit/level1_v2_4k/
+!/runs/audit/level1_v3_sysprompt/
+!/runs/audit/level1_v4_sysprompt_fixed/
 /data/
 /models/
 wandb/
@@ -66,4 +68,6 @@ venv/
 !/runs/audit/smoke500/*.log
 !/runs/audit/level1_smoke/*.log
 !/runs/audit/level1_v2_4k/*.log
+!/runs/audit/level1_v3_sysprompt/*.log
+!/runs/audit/level1_v4_sysprompt_fixed/*.log
 logs/
