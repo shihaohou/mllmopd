@@ -66,8 +66,20 @@ source .env
 : "${MMR1_3B_SFT_CKPT:?}"
 : "${MMR1_7B_RL_CKPT:?}"
 : "${MLLMOPD_RUNS:?}"
-: "${MILES_DIR:?}"
-: "${MEGATRON_PATH:?}"
+
+# In-repo submodule paths as fallbacks. The repo ships
+# third_party/Uni-OPD and third_party/Megatron-LM as git submodules; if the
+# operator's .env doesn't override, those are the right paths.
+MILES_DIR="${MILES_DIR:-third_party/Uni-OPD/miles}"
+MEGATRON_PATH="${MEGATRON_PATH:-third_party/Megatron-LM}"
+if [ ! -d "${MILES_DIR}" ]; then
+  echo "ERROR: MILES_DIR=${MILES_DIR} not found (did you init submodules?)" >&2
+  exit 1
+fi
+if [ ! -d "${MEGATRON_PATH}" ]; then
+  echo "ERROR: MEGATRON_PATH=${MEGATRON_PATH} not found (did you init submodules?)" >&2
+  exit 1
+fi
 
 # --- Arm selector ---
 OPD_TEACHER_IMAGE_MODE="${OPD_TEACHER_IMAGE_MODE:-full}"
