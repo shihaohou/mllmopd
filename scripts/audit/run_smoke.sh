@@ -55,9 +55,29 @@ if [ "${AUDIT_BATCH:-1}" != "1" ]; then
   EXTRA_ARGS+=(--batch-size "${AUDIT_BATCH}")
 fi
 
-PASS_TAGS=(T_RL_full              T_RL_blank             S_full                 S_blank                S_text_only)
-PASS_MODELS=("${MMR1_7B_RL_CKPT}" "${MMR1_7B_RL_CKPT}"  "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}")
-PASS_MODES=(full_image            blank_image            full_image             blank_image            text_only)
+# Default: full 3-mode audit for the OPD teacher (T_RL) and student (S).
+# T_RL_text_only is included by default since smoke500 onwards — handoff
+# §4.3 / §5.2 use it for the "RL refuses less than SFT" diagnostic.
+PASS_TAGS=(T_RL_full              T_RL_blank             T_RL_text_only         S_full                 S_blank                S_text_only)
+PASS_MODELS=("${MMR1_7B_RL_CKPT}" "${MMR1_7B_RL_CKPT}"  "${MMR1_7B_RL_CKPT}"   "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}" "${MMR1_3B_SFT_CKPT}")
+PASS_MODES=(full_image            blank_image            text_only              full_image             blank_image            text_only)
+
+# Optional: same-size pre-RL control (MMR1-7B-SFT). Set MMR1_7B_SFT_CKPT to add
+# T_SFT × 3 modes — separates "size effect (3B SFT vs 7B SFT)" from "RL effect
+# (7B SFT vs 7B RL)". Needed for any H3 claim about RL transferring artifacts.
+if [ -n "${MMR1_7B_SFT_CKPT:-}" ]; then
+  PASS_TAGS+=(T_SFT_full T_SFT_blank T_SFT_text_only)
+  PASS_MODELS+=("${MMR1_7B_SFT_CKPT}" "${MMR1_7B_SFT_CKPT}" "${MMR1_7B_SFT_CKPT}")
+  PASS_MODES+=(full_image blank_image text_only)
+fi
+
+# Optional: pre-post-training base (Qwen2.5-VL-Instruct). Set BASE_CKPT to add
+# Base × 3 modes — the "what did post-training add" reference.
+if [ -n "${BASE_CKPT:-}" ]; then
+  PASS_TAGS+=(Base_full Base_blank Base_text_only)
+  PASS_MODELS+=("${BASE_CKPT}" "${BASE_CKPT}" "${BASE_CKPT}")
+  PASS_MODES+=(full_image blank_image text_only)
+fi
 
 # shellcheck source=../env/_dispatch_passes.sh disable=SC1091
 source scripts/env/_dispatch_passes.sh
