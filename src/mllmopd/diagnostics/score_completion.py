@@ -1,6 +1,6 @@
 """H2 audit: forced-decoding logprob extraction for "visual dependency".
 
-For each completion in a source JSONL (output of `run_audit_pass`), compute
+For each completion in a source JSONL (output of `run_audit_pass*`), compute
 per-token logprobs of the completion under the same model in two image
 conditions: full_image and blank_image. The per-token difference
 
@@ -8,13 +8,17 @@ conditions: full_image and blank_image. The per-token difference
 
 is the visual dependency at that token (positive = the image actively
 raises the probability of this token). This unlocks H2 audit: does the
-OPD reward / KL signal concentrate on tokens with high VD (good — the
-visually-grounded tokens are what gets supervised) or low VD (bad — OPD
-loss mass falls on language-model-prior tokens that the image didn't help
-generate)?
+OPD reward / KL signal concentrate on tokens with high VD (visually
+grounded) or low VD (language-prior, "would have said anyway")?
 
-Source jsonl provides the completion (the model's own full-image
-generation). Subset jsonl provides the image. They are joined by `id`.
+Backend: sglang. Forced decoding with `return_logprob=True` and
+`max_new_tokens=1` (the generated token is discarded — we only want the
+prompt's per-token logprobs). HF transformers backend was dropped because
+the 500 × 2 forward-pass workload is decode-bound under HF batch=1 and
+takes >1h; sglang submits all 1000 forced-decode calls and finishes in
+minutes.
+
+Must run in the train venv (sglang installed).
 
 Usage:
     python -m mllmopd.diagnostics.score_completion \\
@@ -37,16 +41,11 @@ import time
 from pathlib import Path
 
 from mllmopd.data import mllm_corruptions
-from mllmopd.diagnostics.run_audit_pass import _build_model, _load_subset
+from mllmopd.diagnostics.run_audit_pass import _load_subset
 
 
-def _build_prefix_and_full(processor, rec, image, response_text: str) -> tuple[str, str]:
-    """Build (prefix_text, full_text) where:
-      - prefix_text = chat template with assistant generation prompt opened, no content
-      - full_text   = prefix_text + assistant's actual response_text appended
-
-    The processor will tokenize each and expand image patches identically
-    because the image is the same; only the trailing text differs."""
+def _build_prefix_and_full(tokenizer, rec, image, response_text: str) -> tuple[str, str]:
+    """Chat-template prefix + assistant response = scoring prompt."""
     messages = [{
         "role": "user",
         "content": [
@@ -54,50 +53,10 @@ def _build_prefix_and_full(processor, rec, image, response_text: str) -> tuple[s
             {"type": "text", "text": rec.get("question", "")},
         ],
     }]
-    prefix_text = processor.apply_chat_template(
+    prefix_text = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False,
     )
-    full_text = prefix_text + response_text
-    return prefix_text, full_text
-
-
-def _logp_for_response(model, processor, rec, response_text, image):
-    """Forward-pass `model` on prefix+response with `image`, then extract
-    per-token logprobs of the response. Returns:
-        (response_token_ids, response_logp, response_start_idx) on success
-        None on tokenization mismatch (rare; logged to stderr)."""
-    import torch
-    import torch.nn.functional as F
-
-    prefix_text, full_text = _build_prefix_and_full(processor, rec, image, response_text)
-    proc_kwargs = dict(return_tensors="pt")
-    if image is not None:
-        proc_kwargs["images"] = image
-
-    prefix_inputs = processor(text=prefix_text, **proc_kwargs).to(model.device)
-    full_inputs = processor(text=full_text, **proc_kwargs).to(model.device)
-
-    response_start = prefix_inputs.input_ids.shape[1]
-    full_ids = full_inputs.input_ids[0]
-    if response_start >= full_ids.shape[0]:
-        return None  # empty response after tokenization
-
-    with torch.no_grad():
-        out = model(**full_inputs)
-    # logits shape (1, T, V); logits[i-1] predicts token at position i
-    logp = F.log_softmax(out.logits[0].float(), dim=-1)
-
-    response_token_ids = full_ids[response_start:].tolist()
-    response_logp = [
-        logp[response_start + j - 1, full_ids[response_start + j]].item()
-        for j in range(len(response_token_ids))
-    ]
-    return response_token_ids, response_logp, response_start
-
-
-def _decode_per_token(tokenizer, token_ids):
-    """Map each token id to its decoded string, for the visualization layer."""
-    return [tokenizer.decode([t]) for t in token_ids]
+    return prefix_text, prefix_text + response_text
 
 
 def _load_source_index(path: Path) -> dict[str, dict]:
@@ -112,7 +71,7 @@ def _load_source_index(path: Path) -> dict[str, dict]:
     return idx
 
 
-def _load_subset_image(rec, image_dir_root: Path | None = None):
+def _load_subset_image(rec):
     image_field = rec.get("image")
     if isinstance(image_field, list) and image_field:
         image_field = image_field[0]
@@ -127,6 +86,41 @@ def _load_subset_image(rec, image_dir_root: Path | None = None):
     return None
 
 
+def _extract_input_logprobs(out) -> list[float] | None:
+    """Pull per-input-token logprobs from one sglang output. Handles API drift:
+    sglang has named this field a few different ways across versions
+    (`input_token_logprobs`, `input_logprobs`, `prompt_token_logprobs`).
+    Entries can be either floats or `(logprob, token_id, token_text)` tuples."""
+    if isinstance(out, dict):
+        meta = out.get("meta_info") or {}
+    else:
+        meta = getattr(out, "meta_info", {}) or {}
+    for key in ("input_token_logprobs", "input_logprobs", "prompt_token_logprobs"):
+        v = meta.get(key)
+        if v is None:
+            continue
+        if not v:
+            return []
+        if isinstance(v[0], (list, tuple)):
+            # Tuple/list per token: take first element (the logprob).
+            # Some entries (e.g. the BOS position) may have None — coerce to 0.0.
+            return [float(item[0]) if item[0] is not None else 0.0 for item in v]
+        return [float(x) if x is not None else 0.0 for x in v]
+    return None
+
+
+def _engine_generate(engine, prompts, image_data_list, sampling_params, **kwargs):
+    """Wrap engine.generate to keep image_data optional + handle batched logprob calls."""
+    call_kwargs = {
+        "prompt": prompts,
+        "sampling_params": sampling_params,
+        **kwargs,
+    }
+    if any(img is not None for img in image_data_list):
+        call_kwargs["image_data"] = image_data_list
+    return engine.generate(**call_kwargs)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--subset", required=True, type=Path,
@@ -137,111 +131,184 @@ def main() -> None:
                     help="model to score under (typically the source-completion's own model)")
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--chunk-size", type=int, default=50,
+                    help="K requests per engine call. Throughput is dominated by "
+                         "continuous batching inside sglang, so chunk size only "
+                         "affects how often progress is printed.")
+    ap.add_argument("--mem-fraction", type=float, default=0.85)
+    ap.add_argument("--max-running-requests", type=int, default=64)
     ap.add_argument("--debug", action="store_true",
-                    help="print top/bottom visual-dependency tokens per row")
+                    help="dump per-row visual-dependency summary to stderr")
     args = ap.parse_args()
 
-    print(f">>> loading model {args.model}", file=sys.stderr)
-    processor, model = _build_model(args.model)
-    tokenizer = processor.tokenizer
+    # Same cuDNN init race precaution as run_audit_pass_sglang (see common-pitfalls E1).
+    import torch  # noqa: F401
+    torch.backends.cudnn.enabled = False
+
+    from transformers import AutoTokenizer  # type: ignore
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     src_by_id = _load_source_index(args.source)
     print(f">>> loaded {len(src_by_id)} source completions from {args.source}", file=sys.stderr)
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
+    # Build per-record request payload (prefix + response text, full / blank images,
+    # and a count of response tokens so we can slice the right tail from logprobs).
+    requests: list[dict] = []
     skipped = 0
+    for rec in _load_subset(args.subset):
+        if args.limit and len(requests) >= args.limit:
+            break
+        rid = rec["id"]
+        src = src_by_id.get(rid)
+        if src is None:
+            continue
+        response = (src.get("prediction") or "").strip()
+        if not response:
+            continue
+        pil = _load_subset_image(rec)
+        if pil is None:
+            skipped += 1
+            continue
+
+        full_img, _ = mllm_corruptions.apply_mode(pil, "full_image")
+        blank_img, _ = mllm_corruptions.apply_mode(pil, "blank_image")
+
+        prefix_text, full_text = _build_prefix_and_full(tokenizer, rec, full_img, response)
+        # Number of response tokens via standalone tokenization. Sglang's internal
+        # tokenization expands image patches in the prefix region, but those live
+        # BEFORE the response in the token stream, so the *last* n_resp logprobs
+        # are still the response's regardless of how many image-patch tokens
+        # sglang inserts.
+        response_token_ids = tokenizer.encode(response, add_special_tokens=False)
+        n_resp = len(response_token_ids)
+        if n_resp == 0:
+            skipped += 1
+            continue
+
+        requests.append({
+            "id": rid,
+            "benchmark": rec.get("benchmark"),
+            "full_text": full_text,
+            "image_full": full_img,
+            "image_blank": blank_img,
+            "response_token_ids": response_token_ids,
+            "n_resp": n_resp,
+        })
+
+    print(f">>> {len(requests)} requests built, {skipped} skipped", file=sys.stderr)
+    if not requests:
+        args.out.touch()
+        return
+
+    print(f">>> launching sglang engine for {args.model}", file=sys.stderr)
+    from sglang import Engine  # type: ignore
+    engine = Engine(
+        model_path=args.model,
+        dtype="bfloat16",
+        mem_fraction_static=args.mem_fraction,
+        max_running_requests=args.max_running_requests,
+        log_level="warning",
+    )
+
+    sampling_params = {"max_new_tokens": 1, "temperature": 0.0}
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    n_written = 0
     t0 = time.time()
 
     with args.out.open("w") as fout:
-        for rec in _load_subset(args.subset):
-            if args.limit and written >= args.limit:
-                break
-            rid = rec["id"]
-            src = src_by_id.get(rid)
-            if src is None:
-                continue
-            response = (src.get("prediction") or "").strip()
-            if not response:
-                continue
+        for chunk_start in range(0, len(requests), args.chunk_size):
+            chunk = requests[chunk_start:chunk_start + args.chunk_size]
+            prompts = [r["full_text"] for r in chunk]
+            full_imgs = [r["image_full"] for r in chunk]
+            blank_imgs = [r["image_blank"] for r in chunk]
 
-            pil = _load_subset_image(rec)
-            if pil is None:
-                skipped += 1
-                continue
+            full_outs = _engine_generate(
+                engine, prompts, full_imgs, sampling_params,
+                return_logprob=True, logprob_start_len=0,
+            )
+            blank_outs = _engine_generate(
+                engine, prompts, blank_imgs, sampling_params,
+                return_logprob=True, logprob_start_len=0,
+            )
 
-            full_img, _ = mllm_corruptions.apply_mode(pil, "full_image")
-            blank_img, _ = mllm_corruptions.apply_mode(pil, "blank_image")
+            for r, fo, bo in zip(chunk, full_outs, blank_outs):
+                full_logp_all = _extract_input_logprobs(fo)
+                blank_logp_all = _extract_input_logprobs(bo)
+                if full_logp_all is None or blank_logp_all is None:
+                    n_written += 1
+                    fout.write(json.dumps({
+                        "id": r["id"], "error": "no_logprobs_in_output",
+                    }, ensure_ascii=False) + "\n")
+                    continue
 
-            full_result = _logp_for_response(model, processor, rec, response, full_img)
-            if full_result is None:
-                skipped += 1
-                continue
-            full_tokens, full_logp, _ = full_result
+                n_resp = r["n_resp"]
+                if len(full_logp_all) < n_resp or len(blank_logp_all) < n_resp:
+                    n_written += 1
+                    fout.write(json.dumps({
+                        "id": r["id"], "error": "logprobs_shorter_than_response",
+                        "n_resp": n_resp,
+                        "n_full": len(full_logp_all),
+                        "n_blank": len(blank_logp_all),
+                    }, ensure_ascii=False) + "\n")
+                    continue
 
-            blank_result = _logp_for_response(model, processor, rec, response, blank_img)
-            if blank_result is None:
-                skipped += 1
-                continue
-            blank_tokens, blank_logp, _ = blank_result
+                logp_full = full_logp_all[-n_resp:]
+                logp_blank = blank_logp_all[-n_resp:]
+                vd = [a - b for a, b in zip(logp_full, logp_blank)]
+                token_strs = [tokenizer.decode([t]) for t in r["response_token_ids"]]
 
-            # Sanity: the response token sequence should match across image
-            # conditions (same response, same prefix structure modulo image
-            # patches — which appear before the response). If it doesn't,
-            # the chat template / image patch count differs and the rows
-            # can't be aligned; skip.
-            if full_tokens != blank_tokens:
-                skipped += 1
+                row = {
+                    "id": r["id"],
+                    "benchmark": r["benchmark"],
+                    "model": args.model,
+                    "source": str(args.source),
+                    "n_tokens": n_resp,
+                    "completion_tokens": r["response_token_ids"],
+                    "token_strs": token_strs,
+                    "logp_full": logp_full,
+                    "logp_blank": logp_blank,
+                    "visual_dependency": vd,
+                    "logp_full_sum": sum(logp_full),
+                    "logp_blank_sum": sum(logp_blank),
+                    "vd_sum": sum(vd),
+                    "vd_mean": sum(vd) / n_resp,
+                }
+                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                n_written += 1
+
                 if args.debug:
-                    print(f"!! [{rid}] token mismatch full={len(full_tokens)} blank={len(blank_tokens)}",
-                          file=sys.stderr)
-                continue
+                    top_high = sorted(range(n_resp), key=lambda i: -vd[i])[:5]
+                    top_low = sorted(range(n_resp), key=lambda i: vd[i])[:5]
+                    print(f"=== {r['id']} (n={n_resp}, vd_sum={sum(vd):+.2f}, "
+                          f"vd_mean={sum(vd)/n_resp:+.3f}) ===", file=sys.stderr)
+                    print(f"  high VD: " + ", ".join(
+                        f"{token_strs[i]!r}({vd[i]:+.2f})" for i in top_high
+                    ), file=sys.stderr)
+                    print(f"  low  VD: " + ", ".join(
+                        f"{token_strs[i]!r}({vd[i]:+.2f})" for i in top_low
+                    ), file=sys.stderr)
 
-            n = len(full_tokens)
-            vd = [a - b for a, b in zip(full_logp, blank_logp)]
-            token_strs = _decode_per_token(tokenizer, full_tokens)
-
-            row = {
-                "id": rid,
-                "benchmark": rec.get("benchmark"),
-                "model": args.model,
-                "source": str(args.source),
-                "n_tokens": n,
-                "completion_tokens": full_tokens,
-                "token_strs": token_strs,
-                "logp_full": full_logp,
-                "logp_blank": blank_logp,
-                "visual_dependency": vd,
-                "logp_full_sum": sum(full_logp),
-                "logp_blank_sum": sum(blank_logp),
-                "vd_sum": sum(vd),
-                "vd_mean": (sum(vd) / n) if n else None,
-            }
-            fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             fout.flush()
             os.fsync(fout.fileno())
-            written += 1
 
-            if args.debug:
-                top_high = sorted(range(n), key=lambda i: -vd[i])[:5]
-                top_low = sorted(range(n), key=lambda i: vd[i])[:5]
-                print(f"=== {rid} (n={n}, vd_sum={row['vd_sum']:.2f}, vd_mean={row['vd_mean']:.3f}) ===",
-                      file=sys.stderr)
-                print(f"  highest VD: " + ", ".join(
-                    f"{token_strs[i]!r}({vd[i]:+.2f})" for i in top_high
-                ), file=sys.stderr)
-                print(f"  lowest  VD: " + ", ".join(
-                    f"{token_strs[i]!r}({vd[i]:+.2f})" for i in top_low
-                ), file=sys.stderr)
-
-            if written % 25 == 0:
-                rate = written / max(1.0, time.time() - t0)
-                print(f"... {written} ({rate:.2f}/s, skipped={skipped})", file=sys.stderr)
+            elapsed = time.time() - t0
+            rate = n_written / max(1.0, elapsed)
+            print(f"... {n_written}/{len(requests)} ({rate:.2f}/s)", file=sys.stderr)
 
     elapsed = time.time() - t0
-    rate = written / max(1.0, elapsed)
-    print(f">>> wrote {written} -> {args.out}  ({rate:.2f} prompts/s, {elapsed:.0f}s, skipped={skipped})",
+    rate = n_written / max(1.0, elapsed)
+    print(f">>> wrote {n_written} -> {args.out}  ({rate:.2f} rows/s, {elapsed:.0f}s)",
           file=sys.stderr)
+
+    for name in ("shutdown", "stop", "close"):
+        fn = getattr(engine, name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+            break
 
 
 if __name__ == "__main__":
