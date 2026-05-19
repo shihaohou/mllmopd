@@ -256,8 +256,15 @@ def score_for_benchmark(
     if len(g) == 1 and "A" <= g.upper() <= "H":
         res, path = score_mcq_letter_v2(pred_to_score, gold, choices=choices)
         if used_tag and res is False:
+            # When `<answer>` exists, the model already committed there. We
+            # only allow whole-prediction fallback if it lands on a HIGH-
+            # confidence path (explicit answer phrase / \boxed). Without
+            # this guard, MathVerse-style records where the model emits
+            # `<answer>\boxed{70}</answer>` against gold='A' get falsely
+            # scored correct because `last_letter_fallback` finds a random
+            # 'A' somewhere in the long CoT.
             res_full, path_full = score_mcq_letter_v2(pred, gold, choices=choices)
-            if res_full is True:
+            if res_full is True and path_full in HIGH_CONFIDENCE_PATHS:
                 return True, "mcq_letter", f"tag_fallback:{path_full}"
         return res, "mcq_letter", (f"tag:{path}" if used_tag else path)
 
