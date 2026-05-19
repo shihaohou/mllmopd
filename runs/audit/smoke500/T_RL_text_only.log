@@ -1,22 +1,0 @@
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:01<00:05,  1.91s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:03<00:03,  1.93s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:05<00:01,  1.86s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:06<00:00,  1.42s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:06<00:00,  1.60s/it]
-... 32 (0.03/s)
-... 56 (0.03/s)
-... 80 (0.03/s)
-... 104 (0.03/s)
-... 128 (0.03/s)
-... 152 (0.03/s)
-... 176 (0.03/s)
-... 200 (0.03/s)
-... 232 (0.03/s)
-... 256 (0.03/s)
-!! could not load image /home/web_server/antispam/project/houshihao/mllmopd/data/audit/images/MathVista/40.png: image file is truncated
-... 280 (0.03/s)
-... 304 (0.03/s)
-... 328 (0.03/s)
-... 352 (0.03/s)
-... 376 (0.03/s)
-... 400 (0.03/s)
-... 432 (0.03/s)
-... 456 (0.03/s)
-... 480 (0.03/s)
->>> wrote 500 -> runs/audit/smoke500/T_RL_text_only.jsonl  (0.03 prompts/s overall)
