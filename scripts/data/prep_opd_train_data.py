@@ -181,10 +181,27 @@ def main() -> None:
     report_path = args.out_dir / "dedup_report.json"
     out_jsonl = args.out_dir / "train.jsonl"
 
-    # 1. Load MMR1-RL.
-    from datasets import load_from_disk  # type: ignore
+    # 1. Load MMR1-RL. Mirror inspect_mmr1_rl.py: try save_to_disk format
+    # first, fall back to load_dataset for HF cache or raw parquet directories.
     print(f">>> loading MMR1-RL from {args.mmr1_rl}", file=sys.stderr)
-    raw = load_from_disk(args.mmr1_rl)
+    loader_used = None
+    raw = None
+    try:
+        from datasets import load_from_disk  # type: ignore
+        raw = load_from_disk(args.mmr1_rl)
+        loader_used = "load_from_disk"
+    except Exception as e_disk:
+        try:
+            from datasets import load_dataset  # type: ignore
+            raw = load_dataset(args.mmr1_rl)
+            loader_used = "load_dataset"
+        except Exception as e_hf:
+            print(f"ERROR: could not load {args.mmr1_rl}", file=sys.stderr)
+            print(f"  load_from_disk: {e_disk}", file=sys.stderr)
+            print(f"  load_dataset:   {e_hf}", file=sys.stderr)
+            sys.exit(1)
+    print(f">>> loaded via {loader_used}", file=sys.stderr)
+
     if hasattr(raw, "keys") and not hasattr(raw, "features"):
         split = list(raw.keys())[0]
         mmr1 = raw[split]
