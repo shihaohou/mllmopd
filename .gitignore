@@ -18,7 +18,10 @@
 # --- Big artifacts (live on dev box / scratch, symlinked in) ---
 # Leading slash = only at repo root. Without it, gitignore would also match
 # scripts/data/, src/mllmopd/data/, etc.
-/runs/
+/runs/*
+!/runs/audit/
+/runs/audit/*
+!/runs/audit/smoke500/
 /data/
 /models/
 wandb/
@@ -58,4 +61,5 @@ venv/
 
 # --- Logs ---
 *.log
+!/runs/audit/smoke500/*.log
 logs/
