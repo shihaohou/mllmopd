@@ -162,7 +162,19 @@ def main() -> None:
     args = ap.parse_args()
 
     if not args.mmr1_rl:
-        sys.exit("ERROR: --mmr1-rl or $MMR1_RL_DATA must be set")
+        # Same fallbacks as inspect_mmr1_rl.py — covers the devbox case
+        # where the user hasn't sourced `.env` yet.
+        for guess in (
+            "/home/web_server/antispam/project/houshihao/datasets/MMR1-RL",
+            os.path.expanduser("~/datasets/MMR1-RL"),
+        ):
+            if os.path.isdir(guess):
+                args.mmr1_rl = guess
+                print(f">>> using fallback MMR1-RL path: {guess}", file=sys.stderr)
+                break
+    if not args.mmr1_rl:
+        sys.exit("ERROR: --mmr1-rl or $MMR1_RL_DATA must be set "
+                 "(or `source .env` first)")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "images").mkdir(exist_ok=True)
