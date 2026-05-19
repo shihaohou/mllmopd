@@ -42,6 +42,10 @@ def _rescore(rec: dict) -> tuple[bool | None, str, str]:
         return rec.get("is_correct"), rec.get("scorer"), rec.get("scorer")
     pred = rec.get("prediction") or ""
     gold = rec.get("gold")
+    # ChartQA (and similar) store gold as a single-element list of strings;
+    # unwrap so the scorer can route to numeric / loose_contains cleanly.
+    if isinstance(gold, list) and len(gold) == 1:
+        gold = gold[0]
     benchmark = rec.get("benchmark", "")
     choices = rec.get("choices")
     return scorers.score_for_benchmark(benchmark, pred, gold, choices=choices)

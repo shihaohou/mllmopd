@@ -248,6 +248,11 @@ def _normalize(benchmark: str, idx, rec: dict, image_dir: Path) -> dict:
         or rec.get("solution")
         or rec.get("gt_answer")  # HallusionBench
     )
+    # ChartQA stores label as a single-element list of strings; unwrap so the
+    # downstream scorer can route to numeric/loose_contains cleanly. Only
+    # unwrap when the list is unambiguous (single element).
+    if isinstance(answer, list) and len(answer) == 1:
+        answer = answer[0]
     # HallusionBench stores yes/no as "0"/"1"; remap so the yesno scorer fires.
     if benchmark == "HallusionBench" and isinstance(answer, str) and answer.strip() in {"0", "1"}:
         answer = {"0": "no", "1": "yes"}[answer.strip()]

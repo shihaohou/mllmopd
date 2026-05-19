@@ -141,7 +141,11 @@ def _parse_mcq_with_choices(text: str, choices) -> tuple[str | None, str]:
 
 
 def _parse_number(text: str) -> float | None:
-    m = _NUMBER_RE.findall(text)
+    # Strip thousands separators so "6,313" parses as 6313, not the last
+    # 3-digit run "313". ChartQA and similar benchmarks emit comma-formatted
+    # numbers like "6,313 million" or "$1,234.56" in predictions.
+    cleaned = text.replace(",", "")
+    m = _NUMBER_RE.findall(cleaned)
     if not m:
         return None
     try:

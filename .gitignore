@@ -22,6 +22,7 @@
 !/runs/audit/
 /runs/audit/*
 !/runs/audit/smoke500/
+!/runs/audit/level1_smoke/
 /data/
 /models/
 wandb/
@@ -62,4 +63,5 @@ venv/
 # --- Logs ---
 *.log
 !/runs/audit/smoke500/*.log
+!/runs/audit/level1_smoke/*.log
 logs/
