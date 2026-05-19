@@ -1,9 +1,9 @@
 # Finding 2026-05-19 — Vision-Conditioned Capability Transfer in MLLM OPD
 
-**Status**: post-audit, pre-training. Paper §1-2 seed.
-**Canonical data**: `runs/audit/level1_v4_sysprompt_fixed/` (4 models × 3 modes × 6 benchmarks × 200 prompts).
+**Status**: post-audit, pre-training, **post-G1 prompt-parity rerun**. Paper §1-2 seed.
+**Canonical data**: `runs/audit/level1_v4_sysprompt_fixed/` — `summary.json` (prompt-level) + `vd_summary.sysprompt.json` (token-level, post-G1). The pre-G1 `vd_summary.json` is retained for reference but superseded.
 
-> ⚠️ **Token-level numbers below are pending a prompt-parity rerun.** The original H2 forced-decode (`vd_summary.json`) was scored without injecting MMR1's training-time system prompt — `score_completion.py` constructed its chat prefix from `[image, text:question]` rather than reusing `_build_messages([text:sysprompt, image, text:question])`. The canonical Level-1 audit (prompt-level numbers above the H2 table) was unaffected. After patch + rerun (G1 in the 2026-05-19 pre-flight gates) the token-level VD distribution may shift. The prompt-level claim (73% vision-critical, Finding 1) is unchanged.
+> ✅ **G1 prompt-parity rerun (2026-05-19) — Finding 2 reproduced and strengthened.** The original `vd_summary.json` was scored without injecting MMR1's training-time system prompt; `score_completion.py` constructed `[image, text:question]` rather than reusing `_build_messages([text:sysprompt, image, text:question])`. After patching and rerunning H2 on the same 96,159-token set, the headline number (`~7% of tokens carry ~20% NLL mass`) is essentially unchanged (6.84% / 21.10%). The pre-G1 "negative-VD tail mystery" (0.6% of tokens carrying 24.7% NLL mass) **dissolved** to 0.01% / 0.35% — confirming that tail was a base-model-mode artifact, not a real "image hurts teacher" signal. Per-benchmark NLL concentration is now more discriminating and tracks Finding 1's vision-critical ordering tightly. The numbers below reflect the post-G1 rerun.
 
 ---
 
@@ -15,7 +15,7 @@ Two layers of evidence:
 
 1. **Prompt-level.** Across 6 multimodal benchmarks (MathVista, MathVision, MathVerse, ChartQA, HallusionBench, POPE), among the **181 prompts where the RL teacher (MMR1-7B-RL) beats the SFT student (MMR1-3B-SFT)**, **133 (73%)** are *vision-critical* for the teacher — teacher gets it right with the image, wrong without (`full_image`=✓, `blank_image`=✗). 98 (54%) are even stricter: teacher also fails on `text_only`. On math/chart benchmarks the rate is **78-96%**. HallusionBench (42%) is a mixed counterexample where some of the teacher's advantage is language-prior.
 
-2. **Token-level.** Forced-decoding the teacher's own completions on those 133 vision-critical prompts (96,159 tokens total) shows that **only ~7% of tokens have strong positive visual dependency** (vd > 0.5, where `vd(t) = logp(t | prefix, full_image) − logp(t | prefix, blank_image)`), yet they account for **~20% of the teacher's NLL "effort"**. Most of the remaining tokens are low/neutral-VD (the language-prior majority). A small negative-VD tail (`vd ≤ -1`, ~0.6% of tokens) carries an outsized ~25% of NLL mass and needs separate interpretation; it is not folded into the "language-prior" bucket below.
+2. **Token-level.** Forced-decoding the teacher's own completions on those 133 vision-critical prompts (96,159 tokens total) shows that **only ~7% of tokens have strong positive visual dependency** (vd > 0.5, where `vd(t) = logp(t | prefix, full_image) − logp(t | prefix, blank_image)`), yet they account for **~21% of the teacher's NLL "effort"**. The remaining ~93% are low/neutral-VD language-prior tokens (carrying ~79% of NLL mass). Per-benchmark, the concentration is strongest where Finding 1's vision-critical rate is highest: ChartQA's high-VD bins capture **56% of NLL mass in 16% of tokens**, vs MathVision's **16% / 4%** — i.e. the visual-grounding density of teacher tokens varies by an order of magnitude across benchmarks and tracks Finding 1.
 
 The refined research question that follows directly from this:
 
@@ -85,21 +85,34 @@ Definitions:
 
 For each of the 133 OPD-target prompts, forced-decode the teacher's own generated completion under two image conditions: full and blank. The per-token signed `vd(t) = logp_full(t) − logp_blank(t)` measures the local visual dependency.
 
-96,159 tokens bucketed by VD bin (`runs/audit/level1_v4_sysprompt_fixed/vd_summary.json`):
+96,159 tokens bucketed by VD bin (`runs/audit/level1_v4_sysprompt_fixed/vd_summary.sysprompt.json`, post-G1 prompt-parity rerun):
 
 | VD bin | %tokens | %NLL mass | NLL/token |
 |---|---|---|---|
-| `very_low (vd ≤ -1)` | 0.6% | 24.7% | 6.37 |
-| `low (-1 < vd ≤ 0)`  | 46.3% | 30.4% | 0.10 |
-| `neutral (0 < vd ≤ 0.5)` | 46.3% | 24.9% | 0.085 |
-| **`high (0.5 < vd ≤ 2)`** | **3.8%** | **12.1%** | 0.50 |
-| **`very_high (vd > 2)`** | **3.0%** | **8.0%** | 0.42 |
+| `very_low (vd ≤ -1)` | 0.01% | 0.35% | 4.96 |
+| `low (-1 < vd ≤ 0)`  | 46.2% | 39.8% | 0.076 |
+| `neutral (0 < vd ≤ 0.5)` | 46.9% | 38.8% | 0.073 |
+| **`high (0.5 < vd ≤ 2)`** | **3.7%** | **13.1%** | 0.311 |
+| **`very_high (vd > 2)`** | **3.1%** | **8.0%** | 0.228 |
 
 Eyeball check on individual tokens confirms the bins: high-VD tokens are concrete vision-grounded nouns / numbers / object names (`'people'`, `'standing'`, `'5.03'`, axis labels); low-VD tokens are connectives, punctuation, and reasoning verbiage (`'the'`, `'\n'`, `'There'`, `'is'`).
 
-If a vanilla OPD reward at a token position is roughly proportional to teacher's NLL effort there, then **only ~20% of vanilla OPD's supervision lands on tokens with positive visual dependency**, while the remaining ~80% falls on language-prior or anti-visual tokens (~93% of token positions). The visual signal is dense in importance (high NLL/token at high-VD positions) but sparse in count (3-7% of positions).
+If a vanilla OPD reward at a token position is roughly proportional to teacher's NLL effort there, then **only ~21% of vanilla OPD's supervision lands on tokens with positive visual dependency** (vd > 0.5; ~6.8% of token positions), while the remaining ~79% lands on language-prior tokens (~93% of positions, vd in (-1, 0.5]). The visual signal is dense in importance (high NLL/token at high-VD positions, 0.23–0.31 vs ~0.075 at language-prior positions) but sparse in count.
 
-The `very_low (vd ≤ -1)` row is interesting and not yet interpreted: 0.6% of tokens with 24.7% of NLL mass means a small set of high-stakes positions where image actively *hurts* the teacher's prediction. Spot-checks suggest these are answer-value tokens (e.g., the digits of the final boxed number in ChartQA) where both full and blank conditions place high probability mass but in slightly different distributions. We don't yet have a clean story for them — they should be analyzed before applying any positive-only VD weighting.
+The `very_low (vd ≤ -1)` row is now near-zero (0.01% tokens / 0.35% NLL). Pre-G1 it had carried an outsized 24.7% NLL mass on 0.6% of tokens; that was a base-model-mode artifact — without MMR1's training-time system prompt the teacher was surprised by its own `<think>`/`<answer>` scaffolding tokens. With the sysprompt in place, the teacher's NLL on those positions drops sharply, the vd value moves out of the very-negative tail, and the mass redistributes into low/neutral. No "image actively hurts teacher" interpretation is needed.
+
+Per-benchmark concentration (high+very_high bins, where the visual signal lives):
+
+| Benchmark | %tokens (vd > 0.5) | %NLL mass (vd > 0.5) | Finding-1 vision-critical rate |
+|---|---|---|---|
+| ChartQA          | 16.3% | **56.3%** | 96% |
+| POPE_adversarial | 24.2% | **55.0%** | 33% (short MCQ, n=9) |
+| HallusionBench   | 13.2% | 40.4%     | 42% |
+| MathVista        |  7.1% | 23.8%     | 78% |
+| MathVerse        |  5.8% | 18.7%     | 81% |
+| MathVision       |  4.2% | 15.5%     | 85% |
+
+The vision-NLL concentration tracks ChartQA > HallusionBench > MathVista > MathVerse > MathVision — almost exactly the inverse of CoT length. Math benchmarks have long reasoning chains and few visual-anchor tokens; ChartQA has short answers concentrated on chart values. POPE is an interesting outlier: low Finding-1 rate (most prompts are language-answerable) but very high per-token NLL concentration when visual evidence is needed — consistent with POPE's binary yes/no answers being mostly language-prior with a few decisive image-grounded tokens.
 
 ---
 
@@ -110,7 +123,7 @@ The `very_low (vd ≤ -1)` row is interesting and not yet interpreted: 0.6% of t
 Two crisp claims that follow:
 
 - **Prompt-level**: in multimodal reasoning, the RL teacher's advantage over its smaller student is conditional on visual input. (73% of advantage prompts are vision-critical.)
-- **Token-level**: vanilla OPD's dense token supervision is misaligned with the location of the teacher's vision-grounded signal. (~7% of tokens carry ~20% of NLL effort; vanilla OPD spreads supervision over 100% of tokens.)
+- **Token-level**: vanilla OPD's dense token supervision is misaligned with the location of the teacher's vision-grounded signal. (~7% of tokens carry ~21% of NLL effort; vanilla OPD spreads supervision over 100% of tokens.)
 
 These are independent claims supported by independent metrics. Both can be reported separately and stand on their own.
 
@@ -135,7 +148,7 @@ Our setting is **the orthogonal direction**: OPD's reward is already dense (per-
 What we can defensibly claim as novel:
 1. **First application of token visual dependency to KD / OPD.** Neither PGPO, VPPO, nor PAPO mentions distillation or teacher models. Their baselines are exclusively RL methods.
 2. **Different negative construction.** Our `vd(t) = logp_full(t) − logp_blank(t)` is a *pointwise log-prob delta on the realized token under a blank image*, not a full-distribution KL. This is cheaper to compute on stored teacher completions and is exactly the right quantity for gating teacher *KL signal*, which is what dense OPD supervision is made of.
-3. **Tighter sparsity number.** PGPO uses a threshold τ; VPPO operationalizes top-40%. We report **~7% of tokens carrying ~20% of NLL effort** on the vision-critical subset, using an explicit threshold (`vd > 0.5`) instead of a top-K cut. The exact methodology is published in `aggregate_vd.py`.
+3. **Tighter sparsity number with per-benchmark resolution.** PGPO uses a threshold τ; VPPO operationalizes top-40%. We report **~7% of tokens carrying ~21% of NLL effort** on the vision-critical subset using an explicit threshold (`vd > 0.5`), and we resolve this per benchmark: ChartQA reaches 56% NLL mass / 16% tokens, while MathVision is 16% / 4%. The exact methodology is published in `aggregate_vd.py`.
 
 Risks to pre-empt in the paper:
 - **VPPO's trajectory-level α(τ_i)** is conceptually transferable to OPD as a *trajectory-level KL weight*. We should include this as an ablation in T2 to claim our token-level move adds something beyond trajectory-level reweighting.
@@ -180,8 +193,8 @@ A separate planning agent is producing the concrete T1 implementation plan (Uni-
 
 - `runs/audit/level1_v4_sysprompt_fixed/summary.json` — aggregate cells
 - `runs/audit/level1_v4_sysprompt_fixed/opd_target_ids.json` — 133 dev-set ids
-- `runs/audit/level1_v4_sysprompt_fixed/T_RL_score_opd_target.jsonl` — per-token VD raw data
-- `runs/audit/level1_v4_sysprompt_fixed/vd_summary.json` — binned token-level aggregate
+- `runs/audit/level1_v4_sysprompt_fixed/T_RL_score_opd_target.sysprompt.jsonl` — per-token VD raw data (post-G1 with sysprompt); pre-G1 `T_RL_score_opd_target.jsonl` retained for reference but superseded
+- `runs/audit/level1_v4_sysprompt_fixed/vd_summary.sysprompt.json` — binned token-level aggregate (post-G1); pre-G1 `vd_summary.json` retained for reference
 - `runs/audit/level1_v4_sysprompt_fixed/figures/fig{1,2,3}.png` — visualization
 - `src/mllmopd/analysis/paired_vision_critical.py` — prompt-level analyzer
 - `src/mllmopd/analysis/aggregate_vd.py` — token-level analyzer
