@@ -269,6 +269,13 @@ MISC_ARGS=(
   --attention-softmax-in-fp32
   --attention-backend flash
   --colocate
+  # Apex's `fused_weight_gradient_mlp_cuda` extension isn't compiled in
+  # this venv (we'd need `pip install --global-option=... apex` with
+  # CUDA toolchain). Megatron defaults to gradient_accumulation_fusion=True
+  # which requires that extension. Disable the fusion to use plain PyTorch
+  # grad accumulation — slightly slower kernel path but correctness is
+  # identical. Re-enable once apex is installed if perf is needed.
+  --no-gradient-accumulation-fusion
 )
 
 # Smoke-mode extras (punch list #9). Empty by default for production runs.
