@@ -104,6 +104,34 @@ echo "    compat symlink : ${COMPAT_LIB_SYMLINK:-(not found)}"
 echo "    LD_LIBRARY_PATH before : ${LD_BEFORE}"
 echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
 
+# Strip torch_memory_saver from LD_PRELOAD. This .so hijacks
+# cudaMalloc/cudaFree to support sglang's incremental KV-cache eviction;
+# the actor inspect log (smoke #13) showed it was the only LD_PRELOAD
+# entry not from ray itself, and its hook semantics interact badly with
+# NCCL collectives (NCCL allocates GPU mem inside all_gather; if the
+# hook returns a non-zero rc, NCCL wraps it as the misleading
+# "ncclUnhandledCudaError / Cuda failure 'CUDA driver version
+# insufficient'" we've been chasing for hours).
+LD_PRELOAD_BEFORE="${LD_PRELOAD:-(unset)}"
+if [ -n "${LD_PRELOAD:-}" ]; then
+  LD_PRELOAD=$(echo "${LD_PRELOAD}" | tr ':' '\n' \
+      | grep -v 'torch_memory_saver' \
+      | tr '\n' ':' | sed 's/:$//')
+  export LD_PRELOAD
+fi
+echo ">>> LD_PRELOAD cleanup (strip torch_memory_saver hook):"
+echo "    before: ${LD_PRELOAD_BEFORE}"
+echo "    after : ${LD_PRELOAD:-(empty)}"
+
+# Open NCCL_DEBUG to get the real last-error (not the misleading wrapper).
+# Set TORCH_NCCL_BLOCKING_WAIT=1 so the failure location pinpoints the
+# specific collective op rather than getting swallowed by async handling.
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,COLL}"
+export TORCH_NCCL_BLOCKING_WAIT="${TORCH_NCCL_BLOCKING_WAIT:-1}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-0}"
+echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING}"
+
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
 : "${MMR1_7B_RL_CKPT:?}"

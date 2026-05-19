@@ -66,6 +66,50 @@ if [ ! -f "${AC}" ]; then
 fi
 
 SENTINEL="# === mllmopd actor inspect patch ==="
+# --- Patch 3: ray_launcher.py — let LD_PRELOAD / NCCL_DEBUG etc.
+#     propagate to actor processes via runtime_env env_vars.
+#     The default MILES_RAY_RUNTIME_ENV dict only carries keys it lists,
+#     and LD_PRELOAD wasn't among them — so actor processes ended up with
+#     ray's own jemalloc preload AND a torch_memory_saver hook that broke
+#     NCCL collectives. Append the missing keys so launcher exports
+#     reach actors verbatim.
+RL="${MILES_DIR}/Uni_OPD_utils/ray_launcher.py"
+RL_SENTINEL="# === mllmopd ray_launcher runtime_env patch ==="
+if grep -q "${RL_SENTINEL}" "${RL}"; then
+  echo ">>> ${RL}: already patched (runtime_env sentinel present)"
+else
+  echo ">>> patching ${RL}: extend MILES_RAY_RUNTIME_ENV with LD_PRELOAD/NCCL_DEBUG/..."
+  export MLLMOPD_PATCH_RL_PATH="${RL}"
+  python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_RL_PATH"]
+with open(path, "r") as f:
+    src = f.read()
+
+# Insert new env-var keys right before the closing `}` of the env_vars
+# dict. We anchor on the line that holds `"https_proxy": "",` — the
+# last entry of the current dict in the upstream source.
+anchor = '        "https_proxy": "",'
+patch = '''        "https_proxy": "",
+        # === mllmopd ray_launcher runtime_env patch ===
+        "LD_PRELOAD": os.environ.get("LD_PRELOAD", ""),
+        "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+        "NCCL_DEBUG_SUBSYS": os.environ.get("NCCL_DEBUG_SUBSYS", ""),
+        "TORCH_NCCL_BLOCKING_WAIT": os.environ.get("TORCH_NCCL_BLOCKING_WAIT", ""),
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": os.environ.get("TORCH_NCCL_ASYNC_ERROR_HANDLING", ""),
+        # === end mllmopd ray_launcher runtime_env patch ==='''
+
+if anchor not in src:
+    sys.exit(f"ERROR: anchor not found in {path!r}; ray_launcher layout changed")
+
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    appended LD_PRELOAD/LD_LIBRARY_PATH/NCCL_DEBUG_SUBSYS/TORCH_NCCL_BLOCKING_WAIT/TORCH_NCCL_ASYNC_ERROR_HANDLING")
+PY
+fi
+
 if grep -q "${SENTINEL}" "${AC}"; then
   echo ">>> ${AC}: already patched (inspect sentinel present)"
 else
@@ -123,12 +167,21 @@ init_block = r'''        # === mllmopd actor inspect patch (inside init) ===
                 import torch as _t
                 _f.write(f"torch.cuda.nccl.version()={_t.cuda.nccl.version()}\n")
                 _f.write(f"torch.version.cuda={_t.version.cuda}\n")
+                _f.write(f"torch.cuda.device_count()={_t.cuda.device_count()}\n")
                 try:
                     _t.cuda.init()
+                    _f.write(f"torch.cuda.current_device()={_t.cuda.current_device()}\n")
                     _x = _t.zeros(1).cuda()
                     _f.write(f"cuda ok, device={_t.cuda.get_device_name(0)}\n")
                 except Exception as _e:
                     _f.write(f"cuda init failed: {type(_e).__name__}: {_e}\n")
+                try:
+                    import torch.distributed as _td
+                    _f.write(f"dist.is_initialized()={_td.is_initialized()}\n")
+                    if _td.is_initialized():
+                        _f.write(f"dist.world_size={_td.get_world_size()} rank={_td.get_rank()} backend={_td.get_backend()}\n")
+                except Exception as _e:
+                    _f.write(f"dist probe failed: {type(_e).__name__}: {_e}\n")
         except Exception:
             pass
         # === end mllmopd actor inspect patch (inside init) ===
