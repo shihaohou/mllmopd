@@ -22,6 +22,11 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
+# Per docs/common-pitfalls.md E1: LD_LIBRARY_PATH pollution makes
+# dlopen prefer system libcudnn/libnccl over venv-bundled. Clear before
+# any sglang process boots.
+unset LD_LIBRARY_PATH
+
 : "${MLLMOPD_RUNS:?}"
 : "${MMR1_7B_RL_CKPT:?}"
 

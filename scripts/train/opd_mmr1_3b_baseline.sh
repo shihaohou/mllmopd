@@ -62,6 +62,16 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
+# Per docs/common-pitfalls.md E1: the train venv (torch 2.9.1+cu128) has
+# cuDNN / NCCL bundled in site-packages/nvidia/{cudnn,nccl}/lib/, but
+# `LD_LIBRARY_PATH` inherited from the shell points at system NGC-style
+# library dirs that hold OLDER (cuDNN 9.2) or NEWER (NCCL 2.29) copies.
+# Whichever sys-path libnccl wins the dlopen race, Megatron's
+# collective-comm init blows up with either "CUDA driver insufficient"
+# or "CUDNN_STATUS_NOT_INITIALIZED". Clear it before anything touches
+# CUDA so dlopen finds the venv-bundled libs first.
+unset LD_LIBRARY_PATH
+
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
 : "${MMR1_7B_RL_CKPT:?}"

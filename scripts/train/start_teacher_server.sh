@@ -31,6 +31,11 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
+# Per docs/common-pitfalls.md E1: LD_LIBRARY_PATH pollution causes
+# dlopen to find system libcudnn/libnccl ahead of venv-bundled. Clear
+# before launching sglang.
+unset LD_LIBRARY_PATH
+
 TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MMR1_7B_RL_CKPT:?}}"
 TEACHER_PORT="${TEACHER_PORT:-30000}"
 TEACHER_GPUS="${TEACHER_GPUS:-0}"
