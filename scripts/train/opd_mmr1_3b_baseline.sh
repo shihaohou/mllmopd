@@ -62,27 +62,54 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
-# Per docs/common-pitfalls.md E1: the train venv (torch 2.9.1+cu128) has
-# cuDNN / NCCL bundled in site-packages/nvidia/{cudnn,nccl}/lib/, but
-# `LD_LIBRARY_PATH` inherited from the NGC base image looks roughly like:
-#   /usr/local/lib/python3.12/dist-packages/torch/lib            ← NGC sys torch (libnccl 2.29.7)
-#   /usr/local/lib/python3.12/dist-packages/torch_tensorrt/lib   ← NGC sys torch_tensorrt
-#   /usr/local/cuda/compat/lib                                   ← CUDA forward-compat layer (REQUIRED for driver 535 to run cu128 runtime)
-#   /usr/local/nvidia/lib /usr/local/nvidia/lib64                ← driver libs
-# A bare `unset` strips the cuda-compat path too, breaking driver
-# compatibility for torch 2.9.1+cu128 on driver 535. Surgically strip
-# only the NGC torch dirs (where the wrong libnccl / libcudnn live),
-# keep cuda compat + nvidia driver paths so CUDA itself still works.
+# Per docs/common-pitfalls.md E1 + smoke-#10 follow-up: the NGC base
+# image ships system NCCL 2.29.7 at /usr/lib/x86_64-linux-gnu/libnccl.so.2
+# via ld.so.cache, and that lib is incompatible with driver 535. The
+# venv has its own NCCL 2.27.5 at .venv/lib/python3.12/site-packages/
+# nvidia/nccl/lib/libnccl.so.2 (= the version torch 2.9.1+cu128 was
+# compiled against), but it loses the dlopen race because it's not on
+# LD_LIBRARY_PATH while the system one is in ld.so.cache.
+#
+# Two-step fix:
+#   (a) Surgically strip NGC sys-torch dirs from LD_LIBRARY_PATH so
+#       NGC torch's libs don't sneak back in. Keep /usr/local/cuda/compat
+#       (required for cu128 runtime on driver 535) and /usr/local/nvidia
+#       (driver libs).
+#   (b) Prepend the venv's bundled nvidia/* lib dirs (NCCL, cuDNN,
+#       cublas, ...) so dlopen finds them BEFORE ld.so.cache. This is
+#       the deterministic fix for the "system 2.29.7 vs venv 2.27.5"
+#       mismatch — the system NCCL never gets a chance.
+LD_BEFORE="${LD_LIBRARY_PATH:-(unset)}"
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  LD_BEFORE="${LD_LIBRARY_PATH}"
   LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
       | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
       | tr '\n' ':' | sed 's/:$//')
-  export LD_LIBRARY_PATH
-  echo ">>> LD_LIBRARY_PATH cleanup (per E1):"
-  echo "    before: ${LD_BEFORE}"
-  echo "    after : ${LD_LIBRARY_PATH:-(empty)}"
 fi
+# Discover venv-bundled nvidia/* libs (defensive: only prepend ones that
+# actually exist in this venv's site-packages).
+VENV_SITE=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || true)
+VENV_BUNDLED=()
+if [ -n "${VENV_SITE}" ]; then
+  for d in \
+      "${VENV_SITE}/nvidia/nccl/lib" \
+      "${VENV_SITE}/nvidia/cudnn/lib" \
+      "${VENV_SITE}/nvidia/cublas/lib" \
+      "${VENV_SITE}/nvidia/cusolver/lib" \
+      "${VENV_SITE}/nvidia/cuda_runtime/lib" \
+      "${VENV_SITE}/nvidia/cuda_nvrtc/lib" \
+      "${VENV_SITE}/torch/lib" \
+  ; do
+    [ -d "${d}" ] && VENV_BUNDLED+=("${d}")
+  done
+fi
+if [ "${#VENV_BUNDLED[@]}" -gt 0 ]; then
+  BUNDLED_PREFIX=$(IFS=:; echo "${VENV_BUNDLED[*]}")
+  LD_LIBRARY_PATH="${BUNDLED_PREFIX}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+export LD_LIBRARY_PATH
+echo ">>> LD_LIBRARY_PATH rewrite (per E1 + smoke-#10):"
+echo "    before: ${LD_BEFORE}"
+echo "    after : ${LD_LIBRARY_PATH:-(empty)}"
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"

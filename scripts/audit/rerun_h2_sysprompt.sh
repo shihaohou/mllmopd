@@ -22,16 +22,35 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
-# Per docs/common-pitfalls.md E1: surgically strip NGC sys-torch dirs
-# from LD_LIBRARY_PATH (keeping cuda-compat + nvidia driver paths so
-# CUDA forward compat still works on driver 535). See the launcher
-# script for the full diagnosis.
+# Per docs/common-pitfalls.md E1 + smoke-#10 follow-up: strip NGC
+# sys-torch dirs AND prepend venv-bundled nvidia/* lib dirs (NCCL/cuDNN
+# version-matched to torch 2.9.1+cu128) so dlopen finds them BEFORE the
+# system NCCL 2.29.7 in ld.so.cache. See the launcher for diagnosis.
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
   LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
       | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
       | tr '\n' ':' | sed 's/:$//')
-  export LD_LIBRARY_PATH
 fi
+VENV_SITE=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || true)
+VENV_BUNDLED=()
+if [ -n "${VENV_SITE}" ]; then
+  for d in \
+      "${VENV_SITE}/nvidia/nccl/lib" \
+      "${VENV_SITE}/nvidia/cudnn/lib" \
+      "${VENV_SITE}/nvidia/cublas/lib" \
+      "${VENV_SITE}/nvidia/cusolver/lib" \
+      "${VENV_SITE}/nvidia/cuda_runtime/lib" \
+      "${VENV_SITE}/nvidia/cuda_nvrtc/lib" \
+      "${VENV_SITE}/torch/lib" \
+  ; do
+    [ -d "${d}" ] && VENV_BUNDLED+=("${d}")
+  done
+fi
+if [ "${#VENV_BUNDLED[@]}" -gt 0 ]; then
+  BUNDLED_PREFIX=$(IFS=:; echo "${VENV_BUNDLED[*]}")
+  LD_LIBRARY_PATH="${BUNDLED_PREFIX}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+export LD_LIBRARY_PATH
 
 : "${MLLMOPD_RUNS:?}"
 : "${MMR1_7B_RL_CKPT:?}"
