@@ -31,10 +31,16 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
-# Per docs/common-pitfalls.md E1: LD_LIBRARY_PATH pollution causes
-# dlopen to find system libcudnn/libnccl ahead of venv-bundled. Clear
-# before launching sglang.
-unset LD_LIBRARY_PATH
+# Per docs/common-pitfalls.md E1: surgically strip NGC sys-torch dirs
+# from LD_LIBRARY_PATH (keeping cuda-compat + nvidia driver paths so
+# CUDA forward compat still works on driver 535). See the launcher
+# script for the full diagnosis.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
+      | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
+      | tr '\n' ':' | sed 's/:$//')
+  export LD_LIBRARY_PATH
+fi
 
 TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MMR1_7B_RL_CKPT:?}}"
 TEACHER_PORT="${TEACHER_PORT:-30000}"

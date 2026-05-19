@@ -64,13 +64,25 @@ source .env
 
 # Per docs/common-pitfalls.md E1: the train venv (torch 2.9.1+cu128) has
 # cuDNN / NCCL bundled in site-packages/nvidia/{cudnn,nccl}/lib/, but
-# `LD_LIBRARY_PATH` inherited from the shell points at system NGC-style
-# library dirs that hold OLDER (cuDNN 9.2) or NEWER (NCCL 2.29) copies.
-# Whichever sys-path libnccl wins the dlopen race, Megatron's
-# collective-comm init blows up with either "CUDA driver insufficient"
-# or "CUDNN_STATUS_NOT_INITIALIZED". Clear it before anything touches
-# CUDA so dlopen finds the venv-bundled libs first.
-unset LD_LIBRARY_PATH
+# `LD_LIBRARY_PATH` inherited from the NGC base image looks roughly like:
+#   /usr/local/lib/python3.12/dist-packages/torch/lib            ← NGC sys torch (libnccl 2.29.7)
+#   /usr/local/lib/python3.12/dist-packages/torch_tensorrt/lib   ← NGC sys torch_tensorrt
+#   /usr/local/cuda/compat/lib                                   ← CUDA forward-compat layer (REQUIRED for driver 535 to run cu128 runtime)
+#   /usr/local/nvidia/lib /usr/local/nvidia/lib64                ← driver libs
+# A bare `unset` strips the cuda-compat path too, breaking driver
+# compatibility for torch 2.9.1+cu128 on driver 535. Surgically strip
+# only the NGC torch dirs (where the wrong libnccl / libcudnn live),
+# keep cuda compat + nvidia driver paths so CUDA itself still works.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  LD_BEFORE="${LD_LIBRARY_PATH}"
+  LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
+      | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
+      | tr '\n' ':' | sed 's/:$//')
+  export LD_LIBRARY_PATH
+  echo ">>> LD_LIBRARY_PATH cleanup (per E1):"
+  echo "    before: ${LD_BEFORE}"
+  echo "    after : ${LD_LIBRARY_PATH:-(empty)}"
+fi
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"

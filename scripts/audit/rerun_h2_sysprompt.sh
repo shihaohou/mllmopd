@@ -22,10 +22,16 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
-# Per docs/common-pitfalls.md E1: LD_LIBRARY_PATH pollution makes
-# dlopen prefer system libcudnn/libnccl over venv-bundled. Clear before
-# any sglang process boots.
-unset LD_LIBRARY_PATH
+# Per docs/common-pitfalls.md E1: surgically strip NGC sys-torch dirs
+# from LD_LIBRARY_PATH (keeping cuda-compat + nvidia driver paths so
+# CUDA forward compat still works on driver 535). See the launcher
+# script for the full diagnosis.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' \
+      | grep -v '^/usr/local/lib/python[0-9.]*/dist-packages/torch' \
+      | tr '\n' ':' | sed 's/:$//')
+  export LD_LIBRARY_PATH
+fi
 
 : "${MLLMOPD_RUNS:?}"
 : "${MMR1_7B_RL_CKPT:?}"
