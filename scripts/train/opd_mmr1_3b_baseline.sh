@@ -69,7 +69,9 @@ source .env
 
 # In-repo submodule paths as fallbacks. The repo ships
 # third_party/Uni-OPD and third_party/Megatron-LM as git submodules; if the
-# operator's .env doesn't override, those are the right paths.
+# operator's .env doesn't override, those are the right paths. We canonicalize
+# to absolute paths immediately — Ray workers inherit PYTHONPATH from this
+# shell and can run in any cwd, so relative paths there are unreachable.
 MILES_DIR="${MILES_DIR:-third_party/Uni-OPD/miles}"
 MEGATRON_PATH="${MEGATRON_PATH:-third_party/Megatron-LM}"
 if [ ! -d "${MILES_DIR}" ]; then
@@ -80,6 +82,9 @@ if [ ! -d "${MEGATRON_PATH}" ]; then
   echo "ERROR: MEGATRON_PATH=${MEGATRON_PATH} not found (did you init submodules?)" >&2
   exit 1
 fi
+MILES_DIR="$(cd "${MILES_DIR}" && pwd)"
+MEGATRON_PATH="$(cd "${MEGATRON_PATH}" && pwd)"
+REPO_ROOT="$(pwd)"
 
 # --- Arm selector ---
 OPD_TEACHER_IMAGE_MODE="${OPD_TEACHER_IMAGE_MODE:-full}"
@@ -297,7 +302,17 @@ NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 HAS_NVLINK=$([ "$NVLINK_COUNT" -gt 0 ] && echo 1 || echo 0)
 echo ">>> NVLink links detected: ${NVLINK_COUNT}  (NCCL_NVLS_ENABLE=${HAS_NVLINK})"
 
-export PYTHONPATH="${PYTHONPATH:-}:${MEGATRON_PATH}:$(pwd)/src:$(pwd)/${MILES_DIR}"
+# Build PYTHONPATH from ABSOLUTE paths so Ray workers (which can start in
+# any cwd) resolve every entry. Pre-G1 the entries were relative + duplicated
+# (saw "/repo//repo/miles") because $(pwd)/${MILES_DIR} prepended pwd to an
+# already-absolute MILES_DIR.
+NEW_PYTHONPATH="${REPO_ROOT}/src:${MILES_DIR}:${MEGATRON_PATH}"
+if [ -n "${PYTHONPATH:-}" ]; then
+  export PYTHONPATH="${PYTHONPATH}:${NEW_PYTHONPATH}"
+else
+  export PYTHONPATH="${NEW_PYTHONPATH}"
+fi
+echo ">>> PYTHONPATH=${PYTHONPATH}"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export DEPRECATED_MEGATRON_COMPATIBLE=1
 export PYTHONUNBUFFERED=1
