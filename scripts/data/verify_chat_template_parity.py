@@ -108,8 +108,22 @@ def main() -> None:
 
     from mllmopd.diagnostics.run_audit_pass import _build_messages as audit_build
 
-    # MMR1 sysprompt — must match the one prep_opd_train_data.py prepended.
-    from scripts.data.prep_opd_train_data import MMR1_SYSTEM_PROMPT  # type: ignore
+    # MMR1 sysprompt — verbatim copy of the one prep_opd_train_data.py
+    # prepended (which itself mirrors scripts/audit/run_smoke.sh:121 +
+    # scripts/audit/rerun_h2_sysprompt.sh). KEEP IN SYNC; if MMR1
+    # retrains with a different sysprompt all four sites must be
+    # updated together. TODO: factor into a shared constants module.
+    MMR1_SYSTEM_PROMPT = (
+        "A conversation between User and Assistant. The User provides an image and asks a question. "
+        "The Assistant first analyzes both the image and the question, then carefully thinks about the "
+        "reasoning process step by step, and finally provides the User with an accurate answer. "
+        "The Assistant must carefully checkout the correctness and validity of each reasoning step. "
+        "If any errors or inconsistencies are found during the reasoning process, the Assistant "
+        "reflects and corrects them logically. The reasoning process and answer are enclosed within "
+        "<think> </think> and <answer> </answer> tags, respectively, i.e., "
+        "<think> reasoning process here, with potential reflections and corrections </think>"
+        "<answer> final answer here, with the key result enclosed in \\boxed{} </answer>."
+    )
 
     from transformers import AutoTokenizer  # type: ignore
     print(f">>> loading tokenizer from {args.model}", file=sys.stderr)
