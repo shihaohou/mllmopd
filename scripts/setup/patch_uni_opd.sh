@@ -70,72 +70,72 @@ if grep -q "${SENTINEL}" "${AC}"; then
   echo ">>> ${AC}: already patched (inspect sentinel present)"
 else
   echo ">>> patching ${AC}: inject env-inspect at top + inside .init()"
-  python3 - <<PY
-import io, os, sys
-
-path = "${AC}"
-sentinel = "${SENTINEL}"
+  # Quoted heredoc (`<<'PY'`) so bash does NO interpolation or backslash
+  # processing — the Python source is delivered verbatim. The prior
+  # unquoted heredoc converted `\\n` to `\n` in the Python source, which
+  # Python then parsed as an actual newline INSIDE the string literals,
+  # producing unterminated f-strings in the resulting actor.py.
+  export MLLMOPD_PATCH_ACTOR_PATH="${AC}"
+  python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_ACTOR_PATH"]
 
 with open(path, "r") as f:
     src = f.read()
 
-top_block = '''${SENTINEL}
+top_block = r'''# === mllmopd actor inspect patch ===
 import os as _mllmopd_os
 _mllmopd_pid = _mllmopd_os.getpid()
 _mllmopd_log = f"/tmp/actor_inspect_{_mllmopd_pid}.log"
 try:
     with open(_mllmopd_log, "w") as _f:
-        _f.write(f"PID={_mllmopd_pid}\\n")
-        _f.write(f"LD_LIBRARY_PATH={_mllmopd_os.environ.get('LD_LIBRARY_PATH','UNSET')}\\n")
-        _f.write(f"LD_PRELOAD={_mllmopd_os.environ.get('LD_PRELOAD','UNSET')}\\n")
-        _f.write(f"CUDA_VISIBLE_DEVICES={_mllmopd_os.environ.get('CUDA_VISIBLE_DEVICES','UNSET')}\\n")
-        _f.write(f"PATH={_mllmopd_os.environ.get('PATH','UNSET')}\\n")
-        _f.write(f"PYTHONPATH={_mllmopd_os.environ.get('PYTHONPATH','UNSET')}\\n")
-except Exception as _e:
+        _f.write(f"PID={_mllmopd_pid}\n")
+        _f.write(f"LD_LIBRARY_PATH={_mllmopd_os.environ.get('LD_LIBRARY_PATH','UNSET')}\n")
+        _f.write(f"LD_PRELOAD={_mllmopd_os.environ.get('LD_PRELOAD','UNSET')}\n")
+        _f.write(f"CUDA_VISIBLE_DEVICES={_mllmopd_os.environ.get('CUDA_VISIBLE_DEVICES','UNSET')}\n")
+        _f.write(f"PATH={_mllmopd_os.environ.get('PATH','UNSET')}\n")
+        _f.write(f"PYTHONPATH={_mllmopd_os.environ.get('PYTHONPATH','UNSET')}\n")
+except Exception:
     pass
 # === end mllmopd actor inspect patch (top) ===
 
 '''
 
-init_block = '''        # === mllmopd actor inspect patch (inside init) ===
+init_block = r'''        # === mllmopd actor inspect patch (inside init) ===
         import os as _mllmopd_os2
         _mp = _mllmopd_os2.getpid()
         try:
             with open(f"/tmp/actor_inspect_{_mp}.log", "a") as _f:
-                _f.write("--- inside MegatronTrainRayActor.init() ---\\n")
+                _f.write("--- inside MegatronTrainRayActor.init() ---\n")
                 try:
                     with open(f"/proc/{_mp}/maps") as _m:
                         _seen = set()
                         for _line in _m:
                             _low = _line.lower()
                             if any(_k in _low for _k in ["nccl", "libcuda.so", "cudart", "compat"]):
-                                _path = _line.strip().split()[-1] if _line.strip().split() else ""
+                                _parts = _line.strip().split()
+                                _path = _parts[-1] if _parts else ""
                                 if _path and _path.startswith("/") and _path not in _seen:
                                     _seen.add(_path)
-                                    _f.write(_path + "\\n")
+                                    _f.write(_path + "\n")
                 except Exception as _e:
-                    _f.write(f"maps err: {_e}\\n")
+                    _f.write(f"maps err: {_e}\n")
                 import torch as _t
-                _f.write(f"torch.cuda.nccl.version()={_t.cuda.nccl.version()}\\n")
-                _f.write(f"torch.version.cuda={_t.version.cuda}\\n")
+                _f.write(f"torch.cuda.nccl.version()={_t.cuda.nccl.version()}\n")
+                _f.write(f"torch.version.cuda={_t.version.cuda}\n")
                 try:
                     _t.cuda.init()
                     _x = _t.zeros(1).cuda()
-                    _f.write(f"cuda ok, device={_t.cuda.get_device_name(0)}\\n")
+                    _f.write(f"cuda ok, device={_t.cuda.get_device_name(0)}\n")
                 except Exception as _e:
-                    _f.write(f"cuda init failed: {type(_e).__name__}: {_e}\\n")
+                    _f.write(f"cuda init failed: {type(_e).__name__}: {_e}\n")
         except Exception:
             pass
         # === end mllmopd actor inspect patch (inside init) ===
 '''
 
-# Insert top block at line 0 (very beginning).
 new_src = top_block + src
 
-# Insert init block as the first body line of def init(.
-# Locate the line:    monkey_patch_torch_dist()
-# which is currently the first statement of init's body, and insert
-# our block BEFORE it.
 target = "        monkey_patch_torch_dist()"
 if target not in new_src:
     sys.exit(f"ERROR: could not find anchor '{target.strip()}' in {path}")
