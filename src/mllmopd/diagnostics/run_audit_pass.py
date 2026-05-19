@@ -82,24 +82,32 @@ def _build_model(model_id: str):
 def _build_messages(rec: dict, transformed, prefix, system_prompt: str = ""):
     """Build the chat-template message list for a single sample.
 
-    `system_prompt`, when non-empty, is **prepended into the user-turn text**
-    (NOT as a separate system role) to match how MMR1's training script wires
-    its system prompt into verl's dataset pipeline. Joining is single-space
-    after `.strip()`, mirroring `verl/utils/dataset.py`:
-        prompt_str = " ".join((system_prompt.strip(), prompt_str))
+    `system_prompt`, when non-empty, is emitted as a **separate text block at
+    the START of the user turn — BEFORE the image**, mirroring how MMR1's
+    training pipeline assembles content via verl/utils/dataset.py:
+
+        prompt_str = " ".join((system_prompt.strip(), prompt_str))   # "<sys> <image>{q}"
+        for i, content in enumerate(prompt_str.split("<image>")):    # ["<sys> ", "{q}"]
+            if i != 0: content_list.append({"type": "image"})
+            if content: content_list.append({"type": "text", "text": content})
+
+    The result is content list `[text:"<sysprompt> ", image, text:"{question}"]`,
+    so when Qwen2.5-VL's chat template renders it the sysprompt tokens appear
+    before the `<|vision_start|>` block. If we instead concatenated sysprompt
+    into the question text after the image, the visual context would precede
+    the role-defining sysprompt and MMR1 would stay in its base-model mode.
     """
     question = rec.get("question", "")
     if prefix:
         question = prefix + question
+
+    content: list = []
     if system_prompt:
-        question = system_prompt.strip() + " " + question
-    return [{
-        "role": "user",
-        "content": [
-            *([{"type": "image", "image": transformed}] if transformed is not None else []),
-            {"type": "text", "text": question},
-        ],
-    }]
+        content.append({"type": "text", "text": system_prompt.strip() + " "})
+    if transformed is not None:
+        content.append({"type": "image", "image": transformed})
+    content.append({"type": "text", "text": question})
+    return [{"role": "user", "content": content}]
 
 
 def _emit_skip_missing_image(rec: dict, args, fout):

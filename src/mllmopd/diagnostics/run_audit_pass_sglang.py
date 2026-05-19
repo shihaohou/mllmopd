@@ -213,6 +213,14 @@ def main() -> None:
     from transformers import AutoTokenizer  # type: ignore
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
+    if args.system_prompt_text:
+        first_60 = args.system_prompt_text.strip()[:60].replace("\n", " ")
+        print(f">>> system_prompt_text active (first 60 chars): {first_60!r}...",
+              file=sys.stderr)
+    else:
+        print(">>> no system_prompt_text (plain Qwen2.5-VL chat template)",
+              file=sys.stderr)
+
     requests, skipped = _prepare_requests(args, tokenizer)
     print(f">>> {len(requests)} requests built, {len(skipped)} skipped (missing image)",
           file=sys.stderr)
