@@ -22,13 +22,22 @@ Must run in the train venv (sglang installed).
 
 Usage:
     python -m mllmopd.diagnostics.score_completion \\
-        --subset data/audit/smoke_subset_v0.jsonl \\
-        --source runs/audit/smoke500/T_RL_full.jsonl \\
+        --subset data/audit/level1_subset_v0.jsonl \\
+        --source runs/audit/level1_v4_sysprompt_fixed/T_RL_full.jsonl \\
         --model /path/to/MMR1-7B-RL \\
-        --out runs/audit/smoke500/T_RL_full.scored.jsonl
+        --system-prompt-text "$MMR1_SYSTEM_PROMPT" \\
+        --id-filter runs/audit/level1_v4_sysprompt_fixed/opd_target_ids.json \\
+        --out runs/audit/level1_v4_sysprompt_fixed/T_RL_score_opd_target.jsonl
 
 For cross-model scoring (e.g., student logp under teacher's completion),
 point `--source` at the teacher's jsonl but `--model` at the student.
+
+IMPORTANT: For MMR1-trained models the `--system-prompt-text` flag is REQUIRED.
+Pass the verbatim MMR1 training-time system prompt (defined in
+`scripts/audit/run_smoke.sh` as $MMR1_SYSTEM_PROMPT). Skipping it leaves
+the model in base-model mode and the resulting VD distribution will not
+match the canonical audit prefix. See `run_audit_pass.py::_build_messages`
+for the exact content-list ordering ([text:sysprompt, image, text:question]).
 """
 
 from __future__ import annotations
@@ -41,18 +50,23 @@ import time
 from pathlib import Path
 
 from mllmopd.data import mllm_corruptions
-from mllmopd.diagnostics.run_audit_pass import _load_subset
+from mllmopd.diagnostics.run_audit_pass import _build_messages, _load_subset
 
 
-def _build_prefix_and_full(tokenizer, rec, image, response_text: str) -> tuple[str, str]:
-    """Chat-template prefix + assistant response = scoring prompt."""
-    messages = [{
-        "role": "user",
-        "content": [
-            *([{"type": "image", "image": image}] if image is not None else []),
-            {"type": "text", "text": rec.get("question", "")},
-        ],
-    }]
+def _build_prefix_and_full(
+    tokenizer, rec, image, response_text: str, system_prompt: str = "",
+) -> tuple[str, str]:
+    """Chat-template prefix + assistant response = scoring prompt.
+
+    Reuses the canonical `_build_messages` from `run_audit_pass` so the prefix
+    is byte-identical to what the audit pipeline feeds the same model.
+    Critical for MMR1 / MMR1-derived checkpoints: the training-time system
+    prompt must be emitted as a text block at the start of the user turn,
+    BEFORE the image. Without it the teacher stays in base-model mode and
+    the resulting logp_full/logp_blank distribution is not a measurement
+    of MMR1's vision-conditioned behavior. See `_build_messages` docstring.
+    """
+    messages = _build_messages(rec, image, prefix=None, system_prompt=system_prompt)
     prefix_text = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False,
     )
@@ -145,7 +159,26 @@ def main() -> None:
                          "is in this set. Use opd_target_ids.json from "
                          "paired_vision_critical to focus the H2 audit on the "
                          "vision-conditioned subset.")
+    ap.add_argument("--system-prompt-text", default="",
+                    help="Text prepended to the user turn as a separate text "
+                         "block BEFORE the image. For MMR1 / MMR1-RL teacher "
+                         "checkpoints this MUST be the verbatim training-time "
+                         "system prompt (see scripts/audit/run_smoke.sh "
+                         "MMR1_SYSTEM_PROMPT). Without it MMR1 stays in base-"
+                         "model mode and the VD distribution will not match "
+                         "the canonical audit run.")
     args = ap.parse_args()
+
+    if args.system_prompt_text:
+        first_60 = args.system_prompt_text.strip()[:60].replace("\n", " ")
+        print(f">>> system_prompt_text active (first 60 chars): {first_60!r}...",
+              file=sys.stderr)
+    else:
+        print(">>> WARNING: no --system-prompt-text. For MMR1-trained models "
+              "this leaves the model in base-mode and the VD distribution "
+              "will NOT be comparable to the canonical audit. Use the "
+              "verbatim MMR1 training-time sysprompt for MMR1 teachers.",
+              file=sys.stderr)
 
     # Same cuDNN init race precaution as run_audit_pass_sglang (see common-pitfalls E1).
     import torch  # noqa: F401
@@ -195,7 +228,10 @@ def main() -> None:
         full_img, _ = mllm_corruptions.apply_mode(pil, "full_image")
         blank_img, _ = mllm_corruptions.apply_mode(pil, "blank_image")
 
-        prefix_text, full_text = _build_prefix_and_full(tokenizer, rec, full_img, response)
+        prefix_text, full_text = _build_prefix_and_full(
+            tokenizer, rec, full_img, response,
+            system_prompt=args.system_prompt_text,
+        )
         # Number of response tokens via standalone tokenization. Sglang's internal
         # tokenization expands image patches in the prefix region, but those live
         # BEFORE the response in the token stream, so the *last* n_resp logprobs

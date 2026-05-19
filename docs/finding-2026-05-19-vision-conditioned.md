@@ -3,6 +3,8 @@
 **Status**: post-audit, pre-training. Paper §1-2 seed.
 **Canonical data**: `runs/audit/level1_v4_sysprompt_fixed/` (4 models × 3 modes × 6 benchmarks × 200 prompts).
 
+> ⚠️ **Token-level numbers below are pending a prompt-parity rerun.** The original H2 forced-decode (`vd_summary.json`) was scored without injecting MMR1's training-time system prompt — `score_completion.py` constructed its chat prefix from `[image, text:question]` rather than reusing `_build_messages([text:sysprompt, image, text:question])`. The canonical Level-1 audit (prompt-level numbers above the H2 table) was unaffected. After patch + rerun (G1 in the 2026-05-19 pre-flight gates) the token-level VD distribution may shift. The prompt-level claim (73% vision-critical, Finding 1) is unchanged.
+
 ---
 
 ## TL;DR
@@ -13,7 +15,7 @@ Two layers of evidence:
 
 1. **Prompt-level.** Across 6 multimodal benchmarks (MathVista, MathVision, MathVerse, ChartQA, HallusionBench, POPE), among the **181 prompts where the RL teacher (MMR1-7B-RL) beats the SFT student (MMR1-3B-SFT)**, **133 (73%)** are *vision-critical* for the teacher — teacher gets it right with the image, wrong without (`full_image`=✓, `blank_image`=✗). 98 (54%) are even stricter: teacher also fails on `text_only`. On math/chart benchmarks the rate is **78-96%**. HallusionBench (42%) is a mixed counterexample where some of the teacher's advantage is language-prior.
 
-2. **Token-level.** Forced-decoding the teacher's own completions on those 133 vision-critical prompts (96,159 tokens total) shows that **only ~7% of tokens have meaningful positive visual dependency** (vd > 0.5, where `vd(t) = logp(t | prefix, full_image) − logp(t | prefix, blank_image)`). Those tokens carry ~20% of the teacher's NLL "effort". The other 93% of tokens are language-prior (vd ≤ 0.5) and account for 55-75% of NLL effort.
+2. **Token-level.** Forced-decoding the teacher's own completions on those 133 vision-critical prompts (96,159 tokens total) shows that **only ~7% of tokens have strong positive visual dependency** (vd > 0.5, where `vd(t) = logp(t | prefix, full_image) − logp(t | prefix, blank_image)`), yet they account for **~20% of the teacher's NLL "effort"**. Most of the remaining tokens are low/neutral-VD (the language-prior majority). A small negative-VD tail (`vd ≤ -1`, ~0.6% of tokens) carries an outsized ~25% of NLL mass and needs separate interpretation; it is not folded into the "language-prior" bucket below.
 
 The refined research question that follows directly from this:
 
@@ -34,7 +36,7 @@ Four models, three input modes, six benchmarks, 200 prompts per benchmark = 24 c
 | MMR1-7B-SFT        | Same-size pre-RL control   |
 | MMR1-7B-RL         | OPD teacher                |
 
-Modes: `full_image` (normal), `blank_image` (image replaced with same-size black canvas), `text_only` (image token dropped).
+Modes: `full_image` (normal), `blank_image` (image replaced with a same-size **white** canvas — `Image.new("RGB", size, (255,255,255))`, see `mllm_corruptions.blank_image`), `text_only` (image token dropped).
 
 Benchmarks: MathVista (testmini), MathVision (testmini), MathVerse (testmini), ChartQA (test), HallusionBench (image split), POPE (adversarial).
 
@@ -95,7 +97,7 @@ For each of the 133 OPD-target prompts, forced-decode the teacher's own generate
 
 Eyeball check on individual tokens confirms the bins: high-VD tokens are concrete vision-grounded nouns / numbers / object names (`'people'`, `'standing'`, `'5.03'`, axis labels); low-VD tokens are connectives, punctuation, and reasoning verbiage (`'the'`, `'\n'`, `'There'`, `'is'`).
 
-If a vanilla OPD reward at a token position is roughly proportional to teacher's NLL effort there, then **~80% of vanilla OPD's supervision is allocated to language-prior tokens the student didn't need teacher help with**. The visual signal is dense in importance (high NLL/token at high-VD positions) but sparse in count (3-7% of positions).
+If a vanilla OPD reward at a token position is roughly proportional to teacher's NLL effort there, then **only ~20% of vanilla OPD's supervision lands on tokens with positive visual dependency**, while the remaining ~80% falls on language-prior or anti-visual tokens (~93% of token positions). The visual signal is dense in importance (high NLL/token at high-VD positions) but sparse in count (3-7% of positions).
 
 The `very_low (vd ≤ -1)` row is interesting and not yet interpreted: 0.6% of tokens with 24.7% of NLL mass means a small set of high-stakes positions where image actively *hurts* the teacher's prediction. Spot-checks suggest these are answer-value tokens (e.g., the digits of the final boxed number in ChartQA) where both full and blank conditions place high probability mass but in slightly different distributions. We don't yet have a clean story for them — they should be analyzed before applying any positive-only VD weighting.
 
