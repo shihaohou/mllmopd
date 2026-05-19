@@ -31,22 +31,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 
-def _render_audit(messages_fn, tokenizer, raw_problem: str, image, sysprompt: str) -> str:
-    """Reproduce the audit path: pass the *unprefixed* question text +
-    image + explicit system_prompt to audit's _build_messages, then
-    apply_chat_template."""
-    # MMR1-RL's raw_problem is "<image>\n<question>". Strip the leading
-    # placeholder + optional newline; what remains is the question text
-    # the audit pipeline would store under rec["question"].
-    if raw_problem.startswith("<image>"):
-        question_text = raw_problem[len("<image>"):]
-    else:
-        # Fall back: just remove first occurrence.
-        question_text = raw_problem.replace("<image>", "", 1)
+def _render_audit(messages_fn, tokenizer, problem: str, image, sysprompt: str) -> str:
+    """Audit path. The canonical `problem` field is
+    `<sysprompt> <image>\\n<question_text>` (enforced by prep). We split
+    on the single `<image>` placeholder and pass the suffix (including
+    its leading newline) as the question. The prefix is discarded — we
+    re-supply sysprompt via the explicit `system_prompt` argument to
+    audit's _build_messages so the resulting content list is
+    [text:sysprompt, image, text:question_with_newline]."""
+    parts = re.split(r"<image>", problem, maxsplit=1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"problem doesn't contain a single <image> placeholder: "
+            f"{problem[:120]!r}"
+        )
+    question_text = parts[1]  # includes the canonical "\n" prefix
     rec = {"question": question_text}
     messages = messages_fn(rec, image, prefix=None, system_prompt=sysprompt)
     return tokenizer.apply_chat_template(
@@ -147,12 +151,11 @@ def main() -> None:
     all_pass = True
     for i, row in enumerate(rows):
         problem = row["problem"]
-        raw_problem = row["raw_problem"]
         img_path = row["images"][0]
         with Image.open(img_path) as img:
             img = img.convert("RGB")
             audit_text = _render_audit(
-                audit_build, tokenizer, raw_problem, img, MMR1_SYSTEM_PROMPT,
+                audit_build, tokenizer, problem, img, MMR1_SYSTEM_PROMPT,
             )
             uniopd_text = _render_uniopd(
                 uniopd_build, tokenizer, problem, img,

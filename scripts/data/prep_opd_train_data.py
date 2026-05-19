@@ -64,6 +64,23 @@ MMR1_SYSTEM_PROMPT = (
 _PLACEHOLDER_RE = re.compile(r"<(image|video|audio)>")
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
+# MMR1-RL's `problem` field is not always image-first — some rows put
+# `<image>` at the END or middle of the question. To guarantee that
+# Uni-OPD's regex-split-on-<image> produces the same content list as
+# audit's `[text:sysprompt, image, text:question]`, we normalize every
+# prep row to the canonical sysprompt-then-image-then-question form.
+# This `_IMG_PLACEHOLDER_AND_WS` strips ALL `<image>` occurrences plus
+# adjacent whitespace from a raw MMR1-RL problem; the residue is the
+# pure question text.
+_IMG_PLACEHOLDER_AND_WS = re.compile(r"\s*<image>\s*")
+
+
+def _extract_question_text(raw_problem: str) -> str:
+    """Return MMR1-RL's question text with all `<image>` placeholders
+    (and adjacent whitespace) removed. The caller reattaches a single
+    `<image>` placeholder in the canonical position."""
+    return _IMG_PLACEHOLDER_AND_WS.sub(" ", raw_problem).strip()
+
 
 def normalize_question(q: str) -> str:
     """Strip multimodal placeholders, lowercase, drop punctuation, collapse ws."""
@@ -344,11 +361,16 @@ def main() -> None:
             if not images:
                 continue
 
-            # Prepend MMR1 sysprompt — Uni-OPD's _build_messages will split
-            # the resulting string on the <image> placeholder, producing
-            # [text:"<sys> ", image, text:"\nquestion"] — byte-identical
-            # to audit's _build_messages output ordering.
-            full_problem = f"{MMR1_SYSTEM_PROMPT.strip()} {problem}"
+            # Strip all <image> placeholders from the raw problem so we
+            # can re-insert exactly one at the canonical position
+            # (between sysprompt and question). MMR1-RL is not uniformly
+            # image-first — some rows put <image> at the end or middle
+            # of the prompt, which would make Uni-OPD's regex-split-on-
+            # <image> emit a content list that doesn't match audit's
+            # [text:sysprompt, image, text:question] order. Forcing the
+            # canonical form here closes that divergence.
+            question_text = _extract_question_text(problem)
+            full_problem = f"{MMR1_SYSTEM_PROMPT.strip()} <image>\n{question_text}"
 
             img = images[0]
             img_sha = mmr1_img_sha_cache.get(src_idx) or sha256_pil(img)
@@ -359,6 +381,7 @@ def main() -> None:
             record = {
                 "id": f"mmr1_rl_v0_{out_idx:06d}",
                 "problem": full_problem,
+                "question_text": question_text,
                 "images": [str(img_path)],
                 "answer": answer,
                 "teacher_model": "MMR1-7B-RL",
