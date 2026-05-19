@@ -56,39 +56,57 @@ _dispatch_passes() {
     return 0
   fi
 
-  echo ">>> parallel mode across ${n_gpu} GPU(s): ${gpus_str} (backend: ${audit_module})"
-  local -a pids tags logs
+  echo ">>> parallel-per-gpu mode across ${n_gpu} GPU(s): ${gpus_str} (backend: ${audit_module})"
+  echo "    ${n_pass} passes distributed round-robin; passes assigned to the same GPU run"
+  echo "    sequentially in a per-GPU subshell to avoid co-located sglang OOM."
+
+  # Group pass indices by their target GPU (round-robin: pass i -> gpus[i % n_gpu]).
+  # Within each group we run sequentially so only one sglang engine occupies a
+  # given GPU at a time. Without this, two engines each grabbing
+  # mem_fraction_static=0.7 OOM the GPU on engine init.
+  local -a per_gpu_passes
   local i
+  for (( i = 0; i < n_gpu; i++ )); do per_gpu_passes[$i]=""; done
   for (( i = 0; i < n_pass; i++ )); do
-    local tag="${PASS_TAGS[$i]}" model="${PASS_MODELS[$i]}" mode="${PASS_MODES[$i]}"
-    local out="${RUN_DIR}/${tag}.jsonl"
-    if [ -f "${out}" ]; then
-      echo ">>> [${tag}] already exists — skipping"
-      continue
-    fi
-    local gpu="${gpus[$(( i % n_gpu ))]}"
-    local log="${RUN_DIR}/${tag}.log"
-    echo ">>> [${tag}] GPU=${gpu} model=${model} mode=${mode}  log=${log}"
+    local g=$(( i % n_gpu ))
+    per_gpu_passes[$g]+="${i} "
+  done
+
+  local -a pids gpu_labels
+  local g
+  for (( g = 0; g < n_gpu; g++ )); do
+    local gpu="${gpus[$g]}"
+    local idxs="${per_gpu_passes[$g]}"
+    [ -z "${idxs// }" ] && continue
     (
-      CUDA_VISIBLE_DEVICES="${gpu}" python -m "${audit_module}" \
-        --subset "${SUBSET}" \
-        --model "${model}" \
-        --mode "${mode}" \
-        --out "${out}" \
-        "${EXTRA_ARGS[@]}"
-    ) >"${log}" 2>&1 &
+      for idx in $idxs; do
+        local tag="${PASS_TAGS[$idx]}" model="${PASS_MODELS[$idx]}" mode="${PASS_MODES[$idx]}"
+        local out="${RUN_DIR}/${tag}.jsonl"
+        if [ -f "${out}" ]; then
+          echo ">>> [${tag}] already exists — skipping"
+          continue
+        fi
+        local log="${RUN_DIR}/${tag}.log"
+        echo ">>> [${tag}] GPU=${gpu} model=${model} mode=${mode}  log=${log}"
+        CUDA_VISIBLE_DEVICES="${gpu}" python -m "${audit_module}" \
+          --subset "${SUBSET}" \
+          --model "${model}" \
+          --mode "${mode}" \
+          --out "${out}" \
+          "${EXTRA_ARGS[@]}" >"${log}" 2>&1
+      done
+    ) &
     pids+=($!)
-    tags+=("${tag}")
-    logs+=("${log}")
+    gpu_labels+=("${gpu}")
   done
 
   local fail=0
   for i in "${!pids[@]}"; do
     if wait "${pids[$i]}"; then
-      echo ">>> [${tags[$i]}] done"
+      echo ">>> GPU ${gpu_labels[$i]} pass group done"
     else
-      echo "ERROR: pass ${tags[$i]} (pid ${pids[$i]}) failed; tail of ${logs[$i]}:" >&2
-      tail -n 20 "${logs[$i]}" >&2 || true
+      echo "ERROR: GPU ${gpu_labels[$i]} pass group failed (pid ${pids[$i]})" >&2
+      echo "       check the corresponding per-tag .log files under ${RUN_DIR}/" >&2
       fail=1
     fi
   done
