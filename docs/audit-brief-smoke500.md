@@ -140,9 +140,13 @@ aggregator re-scores against the current scorer in memory, so cell-level
 accuracies in `summary.json` may differ — `rescore_changed` tells you how many
 rows flipped per cell. New inference runs additionally emit `parse_path` (the
 priority rule that matched — `final_answer` / `correct_answer` / `boxed` /
-`option_phrase` / `answer_phrase` / `paren_tail` / `last_letter_fallback` /
-`none`); the 2026-05-19 smoke500 JSONLs predate this field and only get
-`parse_path` filled at aggregation time.
+`option_phrase` / `answer_phrase` / `choice_text` / `paren_tail` /
+`last_letter_fallback` / `none`) and `choices` (the MCQ option-text list).
+The 2026-05-19 smoke500 JSONLs predate these fields; `choices` can be
+injected after the fact by running `scripts/data/backfill_choices.py`
+against the source subset, which unlocks the `choice_text` parse path and
+recovers predictions like "Serrulate is the correct answer" that the
+letter-only parser cannot score.
 
 **Scorer values**:
 - `mcq_letter`: multiple-choice, gold is a letter (A/B/C/D...); parser extracts a letter from prediction.
@@ -280,10 +284,11 @@ refuse, even without an image.
 3. **MathVista `gold` is the letter** (A/B/C/...) even though the source
    dataset stores option text; we mapped at prep time. Records where the
    model only states the option *text* in the conclusion (e.g., "Serrulate
-   is the correct answer") **cannot be scored** by the current scorer
-   without `choices` joined back — the parser falls to `paren_tail` or
-   `last_letter_fallback`. Known gap; fix requires either storing `choices`
-   in the JSONL (future inference runs) or backfill from the source subset.
+   is the correct answer") **can only be scored if the JSONL row carries
+   `choices`**. The 2026-05-19 smoke500 JSONLs were captured before this
+   field was emitted — for those, run `scripts/data/backfill_choices.py
+   --subset <subset> --run_dir <run>` to inject choices from the source
+   subset, then re-aggregate. Future inference runs emit `choices` directly.
 4. **`loose_contains` records are fuzzy fallback** (~1% of records). All
    cells in this run have ≤1 loose record, not a concern here.
 5. **Standard error for n=250 accuracy ≈ 0.03**; paired counts can have

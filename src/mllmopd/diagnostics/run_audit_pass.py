@@ -106,9 +106,18 @@ def _emit_skip_missing_image(rec: dict, args, fout):
     os.fsync(fout.fileno())
 
 
+def _extract_choices(rec: dict):
+    """Pull the MCQ option-text list from a subset record. prep_audit_subset
+    keeps the source dataset's `choices` / `options` field under `meta`, so
+    we look there first; some loaders may also surface it at the top level."""
+    meta = rec.get("meta") or {}
+    return rec.get("choices") or rec.get("options") or meta.get("choices") or meta.get("options")
+
+
 def _emit_row(rec: dict, args, fout, pred: str, num_tok: int, prompt_len: int):
+    choices = _extract_choices(rec)
     is_correct, scorer_used, parse_path = scorers.score_for_benchmark(
-        rec["benchmark"], pred, rec.get("answer"),
+        rec["benchmark"], pred, rec.get("answer"), choices=choices,
     )
     row = {
         "id": rec["id"],
@@ -123,6 +132,8 @@ def _emit_row(rec: dict, args, fout, pred: str, num_tok: int, prompt_len: int):
         "scorer": scorer_used,
         "parse_path": parse_path,
     }
+    if choices:
+        row["choices"] = list(choices)
     fout.write(json.dumps(row, ensure_ascii=False) + "\n")
     fout.flush()
     os.fsync(fout.fileno())

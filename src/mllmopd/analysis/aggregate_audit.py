@@ -36,13 +36,15 @@ def _iter_records(p: Path):
 
 def _rescore(rec: dict) -> tuple[bool | None, str, str]:
     """Re-score a record using the current scorer; safe to call on rows from
-    old jsonls that don't yet carry a `parse_path` field."""
+    old jsonls that don't yet carry `parse_path` or `choices`. When the row
+    has `choices`, the MCQ parser can recover option-text-only conclusions."""
     if rec.get("scorer") in {"skip_missing_image", "skip_empty_gold"}:
         return rec.get("is_correct"), rec.get("scorer"), rec.get("scorer")
     pred = rec.get("prediction") or ""
     gold = rec.get("gold")
     benchmark = rec.get("benchmark", "")
-    return scorers.score_for_benchmark(benchmark, pred, gold)
+    choices = rec.get("choices")
+    return scorers.score_for_benchmark(benchmark, pred, gold, choices=choices)
 
 
 def _paired_full_blank(by_cell: dict, correct_map: dict) -> list[dict]:

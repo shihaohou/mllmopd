@@ -21,6 +21,7 @@ import re
 _YESNO_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
 _MCQ_LETTER_RE = re.compile(r"(?<![A-Za-z])([A-Ha-h])(?![A-Za-z])")
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_LETTER_LABELS = "ABCDEFGHIJ"
 
 # Benchmarks where gold is yes/no.
 _YESNO_BENCHMARKS = {"pope_adversarial", "pope", "hallusionbench"}
@@ -85,7 +86,58 @@ def _parse_mcq_priority(text: str) -> tuple[str | None, str]:
 HIGH_CONFIDENCE_PATHS = frozenset({
     "boxed", "final_answer", "correct_answer", "correct_choice",
     "answer_phrase", "option_phrase",
+    "choice_text",  # mapped option text → letter via choices list
 })
+
+
+def _parse_mcq_with_choices(text: str, choices) -> tuple[str | None, str]:
+    """Like `_parse_mcq_priority`, but inserts an option-text → letter mapping
+    step between the high-confidence answer phrases and the paren_tail fallback.
+
+    Use this when the source record carries the MCQ `choices` list. The
+    motivation: long-CoT models often conclude with the option *text*
+    ("Serrulate is the correct answer") instead of restating the letter, in
+    which case `_parse_mcq_priority` falls through to paren_tail which picks up
+    the last enumerated option letter from the option list — usually wrong.
+    """
+    # Step 1: high-confidence priority patterns (same as the no-choices parser)
+    for pat, label in _MCQ_PRIORITY_PATTERNS:
+        matches = list(pat.finditer(text))
+        if matches:
+            return matches[-1].group(1).upper(), label
+
+    # Step 2: option text appearing in the prediction tail. The latest match
+    # wins (model usually states its choice last); ties broken by longest text
+    # (so "Serrulate" beats "Serrate" when both are in the tail).
+    if choices:
+        tail = text[-400:].lower()
+        hits: list[tuple[int, int, int]] = []  # (position, choice_idx, length)
+        for i, ch in enumerate(choices):
+            if not ch:
+                continue
+            c = str(ch).strip().lower()
+            if len(c) < 2:  # too short, false-positive risk
+                continue
+            pos = tail.rfind(c)
+            if pos >= 0:
+                hits.append((pos, i, len(c)))
+        if hits:
+            hits.sort(key=lambda x: (-x[0], -x[2]))  # latest, then longest
+            _, idx, _ = hits[0]
+            if idx < len(_LETTER_LABELS):
+                return _LETTER_LABELS[idx], "choice_text"
+
+    # Step 3: paren_tail
+    tail = text[-300:]
+    paren = list(re.finditer(r"\(([A-Ha-h])\)", tail))
+    if paren:
+        return paren[-1].group(1).upper(), "paren_tail"
+
+    # Step 4: last_letter_fallback
+    m = _MCQ_LETTER_RE.findall(text)
+    if m:
+        return m[-1].upper(), "last_letter_fallback"
+    return None, "none"
 
 
 def _parse_number(text: str) -> float | None:
@@ -115,14 +167,18 @@ def score_mcq_letter(pred: str, gold) -> bool | None:
     return res
 
 
-def score_mcq_letter_v2(pred: str, gold) -> tuple[bool | None, str]:
-    """Returns (is_correct, parse_path)."""
+def score_mcq_letter_v2(pred: str, gold, choices=None) -> tuple[bool | None, str]:
+    """Returns (is_correct, parse_path). When `choices` is provided, uses the
+    extended parser that can recover option-text-only conclusions."""
     if gold is None:
         return None, "skip_empty_gold"
     g = str(gold).strip().upper()
     if not (len(g) == 1 and "A" <= g <= "H"):
         return None, "skip_empty_gold"
-    p, path = _parse_mcq_priority(pred)
+    if choices:
+        p, path = _parse_mcq_with_choices(pred, choices)
+    else:
+        p, path = _parse_mcq_priority(pred)
     if p is None:
         return False, path
     return (p == g), path
@@ -143,13 +199,17 @@ def score_numeric(pred: str, gold, rel_tol: float = 0.01, abs_tol: float = 1e-3)
     return abs(p - g) / abs(g) < rel_tol
 
 
-def score_for_benchmark(benchmark: str, pred: str, gold) -> tuple[bool | None, str, str]:
+def score_for_benchmark(
+    benchmark: str, pred: str, gold, choices=None,
+) -> tuple[bool | None, str, str]:
     """Dispatch on benchmark name + gold shape.
 
     Returns (is_correct, scorer_name, parse_path). scorer_name is one of:
         yesno / mcq_letter / numeric / loose_contains / skip_empty_gold
     parse_path is meaningful for mcq_letter; for other scorers it equals the
-    scorer name.
+    scorer name. Pass `choices` (a list of option-text strings, in A/B/C/...
+    order) when available; the MCQ parser uses them to recover predictions
+    that conclude with option text instead of letter.
     """
     if gold is None or str(gold).strip() == "":
         return None, "skip_empty_gold", "skip_empty_gold"
@@ -160,7 +220,7 @@ def score_for_benchmark(benchmark: str, pred: str, gold) -> tuple[bool | None, s
 
     g = str(gold).strip()
     if len(g) == 1 and "A" <= g.upper() <= "H":
-        res, path = score_mcq_letter_v2(pred, gold)
+        res, path = score_mcq_letter_v2(pred, gold, choices=choices)
         return res, "mcq_letter", path
 
     try:
