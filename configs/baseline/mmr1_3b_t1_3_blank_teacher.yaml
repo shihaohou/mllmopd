@@ -1,0 +1,219 @@
+# T1-3 — BlankTeacher OPD arm (negative control: teacher sees a blank image)
+#
+# This file is *project-level metadata*: documents the arm for tracking and
+# reproducibility (paper figures, run registry, future-reader sanity checks).
+# It is NOT consumed by the trainer. Uni-OPD's `ray_launcher.py train.py`
+# reads CLI flags directly; values below are the defaults baked into
+# `scripts/train/opd_mmr1_3b_baseline.sh` (the launcher) and `start_teacher_server.sh`.
+#
+# If anything below disagrees with the launcher, the launcher wins — but
+# please open an issue and reconcile rather than silently letting the two
+# drift.
+#
+# See also:
+#   - docs/t1-plan-2026-05-19.md         (sections §0, §2, §6, §7, §8)
+#   - docs/finding-2026-05-19-vision-conditioned.md
+#   - configs/baseline/mmr1_3b_t1_2_full_teacher.yaml  (the paired FullTeacher arm)
+
+# ----------------------------------------------------------------------------
+# Identity
+# ----------------------------------------------------------------------------
+arm: "T1-3"
+arm_tag: "BlankTeacher OPD (negative control)"
+description: >
+  Vanilla on-policy distillation from MMR1-7B-RL → MMR1-3B-SFT where the
+  teacher scores the student's rollout while conditioning on a *blank
+  white-canvas image* — `Image.new("RGB", img.size, (255,255,255))` (see
+  `mllm_corruptions.blank_image`, also used in the H2 audit) — set via
+  `OPD_TEACHER_IMAGE_MODE=blank`. This is the *negative-control* arm of
+  T1: the student rollout still uses the FULL image, only the teacher's
+  view is blanked while it computes the OPD reward.
+
+decision_role: >
+  Negative term in the headline metric
+  Δ = (T1-2 − T1-0) − (T1-3 − T1-0). T1-3 minus T1-0 measures how much
+  vanilla OPD improves the student *without* a visual reward signal —
+  i.e. how much of the improvement is pure language-prior distillation.
+  Subtracting (T1-3 − T1-0) from (T1-2 − T1-0) isolates the visual-signal
+  contribution. T1-3 ≈ T1-2 means vanilla OPD is mostly language-prior
+  transfer; T1-3 ≪ T1-2 means the visual signal carries most of the gain.
+  See docs/t1-plan-2026-05-19.md §0.
+
+# ----------------------------------------------------------------------------
+# T1 arm selector — the ONLY knob that differs between T1-2 and T1-3
+# ----------------------------------------------------------------------------
+opd_teacher_image_mode: "blank"          # env var OPD_TEACHER_IMAGE_MODE
+# Note: under the hood the launcher exports OPD_TEACHER_IMAGE_MODE=both for
+# *both* arms so we always dual-log lp_full + lp_blank (plan §2.4). This
+# field records the *reward-defining* image mode for THIS arm: lp_blank is
+# the actual training reward; lp_full is logged for diagnostics only.
+
+# ----------------------------------------------------------------------------
+# Models
+# ----------------------------------------------------------------------------
+teacher:
+  model_name: "MMR1-7B-RL"
+  hf_path_env: "MMR1_7B_RL_CKPT"         # resolved from .env at runtime
+  why_this_teacher: >
+    Memory project_teacher_student.md: MMR1-7B-RL is the smallest open RL
+    multimodal model whose published MathVista (0.720) we reproduce *exactly*
+    on level1_v4_sysprompt_fixed. Rules out eval-bug confounders. Calibrated
+    against MMR1 paper Table 2 (docs/finding-2026-05-19-vision-conditioned.md
+    §Setup and calibration).
+
+student:
+  model_name: "MMR1-3B-SFT"
+  hf_path_env: "MMR1_3B_SFT_CKPT"        # resolved from .env at runtime
+  why_this_student: >
+    Same family as teacher (shared chat template, sysprompt-before-image
+    convention) — neutralizes prompt-format confounds when comparing
+    T1-2 vs T1-3. MMR1-3B-SFT is the post-SFT pre-RL checkpoint; the
+    teacher's measured advantage over it on the 133 opd_target prompts
+    is by construction vision-critical.
+
+# ----------------------------------------------------------------------------
+# Training data
+# ----------------------------------------------------------------------------
+training_data:
+  source: "MMR1-RL"                       # ${MMR1_RL_DATA}, ~15k QA pairs
+  path: "data/opd_train/v0_2k/train.jsonl"  # prep output, repo-relative
+  size: 2000                              # T1-v0 budget; plan §3
+  dedup_layers_passed:
+    # See scripts/data/prep_opd_train_data.py and the emitted
+    # `data/opd_train/v0_2k/dedup_report.json`. Layers refer to plan §2.5.
+    - "layer_b_normalized_question"      # lowercased, ws-collapsed, punct-stripped
+    - "layer_d_image_hash"                # SHA-256 over RGB pixels
+    # Layers a (exact id), c (question+choices), e (fuzzy MinHash) are
+    # documented intent but not yet emitted in dedup_report.json; layer-b
+    # subsumes most of (a) and (c) in practice. Verify
+    # dedup_report.json:hard_stop_triggered == false before launch.
+  opd_target_excluded: true               # the 133 dev-set ids stay out (finding §T1)
+
+# ----------------------------------------------------------------------------
+# Eval data (T1 eval grid — reused audit infra)
+# ----------------------------------------------------------------------------
+eval_data:
+  source: "level1_v4_sysprompt_fixed"     # the G1 post-fix canonical audit
+  path: "data/audit/level1_subset_v0.jsonl"  # 1200 prompts, 6 benchmarks × 200 ea.
+  opd_target_ids_path: "runs/audit/level1_v4_sysprompt_fixed/opd_target_ids.json"
+  opd_target_size: 133                    # vision-critical subset (finding §F1)
+  benchmarks: ["MathVista", "MathVision", "MathVerse",
+               "ChartQA", "HallusionBench", "POPE_adversarial"]
+  modes: ["full_image", "blank_image", "text_only"]  # 4-mode grid w/ baseline
+
+# ----------------------------------------------------------------------------
+# Hyperparameters — VERBATIM from scripts/train/opd_mmr1_3b_baseline.sh
+# ----------------------------------------------------------------------------
+hyperparams:
+  # Optimizer (OPTIMIZER_ARGS in launcher)
+  lr: 1.0e-6
+  lr_warmup: 5                            # iters, constant decay
+  optimizer: "adam"
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+
+  # OPD / PPO-style clipping (GRPO_ARGS in launcher)
+  eps_clip: 0.2
+  eps_clip_high: 0.28                     # asymmetric clip upper bound
+  opd_clip_range: 10.0                    # --teacher-student-logprob-clip-range
+  advantage_estimator: "on_policy_distillation"  # the vanilla OPD loss path
+  kl_loss_coef: 0.00                      # KL ref unused; flag still passed
+  kl_loss_type: "low_var_kl"
+  entropy_coef: 0.00
+
+  # Rollout / batching (ROLLOUT_ARGS)
+  rollout_batch_size: 8                   # prompts per rollout
+  sample_n: 8                             # n_samples_per_prompt
+  global_batch_size: 64                   # = rollout_batch_size * sample_n
+  num_epoch: 1                            # locked to 1 in T1-v0 (plan §3)
+  rollout_max_prompt_len: 4096
+  rollout_max_response_len: 2048          # Risk #3 mitigation (OOM guard)
+  rollout_temperature: 1
+
+  # Checkpointing
+  save_interval: 50                       # ~5 ckpts over 250 steps
+
+# ----------------------------------------------------------------------------
+# Uni-OPD features intentionally DISABLED (vanilla baseline; plan §4)
+# ----------------------------------------------------------------------------
+disabled_features:
+  - name: "margin_shift"
+    why: "Uni-OPD improvement over vanilla; T1 measures vanilla baseline only."
+  - name: "margin_mask_greedy"
+    why: "Uni-OPD improvement; vanilla OPD treats every token uniformly."
+  - name: "enable_filter"
+    why: "Sample-filter is a Uni-OPD addition; keeps reward uniform-over-tokens."
+  - name: "adv_shift"
+    why: "Advantage-shift is a Uni-OPD addition; not part of vanilla OPD."
+
+# ----------------------------------------------------------------------------
+# Parallelism (8 × A800-80GB devbox; teacher binds GPU 0, trainer gets 1-7)
+# ----------------------------------------------------------------------------
+parallelism:
+  actor_num_nodes: 1
+  actor_num_gpus_per_node: 7              # student trainer (1..7)
+  rollout_num_gpus: 7                     # colocated sglang rollout
+  trainer_gpus: "1,2,3,4,5,6,7"           # CUDA_VISIBLE_DEVICES
+  teacher_gpus: "0"                       # standalone sglang server, GPU 0
+  tp_size: 1                              # 3B fits on one GPU
+
+# ----------------------------------------------------------------------------
+# Wall-time budget (plan §6)
+# ----------------------------------------------------------------------------
+wall_time_budget_hours: 5                 # ~4-5h/arm at 2k × 1 epoch × 250 steps
+
+# ----------------------------------------------------------------------------
+# Outputs (all under ${MLLMOPD_RUNS}/${OPD_RUN_NAME})
+# ----------------------------------------------------------------------------
+outputs:
+  experiment_dir_env: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank"
+  checkpoints_dir: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank/ckpt"
+  tensorboard_dir: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank/tensorboard"
+  diagnostics_dir: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank/diagnostics"  # opd_diagnostics_hook.py
+  log_dir: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank/logs"
+  save_hf: "${MLLMOPD_RUNS}/t1_v0_T1_3_blank/ckpt/hf/step_{rollout_id}"
+
+# ----------------------------------------------------------------------------
+# Success metric (plan §0, finding §T1)
+# ----------------------------------------------------------------------------
+success_metric:
+  headline: "Δ = (T1-2 − T1-0) − (T1-3 − T1-0)"  # per-benchmark + averaged
+  per_benchmark_metrics:
+    G_full: "Acc_T1^full − Acc_SFT^full"
+    G_gap:  "(full − blank)_T1 − (full − blank)_SFT"
+    blank_leakage_ratio: "G_blank / max(eps, G_full)"
+    opd_target_recovery: "fraction of 133 opd_target prompts T1 gets right"
+    purev_recovery: "fraction of 98 PureV subset T1 gets right"
+  ci_method: "bootstrap 1000 resamples, 95% CI; McNemar paired on opd_target"
+
+# ----------------------------------------------------------------------------
+# Risk references (plan §7; same set for both arms)
+# ----------------------------------------------------------------------------
+risk_references:
+  - "R1: MMR1-RL ↔ eval contamination — dedup_report.json layer-b must be <5%."
+  - "R2: sysprompt-before-image parity — punch list #3 chat-template verify."
+  - "R3: sglang rollout OOM — rollout_max_response_len=2048 v0 guard."
+  - "R4: teacher KL exploding — opd_clip_range=10 mitigates; watch pg_loss_zeros."
+  - "R5: output-format drift — track mcq_high_conf_rate during T1-eval."
+  - "R6: image-encode latency stalls teacher — pre-encode + cache; blank dedup."
+  - "R7: cuDNN race — unset LD_LIBRARY_PATH; cuDNN ≥ 9.16 in train venv."
+  - "R8: teacher-scoring prompt mismatch — 3-sample byte-level diff at smoke (#9)."
+  - "R9: n=133 opd_target / n=200/bench noise — bootstrap CI + McNemar."
+
+# ----------------------------------------------------------------------------
+# Arm-specific notes
+# ----------------------------------------------------------------------------
+notes: >
+  T1-3 *actual reward* is teacher logp under the BLANK image (lp_blank).
+  Per plan §2.4, the launcher still dual-logs lp_full as a diagnostic in
+  THIS arm so we can do post-hoc attribution: did T1-3's student converge
+  *despite* low vd = lp_full − lp_blank (visual signal ignored) or
+  *because of* it (anti-visual distillation)? Without dual-logging in T1-3
+  we could only compare end-state benchmark accuracy, not the training
+  trajectory. Student rollout in `sglang_rollout.py::generate` is unchanged
+  — the student always sees the FULL image; only the teacher's
+  `RMSystemManager.build_payload` substitutes a white canvas before
+  encoding (see `src/mllmopd/training/blank_teacher_payload.py`). T1-3 is
+  the *negative-control* arm: if it matches T1-2 the vanilla-OPD framing
+  collapses to language-prior distillation and T2 needs re-scoping.
