@@ -4,7 +4,7 @@
 independently analyze the smoke500 results in `runs/audit/smoke500/` without
 prior context.
 
-**Captured at**: 2026-05-19. **Updated**: 2026-05-19 (scorer fix + choices backfill).
+**Captured at**: 2026-05-19. **Updated**: 2026-05-19 (scorer fix + choices backfill + MMR1-7B-SFT control added).
 
 > **Update notes (2026-05-19, post external review)**
 >
@@ -30,10 +30,30 @@ prior context.
 > 5. **Base (Qwen2.5-VL-7B-Instruct) is contaminated as a control**: 16-22%
 >    of Base `full_image` MathVista predictions are degenerate (<30 tokens,
 >    "are an language model", "addCriterion" artifacts). Even after backfill
->    Base `mcq_high_conf_rate` (0.56) lags MMR1 (0.83-0.89). Most likely
+>    Base `mcq_high_conf_rate` (0.56-0.68) lags MMR1 (0.83-0.89). Most likely
 >    chat template / prompt format mismatch. **All Base-vs-MMR1 deltas
 >    should be read as suggestive only** until Base inference is fixed and
 >    re-run.
+> 6. **MMR1-7B-SFT was added as a same-size pre-RL control** (now 4 models ×
+>    3 modes × 2 benchmarks = 24 cells). Inference ran via sglang continuous
+>    batching (~5× faster than the HF transformers backend used for the
+>    other 9 passes). The 7B SFT control reverses two earlier interpretations
+>    that had been built on the 3B-SFT-vs-7B-RL gap:
+>    - **MMR1's RL step is a regression on MathVista at 7B**: 7B SFT
+>      0.715 → 7B RL 0.683 (**−3.2pt** at same size). RL also drops
+>      `img_lift` (0.454 → 0.422), **doubles** `blank_shortcut`
+>      (0.024 → 0.052), and shortens CoT (535 → 479 tokens, hit_max
+>      25% → 15%).
+>    - **Over-thinking is a size + SFT effect, not RL**: tokens_mean on
+>      MathVista full goes Base 134 → 3B SFT 379 → 7B SFT **535** →
+>      7B RL 479. The longest is 7B SFT (pre-RL); RL actually **compresses**
+>      CoT length.
+>    - **"RL refuses less" was also size, not RL**: MathVista blank refusal
+>      goes 3B SFT 15% → 7B SFT 4% → 7B RL 4%. POPE text_only: 3B SFT 95% →
+>      7B SFT 24% → 7B RL 37%. The 3B vs 7B drop is huge; RL adds nothing
+>      (slight increase on POPE).
+>
+>    So the H3 narrative needs reframing — see the dedicated section below.
 
 ---
 
@@ -78,13 +98,14 @@ is separable from base-capability gap.
 
 ## Experiment design
 
-3 models × 3 input modes × 2 benchmarks = **18 cells**, 250 prompts each.
+4 models × 3 input modes × 2 benchmarks = **24 cells**, 250 prompts each.
 
-| Model              | Role            | Notes                                  |
-|--------------------|-----------------|----------------------------------------|
-| MMR1-7B-RL         | OPD teacher     | post-trained on math, RL'd             |
-| MMR1-3B-SFT        | OPD student     | post-trained on math, no RL            |
-| Qwen2.5-VL-7B-Inst | Pre-post-train  | base for "what did post-training add"  |
+| Model              | Role                       | Notes                                  |
+|--------------------|----------------------------|----------------------------------------|
+| MMR1-7B-RL         | OPD teacher                | post-trained on math, RL'd             |
+| MMR1-7B-SFT        | **Same-size pre-RL control** | identical SFT data as 7B-RL, no RL — added 2026-05-19 to isolate size effect from RL effect |
+| MMR1-3B-SFT        | OPD student                | post-trained on math, no RL            |
+| Qwen2.5-VL-7B-Inst | Pre-post-train (Base)      | reference for "what did post-training add" |
 
 | Mode          | What it does                                                |
 |---------------|-------------------------------------------------------------|
@@ -109,6 +130,9 @@ A800 80GB, bf16, FA2.
 | `S_full.jsonl`         | MMR1-3B-SFT, full_image mode, 500 records           |
 | `S_blank.jsonl`        | MMR1-3B-SFT, blank_image mode                        |
 | `S_text_only.jsonl`    | MMR1-3B-SFT, text_only mode                          |
+| `T_SFT_full.jsonl`     | MMR1-7B-SFT, full_image (same-size pre-RL control)  |
+| `T_SFT_blank.jsonl`    | MMR1-7B-SFT, blank_image                             |
+| `T_SFT_text_only.jsonl`| MMR1-7B-SFT, text_only                               |
 | `T_RL_full.jsonl`      | MMR1-7B-RL, full_image                               |
 | `T_RL_blank.jsonl`     | MMR1-7B-RL, blank_image                              |
 | `T_RL_text_only.jsonl` | MMR1-7B-RL, text_only                                |
@@ -117,6 +141,11 @@ A800 80GB, bf16, FA2.
 | `Base_text_only.jsonl` | Qwen2.5-VL-7B-Instruct, text_only                    |
 | `*.log`                | Stdout from each pass (progress, warnings)          |
 | `summary.json`         | Aggregated `cells[]` + `paired_full_blank[]`        |
+
+The 3 T_SFT JSONLs were inferred via sglang (continuous batching, ~5× faster);
+all others via HF transformers. Same model, same prompt, greedy decoding, but
+attention kernel differs — empirically the outputs match HF to within ~1-2
+tokens on long CoTs, and scoring is identical for our use case.
 
 Each `.jsonl` has **500 lines** = 250 MathVista + 250 POPE_adversarial.
 
@@ -226,50 +255,109 @@ re-scores in memory.
 |---|---|---|---|
 | Base (Qwen2.5-VL-7B) | full | 0.442 | 0.876 |
 | MMR1-3B-SFT          | full | 0.598 | 0.896 |
-| MMR1-7B-RL           | full | **0.683** | **0.900** |
+| MMR1-7B-SFT          | full | **0.715** | 0.896 |
+| MMR1-7B-RL           | full | 0.683 | **0.900** |
 | Base                 | blank | 0.257 | 0.516 |
 | MMR1-3B-SFT          | blank | 0.297 | 0.516 |
+| MMR1-7B-SFT          | blank | 0.285 | 0.516 |
 | MMR1-7B-RL           | blank | 0.313 | 0.516 |
 | Base                 | text_only | 0.204 | 0.000 |
 | MMR1-3B-SFT          | text_only | 0.284 | 0.172 |
+| MMR1-7B-SFT          | text_only | 0.300 | **0.376** |
 | MMR1-7B-RL           | text_only | 0.308 | 0.272 |
 
 **Per-cell mean output tokens:**
 
-| Model | full MV | full POPE | blank MV | text_only MV |
+| Model  | full MV | full POPE | blank MV | text_only MV |
 |---|---|---|---|---|
-| Base | 134 | 33 | 132 | 141 |
-| SFT  | 379 | 41 | 377 | 384 |
-| RL   | **479** | **61** | 453 | **473** |
+| Base   | 134 | 33 | 132 | 141 |
+| 3B SFT | 379 | 41 | 377 | 384 |
+| 7B SFT | **535** | 44 | **499** | 459 |
+| 7B RL  | 479 | **61** | 453 | **473** |
 
 **Paired image_lift / blank_shortcut (post-backfill):**
 
-| Model | Bench | img_lift | blank_shortcut |
+| Model  | Bench     | img_lift  | blank_shortcut |
 |---|---|---|---|
-| Base | MathVista | 0.233 | 0.048 |
-| SFT  | MathVista | 0.365 | 0.064 |
-| RL   | MathVista | **0.422** | 0.052 |
-| Base | POPE | 0.360 | 0.000 |
-| SFT  | POPE | 0.428 | 0.048 |
-| RL   | POPE | 0.408 | 0.024 |
+| Base   | MathVista | 0.233     | 0.048 |
+| 3B SFT | MathVista | 0.365     | 0.064 |
+| 7B SFT | MathVista | **0.454** | **0.024** |
+| 7B RL  | MathVista | 0.422     | 0.052 |
+| Base   | POPE      | 0.360     | 0.000 |
+| 3B SFT | POPE      | 0.428     | 0.048 |
+| 7B SFT | POPE      | 0.404     | 0.024 |
+| 7B RL  | POPE      | 0.408     | 0.024 |
 
 **Diagnostic rates (MathVista MCQ; POPE is a separate scorer):**
 
-| Model | Mode | hit_max_tokens | refusal | mcq_high_conf |
+| Model  | Mode      | hit_max_tokens | refusal | mcq_high_conf |
 |---|---|---|---|---|
-| Base | full | 0.4% | 0.0% | 0.56 |
-| SFT  | full | 10.8% | 0.0% | 0.89 |
-| RL   | full | **15.2%** | 0.0% | 0.89 |
-| Base | blank | 0.0% | 0.0% | 0.64 |
-| SFT  | blank | **20.0%** | **15.2%** | 0.88 |
-| RL   | blank | 17.2% | 4.0% | 0.83 |
-| Base | text_only | 0.8% | 3.2% | 0.68 |
-| SFT  | text_only | 18.8% | 9.6% | 0.79 |
-| RL   | text_only | 18.4% | 8.0% | 0.90 |
+| Base   | full      | 0.4%          | 0.0%     | 0.56 |
+| 3B SFT | full      | 10.8%         | 0.0%     | 0.89 |
+| 7B SFT | full      | **25.2%**     | 0.0%     | 0.85 |
+| 7B RL  | full      | 15.2%         | 0.0%     | 0.89 |
+| Base   | blank     | 0.0%          | 0.0%     | 0.64 |
+| 3B SFT | blank     | 20.0%         | **15.2%**| 0.88 |
+| 7B SFT | blank     | **28.8%**     | 4.4%     | 0.85 |
+| 7B RL  | blank     | 17.2%         | 4.0%     | 0.83 |
+| Base   | text_only | 0.8%          | 3.2%     | 0.68 |
+| 3B SFT | text_only | 18.8%         | 9.6%     | 0.79 |
+| 7B SFT | text_only | 27.6%         | 6.4%     | 0.87 |
+| 7B RL  | text_only | 18.4%         | 8.0%     | 0.90 |
 
-**POPE refusal_rate (text_only, separately interesting):**
-Base 65.6%, SFT 95.2%, RL **37.2%**. RL teacher is markedly less willing to
-refuse, even without an image.
+**POPE text_only refusal_rate**: Base 65.6%, 3B SFT 95.2%, 7B SFT **24.4%**,
+7B RL 37.2%. The huge drop is **3B → 7B (size)**, not RL; RL slightly
+*increases* refusal on top of 7B SFT.
+
+---
+
+## The RL regression finding (added 2026-05-19)
+
+Adding MMR1-7B-SFT (same-size pre-RL control) flipped two earlier conclusions.
+Decompose the gap from 3B SFT to 7B RL into a **size effect** (3B SFT → 7B SFT)
+and an **RL effect** (7B SFT → 7B RL):
+
+| Quantity (MathVista) | 3B SFT → 7B SFT (size) | 7B SFT → 7B RL (RL step) |
+|---|---|---|
+| full-image acc                 | **+11.7pt** (0.598 → 0.715) | **−3.2pt**  (0.715 → 0.683) |
+| tokens_mean                    | +156 (+41%)  (379 → 535) | **−56 (−10%)** (535 → 479) |
+| hit_max_tokens_rate            | +14.4pt (10.8% → 25.2%)  | **−10pt** (25.2% → 15.2%) |
+| MathVista refusal rate (blank) | −10.8pt (15.2% → 4.4%)   | ~flat (4.4% → 4.0%) |
+| POPE text_only refusal         | −70.8pt (95.2% → 24.4%)  | +12.8pt (24.4% → 37.2%) |
+| img_lift (paired)              | +9pt (0.365 → 0.454)     | **−3.2pt** (0.454 → 0.422) |
+| blank_shortcut (paired)        | **−4pt** (0.064 → 0.024) | **+2.8pt, 2×** (0.024 → 0.052) |
+
+**Reading**:
+- **The "over-thinking" / hit_max_tokens explosion is a size effect**, not RL.
+  7B SFT (pre-RL) has the longest CoT, highest max-token-hit rate. RL actually
+  **compresses** CoT length and reduces budget overflow.
+- **The "RL refuses less" effect was also size**: the 3B→7B drop on POPE
+  text_only is huge (95.2% → 24.4%); RL on top of that *increases* refusal.
+- **The real RL effect at 7B is a regression**: acc down 3.2pt, img_lift down
+  3.2pt, blank_shortcut doubles, tokens shorten. RL trades visual reasoning
+  quality for shorter, more confident-prior-driven answers.
+
+**Caveats**:
+- n=250, std err on acc ≈ 3pt — the 3.2pt drop is at the edge of significance
+  but the pattern is consistent across 4 independent metrics (acc, length,
+  img_lift, blank_shortcut), which is harder to explain by noise alone.
+- This is MathVista only. POPE is too saturated (4 models clustered at
+  0.876-0.900) to differentiate. Need MathVision / ChartQA / HallusionBench
+  to know whether the regression generalizes or is MathVista-specific.
+- We don't know MMR1's RL training recipe; possibly it was optimized for a
+  different metric (format compliance? length compactness?) that we're not
+  measuring.
+
+**Implication for OPD experiments**:
+- Don't treat 7B RL as a strict upgrade over 7B SFT. If the goal is
+  "distill the strongest math reasoner", **7B SFT is the right teacher on
+  MathVista**, not 7B RL.
+- T1 vanilla OPD baseline should add a second arm
+  `7B SFT → 3B SFT` next to the planned `7B RL → 3B SFT` to test whether
+  the OPD-from-regressed-teacher story holds.
+- This shifts H3 from *"RL teacher over-thinks, OPD inherits the overthinking"*
+  to *"RL teacher is a regression on visual grounding, OPD inherits the
+  weakened grounding"*. Same shape, different mechanism.
 
 ---
 
@@ -315,48 +403,55 @@ refuse, even without an image.
 
 ## What we'd like the reviewer to do
 
-1. **Verify or challenge** these claims (post-scorer-fix):
-   - **H3 (post-RL artifact transfer) signal is strong**:
-     - RL teacher writes **27% more tokens** than SFT on MathVista for +9pt acc.
-     - RL writes **85% more tokens** on POPE for ~0pt acc (diminishing returns).
-     - RL writes **473 tokens** in `text_only` MathVista (no image at all).
-     - MMR1 (SFT+RL) hits `max_new_tokens=1024` at **11-20%** on MathVista,
-       Base at <1%. **Direct evidence over-thinking is trained, not capability.**
-   - **NEW: RL teacher refuses much less than SFT** under degraded conditions:
-     SFT `blank_image` MathVista refusal 15.2% vs RL 4.0%; SFT `text_only`
-     POPE refusal 95.2% vs RL 37.2%. RL "presses on regardless" — possibly
-     another facet of H3 (RL training shifts behavior toward always-respond).
-   - **`image_lift` is consistently RL > SFT > Base** on MathVista
-     (0.422 > 0.365 > 0.233). On POPE the post-training lift is real but
-     RL ≈ SFT. Post-training reliably **adds visual lift**.
-   - **`blank_shortcut` is essentially flat** Base/SFT/RL on MathVista
-     after backfill (0.048 / 0.064 / 0.052) and decreasing on POPE
-     (0.000 / 0.048 / 0.024). RL teacher is **not** more shortcut-prone
-     than SFT — earlier framing was a scorer artifact.
-2. **Look for signals we missed**, especially:
-   - Anything pointing at **H1** (perception-reasoning frontier) — we don't
-     have caption-only quadrants yet; can paired records be sliced any other way?
+1. **Verify or challenge** the central new claim: **MMR1's RL step is a
+   regression on MathVista at 7B**. Specifically:
+   - +11.7pt acc from 3B SFT → 7B SFT (size), then **−3.2pt acc** from
+     7B SFT → 7B RL (RL).
+   - At 7B, RL reduces `img_lift` (0.454 → 0.422), **doubles**
+     `blank_shortcut` (0.024 → 0.052), and compresses CoT length
+     (535 → 479 tokens).
+   - Over-thinking attribution: 7B SFT hits `max_new_tokens` at 25.2%,
+     7B RL at 15.2%. **The RL step REDUCES over-thinking**, contrary to the
+     earlier framing.
+   - Is this regression robust to noise (n=250, σ≈3pt)? The pattern is
+     consistent across 4 metrics, but the magnitude per metric is at the
+     edge of significance. Worth verifying on MathVision / ChartQA /
+     HallusionBench before claiming generality.
+2. **Reframe H3**: previously "RL teacher over-thinks, OPD inherits the
+   over-thinking". With the 7B SFT control: "RL teacher *loses visual
+   grounding* and gains shortcut prior, OPD inherits the *weakened
+   grounding*." Same broad shape (RL has artifacts that transfer), but
+   the mechanism is different. Is this reframing supported by the data,
+   or are we over-interpreting marginal effects?
+3. **Look for signals we missed**, especially:
+   - Anything pointing at **H1** (perception-reasoning frontier) — we
+     don't have caption-only quadrants yet; can paired records be sliced
+     any other way?
    - Anything pointing at **H2** (visual-signal misallocation) — we don't
      have forced decoding / per-token logprob yet; can we still infer
-     anything from the prediction text? E.g., where does the long CoT
-     "land" — does it reference visual details that ARE in the image?
-   - Patterns in the raw `prediction` text — repetition loops (RL `T_RL_full`
-     MathVista/224 generates repeated JSON arrays to 1024 tokens),
-     language switches, malformed answers, "(A)/(B)/(C)" enumeration with
-     option-text-only conclusions (the unrecoverable scorer case).
-3. **Reality-check the corrections** in the Update notes at the top,
-   especially: (a) is the Base degeneration explanation (prompt template
-   mismatch) the most likely cause? (b) is there a way to recover
-   option-text-only conclusions without re-running inference?
-4. **Suggest the next audit / training step** given this evidence. Our current
-   plan (in priority order):
-   1. **Fix Base inference** (prompt template) → re-run 3 Base passes.
-   2. **Store `choices` in JSONL** so future option-text-only conclusions
-      can be scored. Optionally backfill into existing JSONLs from the
-      source subset on the server.
-   3. **Download MMR1-7B-SFT** (same-size pre-RL control; in progress).
-   4. **Implement `--score_completion`** (forced decoding for H2).
-   5. **Run vanilla OPD T1 baseline** once #1-#3 land.
+     anything from the prediction text?
+   - Patterns in the raw `prediction` text — repetition loops (`T_RL_full`
+     MathVista/224 generates repeated JSON arrays to 1024 tokens), language
+     switches, malformed answers, "(A)/(B)/(C)" enumeration with
+     option-text-only conclusions.
+   - Compare raw text between 7B SFT and 7B RL on the same prompt:
+     where do they differ qualitatively? Does RL produce more "I'll commit
+     to (X) without checking the image" style answers?
+4. **Reality-check the caveats**, especially: (a) is the Base degeneration
+   explanation (prompt template mismatch) the most likely cause? (b) is
+   the MathVista regression real or noise — what would Level-1 extension
+   (MathVision / ChartQA / HallusionBench) need to show to confirm?
+5. **Suggest the next audit / training step** given this evidence. Our
+   current plan (in priority order):
+   1. **Extend audit to more benchmarks** (MathVision / ChartQA /
+      HallusionBench / MathVerse) to confirm RL regression generalizes
+      or is MathVista-specific.
+   2. **Fix Base inference** (prompt template) → re-run 3 Base passes.
+   3. **Implement `--score_completion`** (forced decoding for H2).
+   4. **Run vanilla OPD T1 baseline as TWO arms**: `7B RL → 3B SFT`
+      (original plan) AND `7B SFT → 3B SFT` (new arm to test whether
+      OPD from a regressed teacher hurts the student vs. OPD from a
+      stronger pre-RL teacher).
 
 ---
 
