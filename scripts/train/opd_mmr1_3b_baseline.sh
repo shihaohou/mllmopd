@@ -149,6 +149,17 @@ echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
 # noise so the real error is the first NCCL log line.
 export NCCL_ENV_PLUGIN="${NCCL_ENV_PLUGIN:-none}"
 
+# Strip outbound HTTP proxy so actor → local sglang (10.x intranet)
+# calls don't get routed through the dev box's NGC proxy and 502'd.
+# Smoke #19 root cause: shell had http_proxy=oversea-squid1.jp.txyun:11080
+# from the dev box's interactive setup, requests library happily routed
+# `requests.post("http://10.82.121.12:15004/...")` through it, and squid
+# returned 502 because the internal IP isn't reachable from outside.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+# Defense in depth: explicitly whitelist intranet ranges in no_proxy.
+export no_proxy="${no_proxy:+${no_proxy},}localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+export NO_PROXY="${no_proxy}"
+
 # Strip torch_memory_saver from LD_PRELOAD. This .so hijacks
 # cudaMalloc/cudaFree to support sglang's incremental KV-cache eviction;
 # the actor inspect log (smoke #13) showed it was the only LD_PRELOAD
@@ -324,6 +335,14 @@ print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR": "",
     "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
     "NCCL_ENV_PLUGIN": os.environ.get("NCCL_ENV_PLUGIN", "none"),
+    # Strip proxy from actor env so actor → local sglang HTTP calls
+    # don't get squid-502'd (see launcher comment by "smoke #19").
+    "http_proxy": "",
+    "https_proxy": "",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": "",
+    "no_proxy": os.environ.get("no_proxy", ""),
+    "NO_PROXY": os.environ.get("NO_PROXY", ""),
 }))
 PYEOF
   TRAIN_ENV_VARS_JSON=$(python "${_ENVJSON_PY}")
