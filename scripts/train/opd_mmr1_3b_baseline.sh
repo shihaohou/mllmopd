@@ -440,16 +440,23 @@ PERF_ARGS=(
   --recompute-method uniform
   --recompute-num-layers 1
   --micro-batch-size "${MICRO_BATCH_SIZE}"
+  # ZeRO-1: shard Adam state (fp32 master + m + v ≈ 36 GB for 3B) across
+  # DP ranks. Without this, each rank holds the full optimizer state and
+  # peak trainer memory on H800 ran 131/140 GiB at step 6 actor_train,
+  # OOM-ing on logits.clone(). With DP=4 this saves ~27 GB per rank.
+  --use-distributed-optimizer
   --use-dynamic-batch-size
   --max-tokens-per-gpu 16384
 )
 
-# Smoke #21: with --no-offload-train, training weights stay on GPU
-# (~28 GB for 3B bf16 + activations + grad/opt state). sglang colocate
-# needs to share the same GPU. The default 0.70 × 80 = 56 GB request
-# overflows (28 + 56 = 84 > 80) and TMS resume_memory hangs cuMemCreate.
-# 0.55 × 80 = 44 GB leaves 28 + 44 = 72 GB ≤ 80. Env-overrideable for
-# future tuning (larger batches → smaller mem_fraction).
+# Smoke #21: with --no-offload-train, training weights stay on GPU.
+# With --use-distributed-optimizer (added above) at DP=4, per-rank static
+# footprint is ~21 GB (6 weights + 6 grads + 9 sharded Adam). sglang
+# colocate shares the same GPU and releases via release_memory_occupation
+# at each train step; mem_fraction caps the *idle* reservation.
+# On A800 80 GB: 0.55 × 80 = 44 GB sglang + 21 GB trainer = 65 GB idle.
+# On H800 140 GB: 0.55 × 140 = 77 GB sglang + 21 GB trainer = 98 GB idle.
+# Env-overrideable; smaller for very long sequences, larger for shorter.
 SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.55}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
