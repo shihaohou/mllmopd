@@ -179,11 +179,13 @@ async def get_reward(args: Namespace, sample: Sample, **kwargs) -> dict:
         # has image_data (shouldn't happen for MLLM rollouts), drop it.
         del payload_blank["image_data"]
 
-    # Fire both in parallel against possibly-different teacher URLs.
-    # On a single-server config they share the URL; sglang's continuous
-    # batching handles concurrency.
-    url_full = rm_manager.get_next_url(sample)
-    url_blank = rm_manager.get_next_url(sample)
+    # Use a single teacher URL for both arms so VD = lp_full - lp_blank
+    # measures vision intervention only, not server-to-server variance.
+    # sglang's continuous batching handles concurrency on one URL. If
+    # later scaling to multi-replica teachers, we'd round-robin once per
+    # sample (not per arm) and assert homogeneous model identity.
+    url = rm_manager.get_next_url(sample)
+    url_full = url_blank = url
 
     try:
         res_full, res_blank = await asyncio.gather(

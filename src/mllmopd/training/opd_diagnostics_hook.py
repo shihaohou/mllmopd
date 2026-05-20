@@ -97,6 +97,13 @@ def post_process_rewards(args, samples, **kwargs):
                 dtype=torch.float32,
             )
             t_log_probs = t_log_probs[-response_length:]
+            if len(t_log_probs) != response_length:
+                raise ValueError(
+                    f"teacher logprob length {len(t_log_probs)} after slice "
+                    f"!= response_length {response_length}; teacher returned "
+                    f"too few tokens (raw len before slice = "
+                    f"{len(reward['meta_info']['input_token_logprobs']) - 1})"
+                )
         except Exception as e:
             num_failed += 1
             logger.warning(

@@ -172,13 +172,23 @@ def main() -> None:
             fails.append("no row has lp_full")
         if stats["n_with_lp_blank"] == 0:
             fails.append("no row has lp_blank — dual_teacher did NOT score the second arm")
-        elif stats["max_abs_vd"] < args.min_abs_vd:
+        if stats["n_lengths_aligned"] != stats["n_rows"]:
+            fails.append(
+                f"{stats['n_rows'] - stats['n_lengths_aligned']}/{stats['n_rows']} rows have "
+                f"lp_full/lp_blank length != response_length — teacher returned wrong-length "
+                f"logprobs, would silently corrupt OPD loss (acceptance check #2)"
+            )
+        else:
+            passes.append(
+                f"all {stats['n_rows']} rows have lp_full/lp_blank length == response_length"
+            )
+        if stats["n_with_lp_blank"] > 0 and stats["max_abs_vd"] < args.min_abs_vd:
             fails.append(
                 f"max |vd| = {stats['max_abs_vd']:.4f} < threshold "
                 f"{args.min_abs_vd}; lp_full ≈ lp_blank suggests the blank-image "
                 "substitution did not actually change the teacher's view"
             )
-        else:
+        elif stats["n_with_lp_blank"] > 0:
             passes.append(
                 f"lp_full and lp_blank both populated and differ "
                 f"(max |vd|={stats['max_abs_vd']:.2f})"
