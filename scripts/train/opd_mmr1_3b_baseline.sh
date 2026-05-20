@@ -193,15 +193,17 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-0}"
 export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING} CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING}"
 
-# T1-2 OOM #2 (step 12, fused_vocab_parallel_cross_entropy): PyTorch hit
-# 130.14/139.83 GiB with 756 MB reserved-but-unallocated — classic
-# fragmentation. The 1.16 GB fp32 logits buffer couldn't find a contiguous
-# block even though absolute free memory wasn't quite zero. PyTorch's own
-# OOM hint recommends expandable_segments. With H800 trainer GPUs sharing
-# with sglang KV cache (release_memory_occupation gives back KV cache but
-# not all CUDA graph buffers), fragmentation is the realistic failure mode.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-echo ">>> CUDA alloc env: PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
+# T1-2 OOM #4 RETRACTION: an earlier commit (aa26bfd) defaulted
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True after misreading
+# the OOM hint as fragmentation. The actual root cause (per GPT
+# diagnosis Q1) is the colocated sglang mem_fraction_static block,
+# fixed by SGLANG_MEM_FRACTION=0.25 below. Worse, expandable_segments
+# is INCOMPATIBLE with torch_memory_saver (which sglang's
+# memory_saver_adapter imports even when enable=False on some paths):
+#   RuntimeError: TorchMemorySaver is disabled for the current
+#   process because expandable_segments is not supported yet.
+# So we no longer set the alloc-conf env var by default. If you want
+# it back (e.g. for a non-sglang run), set it explicitly.
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
