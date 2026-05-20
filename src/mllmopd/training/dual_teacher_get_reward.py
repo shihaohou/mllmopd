@@ -151,7 +151,15 @@ async def get_reward(args: Namespace, sample: Sample, **kwargs) -> dict:
     # rule_base_reward.py at module-level loads `Math.generate.verify_deepmath`
     # and `exps.RL.utils.reward.PRIME_code_server.server`, neither of
     # which is in our checkout. Skipping the call avoids the chain.
-    response_correct: bool | None = None
+    #
+    # Use `False` rather than `None`: Uni-OPD's log_rollout_data
+    # (training_utils/log_utils.py:208) aggregates response_correct
+    # across samples via `sum(val) / len(val)`. None breaks the sum
+    # with `TypeError: int + NoneType`, crashing every train step.
+    # False sums to 0 (always-incorrect metric in Uni-OPD's log), which
+    # is harmless — T1 uses paired_vision_critical for the real
+    # correctness analysis post-hoc, not the per-step rate.
+    response_correct: bool = False
     rule_based_metadata: dict = {}
 
     # Canonical full-image payload (drives `payload["input_ids"]`,
