@@ -278,6 +278,21 @@ TENSORBOARD_DIR="${EXPERIMENT_DIR}/tensorboard"
 mkdir -p "${CKPT_DIR}" "${LOG_DIR}" "${TENSORBOARD_DIR}" \
          "${EXPERIMENT_DIR}/diagnostics"   # opd_diagnostics_hook.py writes here
 
+# --- T1-2 OOM v11 memsnap envs (docs/gpt-reply-2026-05-20-v10-update.md).
+# Default-on so attempt v11 captures ground-truth allocation snapshots
+# at policy_loss_function's get_log_probs_and_entropy(...) call. Set
+# MLLMOPD_MEMSNAP=0 in caller env to disable. Used by:
+#   src/mllmopd/training/memsnap.py               (helpers + hook)
+#   patch_uni_opd.sh P9 (loss.py pre-CE dump)     (sentinel-idempotent)
+#   --custom-megatron-before-train-step-hook-path (one-shot DDP audit)
+MLLMOPD_MEMSNAP="${MLLMOPD_MEMSNAP:-1}"
+MLLMOPD_MEMSNAP_DIR="${MLLMOPD_MEMSNAP_DIR:-${EXPERIMENT_DIR}/diagnostics/memsnap}"
+MLLMOPD_MEMSNAP_MAX_ENTRIES="${MLLMOPD_MEMSNAP_MAX_ENTRIES:-2000000}"
+MLLMOPD_MEMSNAP_MAX_DUMPS="${MLLMOPD_MEMSNAP_MAX_DUMPS:-50}"
+export MLLMOPD_MEMSNAP MLLMOPD_MEMSNAP_DIR \
+       MLLMOPD_MEMSNAP_MAX_ENTRIES MLLMOPD_MEMSNAP_MAX_DUMPS
+mkdir -p "${MLLMOPD_MEMSNAP_DIR}"
+
 CUR_TIME=$(date +%Y%m%d_%H%M%S)   # used by DEBUG_ARGS + TRAIN_LOG_FILE below
 
 # Persist launcher stdout/stderr into the run dir on ceph so post-mortem
@@ -378,6 +393,12 @@ print(json.dumps({
     "HTTPS_PROXY": "",
     "no_proxy": os.environ.get("no_proxy", ""),
     "NO_PROXY": os.environ.get("NO_PROXY", ""),
+    # v11 memsnap envs — propagate to Ray actors so memsnap.py + P9 fire
+    # inside each rank's process (set above in the parent shell).
+    "MLLMOPD_MEMSNAP": os.environ.get("MLLMOPD_MEMSNAP", ""),
+    "MLLMOPD_MEMSNAP_DIR": os.environ.get("MLLMOPD_MEMSNAP_DIR", ""),
+    "MLLMOPD_MEMSNAP_MAX_ENTRIES": os.environ.get("MLLMOPD_MEMSNAP_MAX_ENTRIES", ""),
+    "MLLMOPD_MEMSNAP_MAX_DUMPS": os.environ.get("MLLMOPD_MEMSNAP_MAX_DUMPS", ""),
 }))
 PYEOF
   TRAIN_ENV_VARS_JSON=$(python "${_ENVJSON_PY}")
@@ -392,6 +413,9 @@ TRAIN_ENV_ARGS=(
 RM_ARGS=(
   --custom-rm-path mllmopd.training.dual_teacher_get_reward.get_reward
   --custom-reward-post-process-path mllmopd.training.opd_diagnostics_hook.post_process_rewards_with_diagnostics
+  # v11: before-train-step hook for per-step memsnap baseline + one-shot
+  # DDP buffer audit (GPT diag Q1). No-op when MLLMOPD_MEMSNAP unset.
+  --custom-megatron-before-train-step-hook-path mllmopd.training.memsnap.before_train_step_hook
 )
 
 # --- Arg groups (modeled on the reference launcher) ---
@@ -481,7 +505,13 @@ PERF_ARGS=(
   # CE chunk buffer (256→128) saves ~600 MiB at the peak.
   --log-probs-chunk-size "${LOG_PROBS_CHUNK_SIZE:-128}"
   --use-dynamic-batch-size
-  --max-tokens-per-gpu 16384
+  # v11: 16384 -> 8192 per GPT diag Q1 falsification test
+  # (docs/gpt-reply-2026-05-20-v10-update.md). Dynamic packing was making
+  # "MBS=1" a fiction: the actor_train peak packed up to 16k tokens which
+  # forced a fp32 [1, 16384, 151936] logits tensor (~9.3 GiB) plus
+  # backward-graph temporaries scaling linearly with T. Halving caps the
+  # per-rank packed-token peak; GBS=64 / MAX_RESPONSE_LEN=2048 unchanged.
+  --max-tokens-per-gpu 8192
 )
 
 # Smoke #21 + T1-2 OOM #3+#7 root cause (docs/gpt-diagnosis-v7-update):

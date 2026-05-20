@@ -527,6 +527,88 @@ else
   echo ">>> ${ROUTER}: skipped (file not found)"
 fi
 
+# --- Patch 9: memsnap pre-CE dump in policy_loss_function -----------------
+# T1-2 OOM v10 stuck at trainer alloc ~118 GiB with ~83 GiB unaccounted
+# (docs/handoff-2026-05-20-v10-stuck.md, docs/gpt-reply-2026-05-20-v10-update.md).
+# GPT's leading hypothesis is dynamic-packed microbatches at
+# --max-tokens-per-gpu pushing fp32 [1, T, V] logits to ~9 GiB, multiplied
+# by backward-graph temporaries. To confirm, dump a torch.cuda memory
+# snapshot RIGHT BEFORE get_log_probs_and_entropy(...) — the same call
+# site that OOMs deterministically across v9/v10. Sentinel-gated so this
+# is a one-shot patch; runs only when MLLMOPD_MEMSNAP=1 in env.
+# Anchor is `max_seq_lens = batch.get(...)` + blank + the CE call header;
+# this is unique to policy_loss_function and is NOT touched by P7's
+# `with_entropy=...` edit (P7 modifies a downstream line), so P7/P9 order
+# does not matter.
+LOSS_MEMSNAP_SENTINEL="# === mllmopd memsnap pre-CE patch ==="
+if [ -f "${LOSS}" ]; then
+  if grep -q "${LOSS_MEMSNAP_SENTINEL}" "${LOSS}"; then
+    echo ">>> ${LOSS}: already patched (memsnap pre-CE sentinel present)"
+  else
+    echo ">>> patching ${LOSS}: inject memsnap pre-CE dump in policy_loss_function"
+    export MLLMOPD_PATCH_LOSS_MEMSNAP_PATH="${LOSS}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_MEMSNAP_PATH"]
+with open(path) as f:
+    src = f.read()
+
+anchor = '''    max_seq_lens = batch.get("max_seq_lens", None)
+
+    log_probs_and_entropy = get_log_probs_and_entropy(
+        logits,
+'''
+
+patch = '''    max_seq_lens = batch.get("max_seq_lens", None)
+
+    # === mllmopd memsnap pre-CE patch ===
+    try:
+        from mllmopd.training.memsnap import (
+            dump_memory_snapshot as _mllmopd_dump_mem,
+        )
+        _mllmopd_dump_mem(
+            "pre_get_log_probs_and_entropy",
+            logits_shape=tuple(logits.shape),
+            logits_dtype=str(logits.dtype),
+        )
+        print(
+            f"[mllmopd pre_ce] logits={tuple(logits.shape)} "
+            f"dtype={logits.dtype} "
+            f"total_lens={total_lengths} "
+            f"resp_lens={response_lengths} "
+            f"alloc_gib={torch.cuda.memory_allocated()/2**30:.2f} "
+            f"reserved_gib={torch.cuda.memory_reserved()/2**30:.2f}",
+            flush=True,
+        )
+    except Exception as _mllmopd_e:
+        print(
+            f"[mllmopd pre_ce] dump failed: "
+            f"{type(_mllmopd_e).__name__}: {_mllmopd_e}",
+            flush=True,
+        )
+    # === end mllmopd memsnap pre-CE patch ===
+
+    log_probs_and_entropy = get_log_probs_and_entropy(
+        logits,
+'''
+
+if anchor not in src:
+    sys.exit(
+        f"ERROR: anchor not found in {path!r} — policy_loss_function may have moved"
+    )
+
+new_src = src.replace(anchor, patch, 1)
+
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted memsnap pre-CE dump before get_log_probs_and_entropy")
+PY
+  fi
+else
+  echo ">>> ${LOSS}: skipped (file not found for memsnap patch)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
