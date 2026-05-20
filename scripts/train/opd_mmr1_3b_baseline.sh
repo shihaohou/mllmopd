@@ -279,19 +279,25 @@ mkdir -p "${CKPT_DIR}" "${LOG_DIR}" "${TENSORBOARD_DIR}" \
          "${EXPERIMENT_DIR}/diagnostics"   # opd_diagnostics_hook.py writes here
 
 # --- T1-2 OOM v11 memsnap envs (docs/gpt-reply-2026-05-20-v10-update.md).
-# Default-on so attempt v11 captures ground-truth allocation snapshots
-# at policy_loss_function's get_log_probs_and_entropy(...) call. Set
-# MLLMOPD_MEMSNAP=0 in caller env to disable. Used by:
+# Originally default-on for v11 to capture ground-truth allocation
+# snapshots at policy_loss_function's get_log_probs_and_entropy(...) call.
+# v11 confirmed the diagnosis (--use-dynamic-batch-size + max-tokens-per-gpu
+# 16384 was packing 9.3 GiB fp32 logits per CE call). With the root cause
+# known and the fix applied, default-off going forward — re-enable with
+# MLLMOPD_MEMSNAP=1 if a future memory regression needs the same workflow.
+# Used by:
 #   src/mllmopd/training/memsnap.py               (helpers + hook)
 #   patch_uni_opd.sh P9 (loss.py pre-CE dump)     (sentinel-idempotent)
 #   --custom-megatron-before-train-step-hook-path (one-shot DDP audit)
-MLLMOPD_MEMSNAP="${MLLMOPD_MEMSNAP:-1}"
+MLLMOPD_MEMSNAP="${MLLMOPD_MEMSNAP:-0}"
 MLLMOPD_MEMSNAP_DIR="${MLLMOPD_MEMSNAP_DIR:-${EXPERIMENT_DIR}/diagnostics/memsnap}"
 MLLMOPD_MEMSNAP_MAX_ENTRIES="${MLLMOPD_MEMSNAP_MAX_ENTRIES:-2000000}"
 MLLMOPD_MEMSNAP_MAX_DUMPS="${MLLMOPD_MEMSNAP_MAX_DUMPS:-50}"
 export MLLMOPD_MEMSNAP MLLMOPD_MEMSNAP_DIR \
        MLLMOPD_MEMSNAP_MAX_ENTRIES MLLMOPD_MEMSNAP_MAX_DUMPS
-mkdir -p "${MLLMOPD_MEMSNAP_DIR}"
+if [ "${MLLMOPD_MEMSNAP}" = "1" ]; then
+  mkdir -p "${MLLMOPD_MEMSNAP_DIR}"
+fi
 
 CUR_TIME=$(date +%Y%m%d_%H%M%S)   # used by DEBUG_ARGS + TRAIN_LOG_FILE below
 
