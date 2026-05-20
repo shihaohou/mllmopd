@@ -487,33 +487,49 @@ PERF_ARGS=(
   --max-tokens-per-gpu 16384
 )
 
-# Smoke #21 + T1-2 OOM #3 root cause (docs/gpt-diagnosis-...):
-# Because we strip torch_memory_saver from LD_PRELOAD (to avoid NCCL
-# breakage with the TMS hook) AND don't pass --offload-rollout, sglang's
-# release_memory_occupation only flushes logical KV cache state; it does
-# NOT free the static mem_fraction_static block. That block is counted
-# as PyTorch allocation in the same process and was the ~75 GiB ceiling
-# that defeated three consecutive T1-2 runs (131 / 130 / 129 GiB alloc).
+# Smoke #21 + T1-2 OOM #3+#7 root cause (docs/gpt-diagnosis-v7-update):
+# CORRECTION over earlier comment block: mem_fraction_static covers
+# *weights + KV cache pool* together, not pure KV. With --no-offload-
+# rollout (selected to avoid the TMS / expandable_segments crash),
+# sglang never yields any of that block back to PyTorch. v7 showed
+# the static + cuda-graph + runtime overhead really does fill the
+# entire mem_fraction quota: at 0.25 × 140 = 35 GiB target, the
+# observed non-PyTorch resident block was ~44 GiB, leaving only ~96
+# GiB for the trainer and triggering an OOM on the next 150 MiB.
 #
-# Per GPT diagnosis Q1+Q3+Rank 1: drop to 0.25, accepting reduced rollout
-# concurrency / KV cache pool size in exchange for ~28 GiB more headroom
-# on every trainer GPU.
+# Per GPT v7 brief Q5 ranks 1-3: stack three sglang shrink levers,
+# all minimum-disturbance to the experimental variables:
+#   - mem_fraction 0.25 → 0.15 (target weights+KV = ~21 GiB)
+#   - --sglang-disable-cuda-graph in production (frees graph buffers)
+#   - --sglang-max-total-tokens 200000 + --sglang-max-running-requests 16
+#     (cap KV directly; auto-profile was opportunistically filling
+#     the whole fraction)
 #
-# H800 140 GB budget at 0.25:
-#   sglang static block   : 0.25 × 140 = 35 GB
-#   trainer static (ZeRO-1): 21 GB
-#   fp32 grad allreduce   : 12 GB
-#   activations + CE chunk : 15-25 GB
-#   sglang weights residual: ~6 GB
+# Budget at 0.15 + caps + disabled cuda graph (H800 140 GiB):
+#   sglang weights+KV target : ~21 GiB
+#   sglang cuda graph        : ~0 GiB (disabled)
+#   sglang runtime / IPC     : ~3-5 GiB
+#   trainer static (ZeRO-1)  : 21 GiB
+#   fp32 grad allreduce      : 12 GiB
+#   activations + CE chunk   : 15-25 GiB
 #   ----------------------------------
-#   total                  : 89-99 GB  (vs. 130+ that hit OOM)
+#   total                    : 72-84 GiB  (vs. v7's 95+44 = 139 GiB)
 #
-# Env-overrideable; raise if you see rollout throughput tank, lower
-# further (e.g. 0.20) if OOM still hits.
-SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.25}"
+# Throughput cost: per Uni-OPD with 4 rollout engines × 16 running
+# requests × 6144 max seq = up to 393k tokens worst-case if uneven.
+# 200k cap means some samples queue; doesn't change OPD experiment.
+SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.15}"
+SGLANG_MAX_TOTAL_TOKENS="${SGLANG_MAX_TOTAL_TOKENS:-200000}"
+SGLANG_MAX_RUNNING_REQUESTS="${SGLANG_MAX_RUNNING_REQUESTS:-16}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
   --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION}"
+  --sglang-max-total-tokens "${SGLANG_MAX_TOTAL_TOKENS}"
+  --sglang-max-running-requests "${SGLANG_MAX_RUNNING_REQUESTS}"
+  # CUDA-graph capture buffers are not throughput-essential for our
+  # batch sizes and they sit inside the mem_fraction block. Disable
+  # in production too (was DEBUG_MODE-only before).
+  --sglang-disable-cuda-graph
 )
 
 TENSORBOARD_ARGS=(
@@ -560,17 +576,17 @@ MISC_ARGS=(
 )
 
 # Smoke-mode extras (punch list #9). Empty by default for production runs.
+# Note: --sglang-disable-cuda-graph moved into the always-on SGLANG_ARGS
+# above (was DEBUG_MODE-only). Only the per-rollout debug dump + NCCL
+# verbose stay DEBUG_MODE-gated.
 DEBUG_ARGS=()
-SGLANG_CUDA_GRAPH_ARGS=()
 if [ "${DEBUG_MODE}" = "1" ]; then
   DEBUG_ARGS=(
     --save-debug-rollout-data "${EXPERIMENT_DIR}/debug/rollout_${CUR_TIME:-now}/step_{rollout_id}.pt"
   )
-  SGLANG_CUDA_GRAPH_ARGS=(--sglang-disable-cuda-graph)
   export NCCL_DEBUG=INFO
-  echo ">>> DEBUG_MODE=1 (smoke profile: per-rollout dumps, no CUDA graph, NCCL_DEBUG=INFO)"
+  echo ">>> DEBUG_MODE=1 (smoke profile: per-rollout dumps, NCCL_DEBUG=INFO)"
 fi
-SGLANG_ARGS+=("${SGLANG_CUDA_GRAPH_ARGS[@]}")
 
 # Megatron model arch — Qwen2.5-VL-3B shares the language backbone with
 # Qwen2.5-3B; the HF checkpoint supplies vision encoder weights, which
