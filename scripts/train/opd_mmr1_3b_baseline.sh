@@ -108,22 +108,39 @@ echo "    compat symlink : ${COMPAT_LIB_SYMLINK:-(not found)}"
 # of the venv's bundled one. Prepend the venv's NCCL lib dir to
 # LD_LIBRARY_PATH so dlopen("libnccl.so.2") resolves there first,
 # AHEAD of the cuda-compat path.
-PYTORCH_NCCL_LIB_DIR="$(python - <<'PY' 2>/dev/null || true
+#
+# Use a separate python tempfile (function won't help when the issue
+# is bash inline-heredoc parsing). Defensive: try `import nvidia.nccl`
+# then glob site-packages for any libnccl.so.2.
+_DISCOVER_PY=$(mktemp --tmpdir mllmopd_nccl_discover.XXXXXX.py)
+cat > "${_DISCOVER_PY}" <<'PYEOF'
+import sys, glob, site
 from pathlib import Path
 try:
     import nvidia.nccl
     p = Path(nvidia.nccl.__file__).resolve().parent / "lib"
-    print(p)
+    if (p / "libnccl.so.2").exists():
+        print(p)
+        sys.exit(0)
 except Exception:
     pass
-PY
-)"
+for sp in site.getsitepackages():
+    hits = glob.glob(sp + "/**/libnccl.so.2", recursive=True)
+    if hits:
+        print(str(Path(hits[0]).parent))
+        sys.exit(0)
+PYEOF
+PYTORCH_NCCL_LIB_DIR="$(python "${_DISCOVER_PY}" 2>/dev/null || true)"
+rm -f "${_DISCOVER_PY}"
+
 if [ -n "${PYTORCH_NCCL_LIB_DIR}" ] && [ -e "${PYTORCH_NCCL_LIB_DIR}/libnccl.so.2" ]; then
   LD_LIBRARY_PATH="${PYTORCH_NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   export LD_LIBRARY_PATH
   echo "    venv libnccl   : ${PYTORCH_NCCL_LIB_DIR}/libnccl.so.2 (prepended FIRST)"
 else
   echo "    venv libnccl   : (not found — fallback to ld.so.cache)"
+  python -c "import nvidia.nccl as m; print('    nvidia.nccl import OK at', m.__file__)" 2>&1 \
+    | sed 's/^/        /' || true
 fi
 echo "    LD_LIBRARY_PATH before : ${LD_BEFORE}"
 echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
@@ -293,7 +310,9 @@ DEBUG_MODE="${DEBUG_MODE:-0}"
 # `--train-env-vars` JSON argument, so Ray DOES perform its normal
 # per-actor CUDA_VISIBLE_DEVICES rewrite. Each actor then sees exactly
 # one logical GPU.
-TRAIN_ENV_VARS_JSON="${TRAIN_ENV_VARS_JSON:-$(python -c '
+if [ -z "${TRAIN_ENV_VARS_JSON:-}" ]; then
+  _ENVJSON_PY=$(mktemp --tmpdir mllmopd_envjson.XXXXXX.py)
+  cat > "${_ENVJSON_PY}" <<'PYEOF'
 import json, os
 print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "",
@@ -303,14 +322,13 @@ print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES": "",
     "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS": "",
     "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR": "",
-    # Propagate launcher-side LD_LIBRARY_PATH (with venv NCCL prepended)
-    # and NCCL_ENV_PLUGIN=none to train actors. Uni-OPD's actor_group.py
-    # builds env_vars by merging its own dict with self.args.train_env_vars,
-    # so any keys we put here override Uni-OPD defaults.
     "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
     "NCCL_ENV_PLUGIN": os.environ.get("NCCL_ENV_PLUGIN", "none"),
 }))
-')}"
+PYEOF
+  TRAIN_ENV_VARS_JSON=$(python "${_ENVJSON_PY}")
+  rm -f "${_ENVJSON_PY}"
+fi
 TRAIN_ENV_ARGS=(
   --train-env-vars "${TRAIN_ENV_VARS_JSON}"
   --num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}"
