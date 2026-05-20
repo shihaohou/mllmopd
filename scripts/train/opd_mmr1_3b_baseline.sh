@@ -193,6 +193,16 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-0}"
 export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING} CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING}"
 
+# T1-2 OOM #2 (step 12, fused_vocab_parallel_cross_entropy): PyTorch hit
+# 130.14/139.83 GiB with 756 MB reserved-but-unallocated — classic
+# fragmentation. The 1.16 GB fp32 logits buffer couldn't find a contiguous
+# block even though absolute free memory wasn't quite zero. PyTorch's own
+# OOM hint recommends expandable_segments. With H800 trainer GPUs sharing
+# with sglang KV cache (release_memory_occupation gives back KV cache but
+# not all CUDA graph buffers), fragmentation is the realistic failure mode.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+echo ">>> CUDA alloc env: PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
+
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
 : "${MMR1_7B_RL_CKPT:?}"
@@ -449,15 +459,17 @@ PERF_ARGS=(
   --max-tokens-per-gpu 16384
 )
 
-# Smoke #21: with --no-offload-train, training weights stay on GPU.
-# With --use-distributed-optimizer (added above) at DP=4, per-rank static
-# footprint is ~21 GB (6 weights + 6 grads + 9 sharded Adam). sglang
-# colocate shares the same GPU and releases via release_memory_occupation
-# at each train step; mem_fraction caps the *idle* reservation.
-# On A800 80 GB: 0.55 × 80 = 44 GB sglang + 21 GB trainer = 65 GB idle.
-# On H800 140 GB: 0.55 × 140 = 77 GB sglang + 21 GB trainer = 98 GB idle.
-# Env-overrideable; smaller for very long sequences, larger for shorter.
-SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.55}"
+# Smoke #21 + T1-2 OOM #2 tuning: with --no-offload-train + ZeRO-1
+# (--use-distributed-optimizer above), per-rank static is ~21 GB
+# (6 weights + 6 grads + 9 sharded Adam). sglang colocate shares the
+# same GPU and releases KV cache via release_memory_occupation at each
+# train step, but CUDA-graph buffers / weight residual remain (~10-15 GB).
+# A lower mem_fraction reduces sglang's idle reservation and indirectly
+# reduces the fragmentation surface during the sglang→trainer handoff.
+# On A800 80 GB: 0.45 × 80 = 36 GB sglang + 21 GB trainer = 57 GB idle.
+# On H800 140 GB: 0.45 × 140 = 63 GB sglang + 21 GB trainer = 84 GB idle.
+# Env-overrideable; raise for short-response runs, lower for OOM symptoms.
+SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.45}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
   --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION}"
