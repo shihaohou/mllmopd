@@ -9,36 +9,44 @@
 
 This brief is **broader**: ask you to review the entire T1 implementation now that smoke proves the pipeline works end-to-end. The OOM that follows the smoke pass is pure 80GB memory tightness (Megatron forward pass), resolved by migrating to a 140GB H800 — not a design issue.
 
-## What just got proven working (smoke verifier on 2026-05-20 13:14 and 13:20)
+## What just got proven working (H800 smoke verifier on 2026-05-20 15:16)
 
 ```
-PASSES: 3
-  + step jsonls present (n=1)
-  + lp_full and lp_blank both populated and differ (max |vd|=0.84-0.92)
+PASSES: 4
+  + step jsonls present (multi-step)
+  + lp_full and lp_blank both populated and differ (max |vd|=1.19)
   + image_mode == 'full' on all rows
+  + checkpoint saved at step_9 (HF format)
 >>> SMOKE PASSED — green light for T1 full runs
 
-rows total              : 64       (8 prompts × 8 samples = 64 rollouts)
-rows with lp_full       : 64
-rows with lp_blank      : 64
-rows length-aligned     : 64
-max |vd| across rows    : 0.92
+rows with lp_full       : 576
+rows with lp_blank      : 576
+checkpoint              : .../t1_smoke_full_20260520_150400/ckpt/hf/step_9
+diagnostics             : .../diagnostics/step_NNNNNN.jsonl.gz (each step)
 ```
 
 So end-to-end this works:
-1. SGLang generates student rollouts (4 engines, ~620 tok/s)
+1. SGLang generates student rollouts
 2. `mllmopd.training.dual_teacher_get_reward` POSTs to the teacher server twice per sample (full + blank image)
 3. `mllmopd.training.opd_diagnostics_hook` writes a step JSONL with `lp_full`, `lp_blank`, `vd = lp_full - lp_blank`
-4. Verifier asserts the VD signal is real (max |vd| > 0.1, ✓ at 0.84–0.92)
+4. Verifier asserts the VD signal is real (max |vd| > 0.1, ✓ at 1.19 — stronger than the A800 prior smoke's 0.84–0.92)
+5. **NEW (H800 only)**: actual gradient step + Megatron→sglang weight sync + HF-format ckpt save **all succeed end-to-end** (the A800 prior smoke OOM'd in forward; H800's 140 GB resolved it)
 
-The actual gradient step doesn't run on A800 (80GB OOM in forward), but the pipeline up to that point — which is what T1's negative control measures — fully works.
+`max |vd| = 1.19` on 576 rows means the mean per-token logprob differs by ~1.19 nats between FullTeacher and BlankTeacher arms — the dense vision-conditioned signal that H2 hypothesis was predicting at the token level.
+
+## H800 migration (since the A800 OOM)
+
+- Backup tar at `mllmopd-backups/mllmopd-train-env-h800-sm90-20260520-1429.tar.gz` (5.8 GB, sha256 `b2f112e75dd0972c…`).
+- Validated cross-box restore: `ge103-4` (build host) → `ge103-5` (different H800 host) → 10/10 import PASS, `torch.cuda.nccl.version() = (2, 27, 5)` via DT_RPATH, ~5-7 min wall-clock vs ~2 h rebuild.
+- apex intentionally NOT installed (CUDA 12.9 driver vs torch cu128 ABI strict-check mismatch). Megatron falls back to torch norm, launcher has `--no-gradient-accumulation-fusion`. Smoke validates this fallback.
+- Runbook: `docs/h800-venv-backup.md` (new).
 
 ## Pre-flight gates and their outcomes
 
 All in `docs/`:
 - G1 (H2 prompt-parity rerun on devbox A800, `runs/audit/level1_v4_sysprompt_fixed/vd_summary.sysprompt.json`) — Finding 2 reproduced + strengthened. Negative-VD tail mystery dissolved (was base-model-mode artifact).
 - G2/G3/G4 — finding doc + T1 plan tightened (dedup over whole eval subset, Risk #8 + #9, dual-log both arms).
-- Punch list 1-9 + 12-14 — all code committed. #10/#11/#15 are GPU/wall-time-bound; smoke gate now closed.
+- Punch list 1-9 + 12-14 — all code committed. **#10 (smoke) now closed on H800 as of 2026-05-20 15:16.** #11 (T1-2/T1-3 full runs, ~4-5 h each) + #15 (writeup) still pending — that's what this review unblocks.
 
 ## T1 design recap (read this first)
 
@@ -222,7 +230,9 @@ These all live in `scripts/setup/patch_uni_opd.sh`:
 
 11. **`--megatron-to-hf-mode bridge`** is required for loading from HF; our T1 plan's "load HF directly via bridge" path is now smoke-validated. Bridge mode also affects weight-sync from Megatron to sglang during training (the Qwen25VLBridge). Any known issues with bridge mode + the multi-rank sender (`_send_to_colocated_engine`) we should be cautious about?
 
-12. **Reproducibility on a fresh box.** `docs/h800-migration-checklist.md` lists the 22 known pitfalls + their guards. Is this sufficient as a runbook for a new dev to reproduce smoke pass on a clean H800 in <2h, or are we missing structural items (e.g., setup_train_env.sh isn't sufficient to bootstrap)?
+12. **Reproducibility on a fresh box.** `docs/h800-migration-checklist.md` lists the 22 known pitfalls + their guards. `docs/h800-venv-backup.md` adds the 5-7 min cross-box restore. Is this sufficient as a runbook for a new dev to reproduce smoke pass on a clean H800 in <2h, or are we missing structural items?
+
+13. **Parallel vs sequential T1-2 / T1-3.** Two arms differ only by `OPD_TEACHER_IMAGE_MODE`. We could run them sequentially on one box (~10 h) or in parallel on two H800 boxes (~5 h) since ceph is shared and the teacher server is logprob-only (stateless / arm-agnostic — both arms POST to the same `:30000`). The blank-image PIL is constructed in `dual_teacher_get_reward` per-call, no shared state. **Risk of running in parallel**: if both arms hit one teacher with double traffic, does `max-running-requests=128` cope? Should we double the teacher's mem_fraction / put up two teacher servers? Is there any other state contention between the two student processes other than the teacher endpoint?
 
 ## What this isn't asking
 
