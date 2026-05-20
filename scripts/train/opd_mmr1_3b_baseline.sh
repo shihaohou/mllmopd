@@ -465,21 +465,42 @@ PERF_ARGS=(
   # peak trainer memory on H800 ran 131/140 GiB at step 6 actor_train,
   # OOM-ing on logits.clone(). With DP=4 this saves ~27 GB per rank.
   --use-distributed-optimizer
+  # Chunk the per-token log-prob / cross-entropy computation in
+  # miles/utils/ppo_utils.py::calculate_log_probs_and_entropy. Without
+  # this (default=-1 disables chunking) a single CE call materializes
+  # an [s10, 1, 151936] fp32 buffer (~1.16 GiB at s10≈1900) that
+  # tipped 3 consecutive T1-2 runs over the H800's PyTorch ceiling
+  # (see docs/gpt-diagnosis-2026-05-20-t1-oom.md Q1, Rank 2 fix).
+  # 256 chunks the buffer to ~150 MiB at the cost of a small loop.
+  --log-probs-chunk-size 256
   --use-dynamic-batch-size
   --max-tokens-per-gpu 16384
 )
 
-# Smoke #21 + T1-2 OOM #2 tuning: with --no-offload-train + ZeRO-1
-# (--use-distributed-optimizer above), per-rank static is ~21 GB
-# (6 weights + 6 grads + 9 sharded Adam). sglang colocate shares the
-# same GPU and releases KV cache via release_memory_occupation at each
-# train step, but CUDA-graph buffers / weight residual remain (~10-15 GB).
-# A lower mem_fraction reduces sglang's idle reservation and indirectly
-# reduces the fragmentation surface during the sglang→trainer handoff.
-# On A800 80 GB: 0.45 × 80 = 36 GB sglang + 21 GB trainer = 57 GB idle.
-# On H800 140 GB: 0.45 × 140 = 63 GB sglang + 21 GB trainer = 84 GB idle.
-# Env-overrideable; raise for short-response runs, lower for OOM symptoms.
-SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.45}"
+# Smoke #21 + T1-2 OOM #3 root cause (docs/gpt-diagnosis-...):
+# Because we strip torch_memory_saver from LD_PRELOAD (to avoid NCCL
+# breakage with the TMS hook) AND don't pass --offload-rollout, sglang's
+# release_memory_occupation only flushes logical KV cache state; it does
+# NOT free the static mem_fraction_static block. That block is counted
+# as PyTorch allocation in the same process and was the ~75 GiB ceiling
+# that defeated three consecutive T1-2 runs (131 / 130 / 129 GiB alloc).
+#
+# Per GPT diagnosis Q1+Q3+Rank 1: drop to 0.25, accepting reduced rollout
+# concurrency / KV cache pool size in exchange for ~28 GiB more headroom
+# on every trainer GPU.
+#
+# H800 140 GB budget at 0.25:
+#   sglang static block   : 0.25 × 140 = 35 GB
+#   trainer static (ZeRO-1): 21 GB
+#   fp32 grad allreduce   : 12 GB
+#   activations + CE chunk : 15-25 GB
+#   sglang weights residual: ~6 GB
+#   ----------------------------------
+#   total                  : 89-99 GB  (vs. 130+ that hit OOM)
+#
+# Env-overrideable; raise if you see rollout throughput tank, lower
+# further (e.g. 0.20) if OOM still hits.
+SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.25}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
   --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION}"
