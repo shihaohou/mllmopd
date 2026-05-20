@@ -423,6 +423,11 @@ MISC_ARGS=(
   --attention-softmax-in-fp32
   --attention-backend flash
   --colocate
+  # Loading from --hf-checkpoint requires bridge mode; the default
+  # "raw" mode trips an assertion in
+  # miles/backends/megatron_utils/checkpoint.py:175. All upstream
+  # qwen3 example launchers also set this.
+  --megatron-to-hf-mode bridge
   # Smoke #14 root cause analysis: --colocate defaults --offload-train
   # to True; with that, miles/ray/actor_group.py injects
   # `LD_PRELOAD=...torch_memory_saver_hook_mode_preload.abi3.so` into

@@ -165,3 +165,79 @@ python -m mllmopd.diagnostics.run_audit_pass_sglang \
 EOF
 bash /tmp/cmd.sh
 ```
+
+---
+
+## E5. `ncclUnhandledCudaError` / "CUDA driver version is insufficient" — bare `pip` installs to system site-packages, torch falls back to system NCCL
+
+**Symptom** (in Megatron / Ray-actor training, first NCCL collective):
+```
+torch.distributed.DistBackendError: NCCL error in: .../NCCLUtils.cpp:94,
+  unhandled cuda error (run with NCCL_DEBUG=INFO for details), NCCL version 2.29.7
+ncclUnhandledCudaError: Call to CUDA function failed.
+Last error: Cuda failure 'CUDA driver version is insufficient for CUDA runtime version'
+```
+
+But standalone Python in the same venv has no issue: `torch.zeros(1).cuda()` succeeds, `nvidia-smi` is healthy, driver/runtime are theoretically compatible. The error message is **misleading** — the actual cause is an NCCL ABI mismatch between torch's compile-time NCCL (2.27.5) and a runtime-loaded foreign NCCL (2.29.7).
+
+### Two-bug stack (one masks the other)
+
+**Bug A — venv's `pip` shim is missing.** UV venvs sometimes get created with only `pip3` / `pip3.12` in `bin/`, not `pip`. Bare `pip install ...` then resolves to **system** `/usr/local/bin/pip`, which installs into the NGC system `/usr/local/lib/python3.12/dist-packages/` — **not the venv**. `pip install --force-reinstall` reports `Successfully installed` but writes nothing to the venv.
+
+Sister pitfall to E2 ("UV venv `pip` module missing") — different symptom, same root: never trust bare `pip` in this env. **The bare `pip` footgun warning in E1 is not enough.**
+
+**Bug B — torch falls back to ld.so.cache.** When `<venv>/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2` is missing (e.g. because Bug A redirected the install), torch's `_load_global_deps` fails its preferred resolution and the dynamic linker falls through to `/etc/ld.so.cache`, which on the NGC base image points at `/lib/x86_64-linux-gnu/libnccl.so.2` — system NCCL 2.29.7. torch was compiled with 2.27.5 headers, so the loaded 2.29.7 trips ABI mismatches at the first collective.
+
+### Why `torch.cuda.nccl.version()` is misleading
+That call returns the **compile-time** `NCCL_VERSION_CODE` macro baked into `libtorch_cuda.so`, **not** the version of the `libnccl.so.2` currently dlopen'd. It will happily report `(2, 27, 5)` while the actually-loaded NCCL is `2.29.7`.
+
+### Diagnosis — three commands
+
+1. **What pip THINKS is installed where:**
+   ```bash
+   pip show -f nvidia-nccl-cu12 | head -20
+   # If `Location:` is /usr/local/lib/python3.12/dist-packages → Bug A
+   # If `Location:` is .venv/.../site-packages → check file actually exists
+   ```
+
+2. **What torch ACTUALLY dlopen's:**
+   ```bash
+   ldd "$(python -c 'import torch; print(torch._C.__file__)')" | grep nccl
+   # If path starts with /lib/x86_64-linux-gnu/ → Bug B (system NCCL won the race)
+   # If path is venv site-packages → fine
+   ```
+
+3. **What version the loaded .so reports at runtime:**
+   ```bash
+   python -c "
+   import ctypes
+   v = ctypes.c_int()
+   ctypes.CDLL('libnccl.so.2').ncclGetVersion(ctypes.byref(v))
+   print(f'{v.value//10000}.{(v.value%10000)//100}.{v.value%100}')
+   "
+   # Compare against torch.cuda.nccl.version(); mismatch = ABI bug
+   ```
+
+### Fix
+```bash
+# (1) Reinstall NCCL via the venv's Python — bypass the missing pip shim
+"${VIRTUAL_ENV}/bin/python" -m pip install \
+    --force-reinstall --no-deps --no-cache-dir \
+    nvidia-nccl-cu12==2.27.5
+
+# (2) Purge any stray copy in NGC system site-packages
+/usr/local/bin/pip uninstall -y nvidia-nccl-cu12 2>/dev/null || true
+
+# (3) Verify all three diagnostics pass:
+#       - pip show: Location ends with <venv>/lib/python3.12/site-packages
+#       - ldd torch._C grep nccl: path inside venv
+#       - ctypes ncclGetVersion: 2.27.5
+```
+
+### Long-term defenses (TODO)
+- Add `ln -s pip3 .venv/bin/pip` to `scripts/env/setup_train_env.sh` after venv creation, so bare `pip` resolves correctly.
+- Pre-flight gate in launcher: assert that `ldd $(python -c "import torch; print(torch._C.__file__)") | grep nccl` resolves inside `$VIRTUAL_ENV`. Fail fast with a pointer to this E5 entry.
+- **Rule**: in this repo, never write bare `pip` in scripts or docs — always `${VIRTUAL_ENV}/bin/python -m pip` or `uv pip`. Same rule as E1 closing remark.
+
+### Cost of getting this wrong
+~6 hours in session 2026-05-19/20. The misleading "CUDA driver insufficient" message sent us down ~10 wrong hypotheses (driver version, cuda-compat layer, torch_memory_saver hook, LD_LIBRARY_PATH ordering, placement-group misconfig, NCCL env plugin, ...). All real but secondary. The proximate cause was the bare-pip footgun corrupting the install location. The `ldd torch._C | grep nccl` check would have closed it in 30 seconds.
