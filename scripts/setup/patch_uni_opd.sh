@@ -253,7 +253,21 @@ with open(path) as f:
     src = f.read()
 
 anchor = '            param.data.copy_(loaded_weight)\n    except Exception:'
+# Two fixes in one wrap:
+#  (1) device coercion: smoke #20 diag showed loaded_weight lands on
+#      cuda:0 after Ray IPC while param lives on cuda:N (sglang engine's
+#      assigned GPU). PyTorch's copy_ usually handles cross-device, but
+#      in our overlay-FS / Ray colocate setup it raises CUDA "invalid
+#      argument" — likely because the source pointer was allocated in
+#      the train actor's CUDA context and isn't valid in the engine's.
+#      Move loaded_weight to param.device first (via CPU stage if P2P
+#      isn't enabled; pytorch handles fallback). This is a 4 KB tensor
+#      so overhead is negligible.
+#  (2) on failure, dump tensor metadata + re-raise so we can still see
+#      WHICH weight failed if (1) wasn't enough.
 patch = '''            try:
+                if loaded_weight.device != param.device:
+                    loaded_weight = loaded_weight.to(param.device, non_blocking=False)
                 param.data.copy_(loaded_weight)
             except Exception as _e:
                 # === mllmopd default_weight_loader diag ===
@@ -276,7 +290,7 @@ new_src = src.replace(anchor, patch, 1)
 with open(path + ".tmp", "w") as f:
     f.write(new_src)
 os.replace(path + ".tmp", path)
-print("    inserted diag wrap around param.data.copy_")
+print("    inserted device-coercion fix + diag wrap")
 PY
   fi
 else
