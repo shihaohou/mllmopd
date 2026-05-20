@@ -411,6 +411,68 @@ else
   echo ">>> ${MR}: skipped (file not found)"
 fi
 
+# --- Patch 7: skip entropy compute when entropy_coef==0 (GPT diag Rank 3) ---
+# policy_loss_function unconditionally calls get_log_probs_and_entropy with
+# with_entropy=True and computes entropy_loss = sum_of_sample_mean(entropy),
+# even when args.entropy_coef==0.0. The result feeds
+# loss = pg_loss - 0 * entropy_loss — i.e. multiplied to nothing — but the
+# entropy compute still allocates a vocab-sized fp32 tensor via
+# _VocabParallelEntropy.forward (logits_max + normalized_vocab_parallel_logits
+# subtraction). At s10≈1900, vocab=151936, that's ~1.16 GiB peak that drove
+# T1-2 OOM #5 (docs/gpt-diagnosis-2026-05-20-t1-oom.md). Gate the compute on
+# args.entropy_coef.
+LOSS="${MILES_DIR}/miles/backends/training_utils/loss.py"
+LOSS_SENTINEL="# === mllmopd entropy-zero skip patch ==="
+if [ -f "${LOSS}" ]; then
+  if grep -q "${LOSS_SENTINEL}" "${LOSS}"; then
+    echo ">>> ${LOSS}: already patched (entropy-zero skip sentinel present)"
+  else
+    echo ">>> patching ${LOSS}: skip entropy compute when entropy_coef==0"
+    export MLLMOPD_PATCH_LOSS_PATH="${LOSS}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Patch A: `with_entropy=True` → conditional on args.entropy_coef
+anchor_a = "        with_entropy=True,\n"
+patch_a = "        with_entropy=args.entropy_coef != 0.0,  # === mllmopd entropy-zero skip patch ===\n"
+
+# Patch B: gate the entropy_loss block on args.entropy_coef
+anchor_b = """    # entropy loss
+    entropy = log_probs_and_entropy["entropy"]
+    entropy = torch.cat(entropy, dim=0)
+    entropy_loss = sum_of_sample_mean(entropy)
+"""
+patch_b = """    # entropy loss
+    # === mllmopd entropy-zero skip patch ===
+    if args.entropy_coef != 0.0:
+        entropy = log_probs_and_entropy["entropy"]
+        entropy = torch.cat(entropy, dim=0)
+        entropy_loss = sum_of_sample_mean(entropy)
+    else:
+        entropy_loss = pg_loss.new_zeros(())
+    # === end mllmopd entropy-zero skip patch ===
+"""
+
+if anchor_a not in src:
+    sys.exit(f"ERROR: anchor A (with_entropy=True) not found in {path!r}")
+if anchor_b not in src:
+    sys.exit(f"ERROR: anchor B (entropy loss block) not found in {path!r}")
+
+new_src = src.replace(anchor_a, patch_a, 1).replace(anchor_b, patch_b, 1)
+
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted entropy-zero skip at policy_loss_function")
+PY
+  fi
+else
+  echo ">>> ${LOSS}: skipped (file not found)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
