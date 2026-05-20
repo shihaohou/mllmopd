@@ -43,10 +43,11 @@ decision_role: >
 # T1 arm selector — the ONLY knob that differs between T1-2 and T1-3
 # ----------------------------------------------------------------------------
 opd_teacher_image_mode: "blank"          # env var OPD_TEACHER_IMAGE_MODE
-# Note: under the hood the launcher exports OPD_TEACHER_IMAGE_MODE=both for
-# *both* arms so we always dual-log lp_full + lp_blank (plan §2.4). This
-# field records the *reward-defining* image mode for THIS arm: lp_blank is
-# the actual training reward; lp_full is logged for diagnostics only.
+# Note: dual_teacher_get_reward.get_reward unconditionally scores both arms
+# (full and blank) and stores both into diagnostics; OPD_TEACHER_IMAGE_MODE
+# only selects which side is the *primary* training reward. So we get
+# lp_full + lp_blank on every row regardless of arm (plan §2.4). For THIS
+# arm lp_blank is the training reward; lp_full is the diagnostic counterpart.
 
 # ----------------------------------------------------------------------------
 # Models
@@ -148,13 +149,16 @@ disabled_features:
     why: "Advantage-shift is a Uni-OPD addition; not part of vanilla OPD."
 
 # ----------------------------------------------------------------------------
-# Parallelism (8 × A800-80GB devbox; teacher binds GPU 0, trainer gets 1-7)
+# Parallelism (8 × H800-140GB devbox; teacher binds GPU 0, trainer gets 1-4,
+# GPUs 5-7 idle. DP=4 / TP=1 / GBS=64 is what the H800 smoke validated; see
+# launcher comment near ACTOR_NUM_GPUS_PER_NODE for the GBS divisibility
+# rationale before changing.)
 # ----------------------------------------------------------------------------
 parallelism:
   actor_num_nodes: 1
-  actor_num_gpus_per_node: 7              # student trainer (1..7)
-  rollout_num_gpus: 7                     # colocated sglang rollout
-  trainer_gpus: "1,2,3,4,5,6,7"           # CUDA_VISIBLE_DEVICES
+  actor_num_gpus_per_node: 4              # student trainer (1..4)
+  rollout_num_gpus: 4                     # colocated sglang rollout
+  trainer_gpus: "1,2,3,4"                 # CUDA_VISIBLE_DEVICES
   teacher_gpus: "0"                       # standalone sglang server, GPU 0
   tp_size: 1                              # 3B fits on one GPU
 
