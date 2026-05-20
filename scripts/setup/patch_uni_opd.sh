@@ -473,6 +473,60 @@ else
   echo ">>> ${LOSS}: skipped (file not found)"
 fi
 
+# --- Patch 8: MilesRouter FastAPI lifespan migration -----------------------
+# FastAPI 0.106+ removed `add_event_handler("startup", ...)`. Uni-OPD's
+# MilesRouter.__init__ at miles/router/router.py:36 still calls it, which
+# crashes the RolloutManager creation task with
+#   AttributeError: 'FastAPI' object has no attribute 'add_event_handler'
+# when --use-miles-router is passed. Migrate to the lifespan context
+# manager (FastAPI's current API). Functionally identical: schedule the
+# health-check task before uvicorn starts serving.
+ROUTER="${MILES_DIR}/miles/router/router.py"
+ROUTER_SENTINEL="# === mllmopd FastAPI lifespan patch ==="
+if [ -f "${ROUTER}" ]; then
+  if grep -q "${ROUTER_SENTINEL}" "${ROUTER}"; then
+    echo ">>> ${ROUTER}: already patched (FastAPI lifespan sentinel present)"
+  else
+    echo ">>> patching ${ROUTER}: migrate add_event_handler → lifespan"
+    export MLLMOPD_PATCH_ROUTER_PATH="${ROUTER}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_ROUTER_PATH"]
+with open(path) as f:
+    src = f.read()
+
+anchor = '''        self.app = FastAPI()
+        self.app.add_event_handler("startup", self._start_background_health_check)'''
+
+patch = '''        # === mllmopd FastAPI lifespan patch ===
+        # FastAPI 0.106+ removed add_event_handler; use the lifespan
+        # context manager instead. _start_background_health_check just
+        # schedules a long-running asyncio task, so awaiting it before
+        # yield is equivalent to the old "startup" hook.
+        from contextlib import asynccontextmanager as _asynccm
+        _self_ref = self
+        @_asynccm
+        async def _lifespan(_app):
+            await _self_ref._start_background_health_check()
+            yield
+        self.app = FastAPI(lifespan=_lifespan)
+        # === end mllmopd FastAPI lifespan patch ==='''
+
+if anchor not in src:
+    sys.exit(f"ERROR: anchor not found in {path!r} — router source may have moved")
+
+new_src = src.replace(anchor, patch, 1)
+
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    migrated MilesRouter.__init__ to FastAPI lifespan")
+PY
+  fi
+else
+  echo ">>> ${ROUTER}: skipped (file not found)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
