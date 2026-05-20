@@ -476,13 +476,10 @@ PERF_ARGS=(
   # OOM-ing on logits.clone(). With DP=4 this saves ~27 GB per rank.
   --use-distributed-optimizer
   # Chunk the per-token log-prob / cross-entropy computation in
-  # miles/utils/ppo_utils.py::calculate_log_probs_and_entropy. Without
-  # this (default=-1 disables chunking) a single CE call materializes
-  # an [s10, 1, 151936] fp32 buffer (~1.16 GiB at s10≈1900) that
-  # tipped 3 consecutive T1-2 runs over the H800's PyTorch ceiling
-  # (see docs/gpt-diagnosis-2026-05-20-t1-oom.md Q1, Rank 2 fix).
-  # 256 chunks the buffer to ~150 MiB at the cost of a small loop.
-  --log-probs-chunk-size 256
+  # miles/utils/ppo_utils.py::calculate_log_probs_and_entropy. v9 hit
+  # OOM at trainer alloc 118 GiB + sglang 21 GiB = 139/140; halving the
+  # CE chunk buffer (256→128) saves ~600 MiB at the peak.
+  --log-probs-chunk-size "${LOG_PROBS_CHUNK_SIZE:-128}"
   --use-dynamic-batch-size
   --max-tokens-per-gpu 16384
 )
@@ -552,7 +549,6 @@ TENSORBOARD_ARGS=(
 MISC_ARGS=(
   --attention-dropout 0.0
   --hidden-dropout 0.0
-  --accumulate-allreduce-grads-in-fp32
   --attention-softmax-in-fp32
   --attention-backend flash
   --colocate
@@ -593,6 +589,21 @@ MISC_ARGS=(
   # identical. Re-enable once apex is installed if perf is needed.
   --no-gradient-accumulation-fusion
 )
+
+# v9 trainer-side OOM #2 in fused_vocab_parallel_cross_entropy
+# (118.33 GiB PyTorch + 21 GiB sglang = 139/140 GiB ceiling). GPT
+# diagnosis Rank 4 lever: the fp32 grad allreduce buffer holds a
+# full-precision copy of all 3B parameters ≈ 12 GiB.
+# For OPD with PPO clip, entropy_coef=0, kl_loss_coef=0, LR=1e-6,
+# the numeric impact of bf16 grad allreduce is small. Default OFF;
+# set ALLREDUCE_FP32=1 to restore (and run a short A/B comparing
+# grad norm / loss trajectory if you do).
+if [ "${ALLREDUCE_FP32:-0}" = "1" ]; then
+  MISC_ARGS+=(--accumulate-allreduce-grads-in-fp32)
+  echo ">>> ALLREDUCE_FP32=1 (fp32 grad allreduce ON; uses ~12 GiB extra)"
+else
+  echo ">>> ALLREDUCE_FP32=0 (fp32 grad allreduce OFF; saves ~12 GiB for actor_train peak)"
+fi
 
 # Smoke-mode extras (punch list #9). Empty by default for production runs.
 # Note: --sglang-disable-cuda-graph moved into the always-on SGLANG_ARGS
