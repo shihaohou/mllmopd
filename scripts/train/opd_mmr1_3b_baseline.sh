@@ -444,9 +444,16 @@ PERF_ARGS=(
   --max-tokens-per-gpu 16384
 )
 
+# Smoke #21: with --no-offload-train, training weights stay on GPU
+# (~28 GB for 3B bf16 + activations + grad/opt state). sglang colocate
+# needs to share the same GPU. The default 0.70 × 80 = 56 GB request
+# overflows (28 + 56 = 84 > 80) and TMS resume_memory hangs cuMemCreate.
+# 0.55 × 80 = 44 GB leaves 28 + 44 = 72 GB ≤ 80. Env-overrideable for
+# future tuning (larger batches → smaller mem_fraction).
+SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.55}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
-  --sglang-mem-fraction-static 0.70   # leave room for Megatron colocated
+  --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION}"
 )
 
 TENSORBOARD_ARGS=(
