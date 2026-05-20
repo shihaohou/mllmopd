@@ -193,17 +193,25 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-0}"
 export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING} CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING}"
 
-# T1-2 OOM #4 RETRACTION: an earlier commit (aa26bfd) defaulted
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True after misreading
-# the OOM hint as fragmentation. The actual root cause (per GPT
-# diagnosis Q1) is the colocated sglang mem_fraction_static block,
-# fixed by SGLANG_MEM_FRACTION=0.25 below. Worse, expandable_segments
-# is INCOMPATIBLE with torch_memory_saver (which sglang's
-# memory_saver_adapter imports even when enable=False on some paths):
-#   RuntimeError: TorchMemorySaver is disabled for the current
-#   process because expandable_segments is not supported yet.
-# So we no longer set the alloc-conf env var by default. If you want
-# it back (e.g. for a non-sglang run), set it explicitly.
+# T1-2 OOM #6 fragmentation fix: backward pass needed 8.48 GiB
+# contiguous but PyTorch had 8.86 GiB scattered across reserved-but-
+# unallocated segments. PyTorch's own OOM hint recommends
+# expandable_segments; previous attempt (aa26bfd) was retracted in
+# c6a0bfd because it crashed sglang's _TorchMemorySaverAdapterReal
+# init. Root cause of that crash: --colocate defaults BOTH
+# --offload-train AND --offload-rollout to True. We turn off train-side
+# (--no-offload-train, to avoid the LD_PRELOAD/NCCL conflict from smoke
+# #14) but had left rollout-side on; rollout=True picks the Real
+# adapter which calls torch_memory_saver, which sanity-checks
+# expandable_segments and raises.
+# Fix: also pass --no-offload-rollout below (sglang adapter switches to
+# the no-op variant, no TMS import). Then expandable_segments is safe.
+# Trade-off: sglang's release_memory_occupation becomes a literal no-op,
+# but that was already effectively true in our setup (LD_PRELOAD hook
+# was stripped) — see v6 PyTorch peak 115 GiB without any real KV-cache
+# release happening anyway.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+echo ">>> CUDA alloc env: PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"
@@ -534,6 +542,14 @@ MISC_ARGS=(
   # chasing for hours. Disable offload for now — re-enable later if
   # full run OOMs.
   --no-offload-train
+  # T1-2 OOM #6: --colocate ALSO defaults --offload-rollout=True, which
+  # makes sglang's TorchMemorySaverAdapter pick the Real variant and
+  # call into torch_memory_saver at engine init. That collides with
+  # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (TMS sanity check
+  # raises). We don't actually get useful release_memory_occupation
+  # behavior anyway in this setup (LD_PRELOAD hook is stripped above),
+  # so switching to the no-op adapter is purely a compatibility win.
+  --no-offload-rollout
   # Apex's `fused_weight_gradient_mlp_cuda` extension isn't compiled in
   # this venv (we'd need `pip install --global-option=... apex` with
   # CUDA toolchain). Megatron defaults to gradient_accumulation_fusion=True
