@@ -101,8 +101,36 @@ fi
 echo ">>> CUDA forward-compat prepended (driver 535 ↔ cu128 runtime):"
 echo "    compat real    : ${COMPAT_LIB_REAL:-(not found)}"
 echo "    compat symlink : ${COMPAT_LIB_SYMLINK:-(not found)}"
+
+# Smoke #15 follow-up: GPT diagnosis indicated the persistent NCCL
+# "driver insufficient" with VERSION-MISMATCH (compile=2.27.5, runtime
+# reported as 2.29.7) means ld.so is finding a foreign libnccl ahead
+# of the venv's bundled one. Prepend the venv's NCCL lib dir to
+# LD_LIBRARY_PATH so dlopen("libnccl.so.2") resolves there first,
+# AHEAD of the cuda-compat path.
+PYTORCH_NCCL_LIB_DIR="$(python - <<'PY' 2>/dev/null || true
+from pathlib import Path
+try:
+    import nvidia.nccl
+    p = Path(nvidia.nccl.__file__).resolve().parent / "lib"
+    print(p)
+except Exception:
+    pass
+PY
+)"
+if [ -n "${PYTORCH_NCCL_LIB_DIR}" ] && [ -e "${PYTORCH_NCCL_LIB_DIR}/libnccl.so.2" ]; then
+  LD_LIBRARY_PATH="${PYTORCH_NCCL_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export LD_LIBRARY_PATH
+  echo "    venv libnccl   : ${PYTORCH_NCCL_LIB_DIR}/libnccl.so.2 (prepended FIRST)"
+else
+  echo "    venv libnccl   : (not found — fallback to ld.so.cache)"
+fi
 echo "    LD_LIBRARY_PATH before : ${LD_BEFORE}"
 echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
+
+# NCCL ≥ 2.28 probes for libnccl-env.so plugin on init; silence the
+# noise so the real error is the first NCCL log line.
+export NCCL_ENV_PLUGIN="${NCCL_ENV_PLUGIN:-none}"
 
 # Strip torch_memory_saver from LD_PRELOAD. This .so hijacks
 # cudaMalloc/cudaFree to support sglang's incremental KV-cache eviction;
@@ -266,7 +294,7 @@ DEBUG_MODE="${DEBUG_MODE:-0}"
 # per-actor CUDA_VISIBLE_DEVICES rewrite. Each actor then sees exactly
 # one logical GPU.
 TRAIN_ENV_VARS_JSON="${TRAIN_ENV_VARS_JSON:-$(python -c '
-import json
+import json, os
 print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "",
     "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "",
@@ -275,6 +303,12 @@ print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES": "",
     "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS": "",
     "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR": "",
+    # Propagate launcher-side LD_LIBRARY_PATH (with venv NCCL prepended)
+    # and NCCL_ENV_PLUGIN=none to train actors. Uni-OPD's actor_group.py
+    # builds env_vars by merging its own dict with self.args.train_env_vars,
+    # so any keys we put here override Uni-OPD defaults.
+    "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+    "NCCL_ENV_PLUGIN": os.environ.get("NCCL_ENV_PLUGIN", "none"),
 }))
 ')}"
 TRAIN_ENV_ARGS=(

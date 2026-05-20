@@ -165,9 +165,31 @@ init_block = r'''        # === mllmopd actor inspect patch (inside init) ===
                 except Exception as _e:
                     _f.write(f"maps err: {_e}\n")
                 import torch as _t
-                _f.write(f"torch.cuda.nccl.version()={_t.cuda.nccl.version()}\n")
+                _f.write(f"torch.cuda.nccl.version() [COMPILE-TIME]={_t.cuda.nccl.version()}\n")
                 _f.write(f"torch.version.cuda={_t.version.cuda}\n")
                 _f.write(f"torch.cuda.device_count()={_t.cuda.device_count()}\n")
+                # The KEY diagnostic — ncclGetVersion via ctypes gives the
+                # actually-loaded NCCL's runtime version, vs torch.cuda.nccl.version()
+                # which is torch's compile-time NCCL_VERSION_CODE macro.
+                # Mismatch between these two = dynamic linker found a foreign
+                # libnccl ahead of the venv's bundled one.
+                try:
+                    import ctypes as _ct
+                    _v = _ct.c_int()
+                    _lib = _ct.CDLL("libnccl.so.2")
+                    _rc = _lib.ncclGetVersion(_ct.byref(_v))
+                    _maj = _v.value // 10000
+                    _min = (_v.value % 10000) // 100
+                    _pat = _v.value % 100
+                    _f.write(f"ctypes_ncclGetVersion [RUNTIME] rc={_rc} raw={_v.value} decoded={_maj}.{_min}.{_pat}\n")
+                except Exception as _e:
+                    _f.write(f"ctypes_ncclGetVersion failed: {_e}\n")
+                # pip metadata for nvidia-nccl-cu12 — does pip think we have 2.27 or 2.29?
+                try:
+                    import importlib.metadata as _md
+                    _f.write(f"pip nvidia-nccl-cu12={_md.version('nvidia-nccl-cu12')}\n")
+                except Exception as _e:
+                    _f.write(f"pip nvidia-nccl-cu12 unknown: {_e}\n")
                 try:
                     _t.cuda.init()
                     _f.write(f"torch.cuda.current_device()={_t.cuda.current_device()}\n")
