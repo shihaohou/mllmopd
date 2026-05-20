@@ -297,11 +297,127 @@ else
   echo ">>> ${WU}: skipped (file not found — sglang submodule layout changed?)"
 fi
 
+# --- Patch 5: Uni-OPD sender — UUID-aware CUDA tensor serialization ---
+# GPT review round 3 identified the real root cause of the sglang
+# "invalid argument" weight-copy failure: Uni-OPD's
+# _send_to_colocated_engine() in update_weight_from_tensor.py serializes
+# the flattened bucket via Python ForkingPickler WITHOUT first applying
+# sglang's monkey_patch_torch_reductions(). Default ForkingPickler stores
+# the tensor's LOCAL device INDEX (cuda:0 on the train actor's single-GPU
+# CVD view); the receiver sglang engine has full CVD view and rebuilds
+# everything on its own cuda:0, but param N lives on cuda:N. Hence the
+# device mismatch.
+# monkey_patch_torch_reductions makes pickle store DEVICE UUID instead,
+# and the receiver remaps UUID → its local cuda:N. Sglang's TP worker
+# already calls it before deserialize; we just need to also call it
+# before serialize on the sender side.
+UW="${MILES_DIR}/miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py"
+UW_SENTINEL="# === mllmopd uuid-aware tensor serialization patch ==="
+if [ -f "${UW}" ]; then
+  if grep -q "${UW_SENTINEL}" "${UW}"; then
+    echo ">>> ${UW}: already patched (uuid-aware sentinel present)"
+  else
+    echo ">>> patching ${UW}: inject monkey_patch_torch_reductions() in sender"
+    export MLLMOPD_PATCH_UW_PATH="${UW}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_UW_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = "    is_lora = lora_config is not None\n    long_live_tensors = []"
+patch = '''    # === mllmopd uuid-aware tensor serialization patch ===
+    # Train actor sees single-GPU CVD so every local tensor is cuda:0.
+    # SGLang engines retain full rollout CVD (NOSET on rollout side per
+    # Uni-OPD design) and place engine N's params on cuda:N. Without
+    # this, ForkingPickler serializes the local device INDEX 0; the
+    # receiver rebuilds every bucket on its own cuda:0 even though
+    # param lives on cuda:N. SGLang's monkey patch makes pickle store
+    # device UUID and the receiver remaps to its local device.
+    from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+    monkey_patch_torch_reductions()
+    # === end mllmopd uuid-aware patch ===
+
+    is_lora = lora_config is not None
+    long_live_tensors = []'''
+if anchor not in src:
+    sys.exit(f"ERROR: anchor not found in {path!r} — Uni-OPD source may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted monkey_patch_torch_reductions() call at start of _send_to_colocated_engine")
+PY
+  fi
+else
+  echo ">>> ${UW}: skipped (file not found)"
+fi
+
+# --- Patch 6: sglang receiver — flattened bucket device normalization ---
+# Belt-and-suspenders companion to P5 (the sender UUID patch). SGLang's
+# _update_weights_from_flattened_bucket reconstructs tensors from a
+# shared flattened storage; if that flattened storage lands on the
+# wrong device, every reconstructed view inherits it. The
+# non-flattened update_weights_from_tensor path already does
+# _unwrap_tensor(..., device=current) → tensor.to(device), but the
+# flattened branch returns BEFORE that step. Normalize the whole
+# flattened bucket to (self.device, self.gpu_id) once, before
+# bucket.reconstruct_tensors().
+MR="$(cd "$(git rev-parse --show-toplevel)" && \
+      echo "$(pwd)/third_party/sglang/python/sglang/srt/model_executor/model_runner.py")"
+MR_SENTINEL="# === mllmopd flattened-bucket device normalize ==="
+if [ -f "${MR}" ]; then
+  if grep -q "${MR_SENTINEL}" "${MR}"; then
+    echo ">>> ${MR}: already patched (flattened-bucket sentinel present)"
+  else
+    echo ">>> patching ${MR}: normalize flattened bucket to self.gpu_id"
+    export MLLMOPD_PATCH_MR_PATH="${MR}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_MR_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '''        flattened_tensor = flattened_tensor_bucket_dict["flattened_tensor"]
+        metadata = flattened_tensor_bucket_dict["metadata"]'''
+patch = '''        flattened_tensor = flattened_tensor_bucket_dict["flattened_tensor"]
+        metadata = flattened_tensor_bucket_dict["metadata"]
+
+        # === mllmopd flattened-bucket device normalize ===
+        # P1 from GPT review round 3. Mirror the non-flattened path's
+        # _unwrap_tensor(..., device=current) step which the flattened
+        # branch skips. Do this once for the whole bucket so reconstructed
+        # views inherit the right device.
+        import torch as _t
+        if self.device != "cpu":
+            _target = _t.device(self.device, self.gpu_id)
+            if flattened_tensor.device != _target:
+                print(
+                    f"[mllmopd weight-sync receiver] gpu_id={self.gpu_id} "
+                    f"bucket.device={flattened_tensor.device} target={_target} "
+                    f"-> moving",
+                    flush=True,
+                )
+                flattened_tensor = flattened_tensor.to(_target, non_blocking=False)
+        # === end mllmopd flattened-bucket device normalize ==='''
+if anchor not in src:
+    sys.exit(f"ERROR: anchor not found in {path!r} — sglang source may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted flattened bucket device normalize before reconstruct_tensors")
+PY
+  fi
+else
+  echo ">>> ${MR}: skipped (file not found)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
 echo "Inspect after smoke:"
 echo "    ls -la /tmp/actor_inspect_*.log"
 echo "    cat /tmp/actor_inspect_*.log"
-echo "    # The qwen2.5-vl weight copy diag goes to stderr — grep the train log:"
+echo "    # weight-sync receiver path:"
+echo "    grep '\\[mllmopd weight-sync' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
+echo "    # default_weight_loader fallback diag (should not fire if P5/P6 work):"
 echo "    grep -A3 '\\[mllmopd diag\\]' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
