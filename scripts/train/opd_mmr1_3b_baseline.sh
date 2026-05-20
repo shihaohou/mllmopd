@@ -270,6 +270,16 @@ mkdir -p "${CKPT_DIR}" "${LOG_DIR}" "${TENSORBOARD_DIR}" \
 
 CUR_TIME=$(date +%Y%m%d_%H%M%S)   # used by DEBUG_ARGS + TRAIN_LOG_FILE below
 
+# Persist launcher stdout/stderr into the run dir on ceph so post-mortem
+# survives box switch / reboot. Setup-banner output before this point (env
+# resolution, teacher health check, NCCL diag) is intentionally not
+# captured here — it's caller-visible in the tmux pane but small enough
+# not to be worth additional plumbing. Caller no longer needs to `| tee`
+# anything; the file path is echoed below.
+LAUNCHER_LOG="${LOG_DIR}/launcher_${CUR_TIME}.log"
+exec > >(tee -a "${LAUNCHER_LOG}") 2>&1
+echo ">>> launcher log: ${LAUNCHER_LOG}"
+
 # --- Hyperparams (T1-v0; plan §6) ---
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 SAMPLE_N="${SAMPLE_N:-8}"
