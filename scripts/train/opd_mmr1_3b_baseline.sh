@@ -520,16 +520,28 @@ PERF_ARGS=(
 # 200k cap means some samples queue; doesn't change OPD experiment.
 SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-0.15}"
 SGLANG_MAX_TOTAL_TOKENS="${SGLANG_MAX_TOTAL_TOKENS:-200000}"
-SGLANG_MAX_RUNNING_REQUESTS="${SGLANG_MAX_RUNNING_REQUESTS:-16}"
+# v8 measurement: disable_cuda_graph + max_running=16 made throughput
+# crash ~10x (7k → 700 tok/s/engine). KV usage held at 0.10 the whole
+# rollout — sglang was NOT memory-pressured; the slowdown was batched
+# decode kernel-launch overhead + routing imbalance (1 engine had 50+
+# samples, 3 engines idle).
+# Per GPT v8 brief (docs/gpt-diagnosis-2026-05-20-t1-oom-v7-update.md):
+#   - max_running 16 → 32: lets the busy engine decode half the rollout
+#     batch concurrently, ≤3.4 GiB extra KV at worst-case 6144-token len
+#   - cuda_graph_max_bs=32: pair with max_running to capture steady-state
+#     batch size; ~1-3 GiB graph buffer inside mem_fraction quota
+#   - num_continuous_decode_steps=4: 4 decode steps per scheduler turn,
+#     reduces overhead for our 2048-token responses
+SGLANG_MAX_RUNNING_REQUESTS="${SGLANG_MAX_RUNNING_REQUESTS:-32}"
+SGLANG_CUDA_GRAPH_MAX_BS="${SGLANG_CUDA_GRAPH_MAX_BS:-32}"
+SGLANG_NUM_CONTINUOUS_DECODE_STEPS="${SGLANG_NUM_CONTINUOUS_DECODE_STEPS:-4}"
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine 1
   --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION}"
   --sglang-max-total-tokens "${SGLANG_MAX_TOTAL_TOKENS}"
   --sglang-max-running-requests "${SGLANG_MAX_RUNNING_REQUESTS}"
-  # CUDA-graph capture buffers are not throughput-essential for our
-  # batch sizes and they sit inside the mem_fraction block. Disable
-  # in production too (was DEBUG_MODE-only before).
-  --sglang-disable-cuda-graph
+  --sglang-cuda-graph-max-bs "${SGLANG_CUDA_GRAPH_MAX_BS}"
+  --sglang-num-continuous-decode-steps "${SGLANG_NUM_CONTINUOUS_DECODE_STEPS}"
 )
 
 TENSORBOARD_ARGS=(
@@ -566,6 +578,13 @@ MISC_ARGS=(
   # behavior anyway in this setup (LD_PRELOAD hook is stripped above),
   # so switching to the no-op adapter is purely a compatibility win.
   --no-offload-rollout
+  # v8: 4 rollout engines existed but only 1 was doing work (16 running
+  # + 39 queued on one GPU, 0% util on the other 3). Uni-OPD's default
+  # sglang router was hot-spotting requests on one engine. MilesRouter
+  # (miles/router/router.py:29) picks the worker URL with the minimum
+  # active request count and decrements on finish — exactly what we
+  # need to spread 64 generations across 4 engines.
+  --use-miles-router
   # Apex's `fused_weight_gradient_mlp_cuda` extension isn't compiled in
   # this venv (we'd need `pip install --global-option=... apex` with
   # CUDA toolchain). Megatron defaults to gradient_accumulation_fusion=True
