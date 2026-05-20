@@ -186,7 +186,12 @@ export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,COLL}"
 export TORCH_NCCL_BLOCKING_WAIT="${TORCH_NCCL_BLOCKING_WAIT:-1}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-0}"
-echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING}"
+# Force sync CUDA — the qwen2_5_vl.py:851 'invalid argument' in smoke #20
+# is async-reported (per torch error msg "stacktrace below might be
+# incorrect"). With BLOCKING=1, the error pinpoints the actual failing
+# CUDA call so we can see which weight tensor's copy_() fails.
+export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
+echo ">>> NCCL diagnostic env: NCCL_DEBUG=${NCCL_DEBUG} SUBSYS=${NCCL_DEBUG_SUBSYS} BLOCKING_WAIT=${TORCH_NCCL_BLOCKING_WAIT} ASYNC_ERR=${TORCH_NCCL_ASYNC_ERROR_HANDLING} CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING}"
 
 # --- Required env (.env normally provides) ---
 : "${MMR1_3B_SFT_CKPT:?}"

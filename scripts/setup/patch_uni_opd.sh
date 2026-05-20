@@ -225,9 +225,69 @@ PY
   head -5 "${AC}" | sed 's/^/      /'
 fi
 
+# --- Patch 4: sglang default_weight_loader diagnostic ---------------
+# qwen2_5_vl.py:851 → weight_utils.py:951 (`param.data.copy_(loaded_weight)`)
+# raises `torch.AcceleratorError: CUDA error: invalid argument` on
+# weight update_from_tensor. With CUDA_LAUNCH_BLOCKING=1 in the
+# launcher, the actual failing call should be pinpointed, but we
+# still need to see WHICH parameter (name + shape + dtype + device)
+# is the culprit. Wrap the copy_ to log full tensor metadata on
+# failure, then re-raise.
+WU="${MILES_DIR%/miles}/sglang/python/sglang/srt/model_loader/weight_utils.py"
+if [ ! -f "${WU}" ]; then
+  # Fall back to absolute path discovery via the venv.
+  WU="$(cd "$(git rev-parse --show-toplevel)" && \
+        echo "$(pwd)/third_party/sglang/python/sglang/srt/model_loader/weight_utils.py")"
+fi
+WU_SENTINEL="# === mllmopd default_weight_loader diag ==="
+if [ -f "${WU}" ]; then
+  if grep -q "${WU_SENTINEL}" "${WU}"; then
+    echo ">>> ${WU}: already patched (diag sentinel present)"
+  else
+    echo ">>> patching ${WU}: wrap default_weight_loader with tensor-info diag"
+    export MLLMOPD_PATCH_WU_PATH="${WU}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_WU_PATH"]
+with open(path) as f:
+    src = f.read()
+
+anchor = '            param.data.copy_(loaded_weight)\n    except Exception:'
+patch = '''            try:
+                param.data.copy_(loaded_weight)
+            except Exception as _e:
+                # === mllmopd default_weight_loader diag ===
+                import sys as _sys
+                _info = (
+                    f"\\n[mllmopd diag] default_weight_loader copy_ FAILED\\n"
+                    f"  param  : shape={tuple(param.size())} dtype={param.dtype} "
+                    f"device={param.device} stride={param.stride()} contig={param.is_contiguous()}\\n"
+                    f"  loaded : shape={tuple(loaded_weight.size())} dtype={loaded_weight.dtype} "
+                    f"device={loaded_weight.device} stride={loaded_weight.stride()} contig={loaded_weight.is_contiguous()}\\n"
+                    f"  err    : {type(_e).__name__}: {_e}\\n"
+                )
+                print(_info, file=_sys.stderr, flush=True)
+                raise
+                # === end mllmopd default_weight_loader diag ===
+    except Exception:'''
+if anchor not in src:
+    sys.exit(f"ERROR: anchor not found in {path!r} — sglang source may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    inserted diag wrap around param.data.copy_")
+PY
+  fi
+else
+  echo ">>> ${WU}: skipped (file not found — sglang submodule layout changed?)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
 echo "Inspect after smoke:"
 echo "    ls -la /tmp/actor_inspect_*.log"
 echo "    cat /tmp/actor_inspect_*.log"
+echo "    # The qwen2.5-vl weight copy diag goes to stderr — grep the train log:"
+echo "    grep -A3 '\\[mllmopd diag\\]' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
