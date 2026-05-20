@@ -341,10 +341,24 @@ RM_ARGS=(
 )
 
 # --- Arg groups (modeled on the reference launcher) ---
+# `--load` semantics: Uni-OPD's checkpoint.py asserts that the dir exists
+# AND is non-empty. The reference upstream launcher always points it at
+# CKPT_DIR (same as --save), which works on resume but fails the
+# assertion on fresh runs (empty dir). Auto-detect: if CKPT_DIR is
+# non-empty (resume from a previous run's last save), load from there;
+# otherwise load from the HF student checkpoint via bridge mode.
+if [ -d "${CKPT_DIR}" ] && [ -n "$(ls -A "${CKPT_DIR}" 2>/dev/null)" ]; then
+  LOAD_PATH="${CKPT_DIR}"
+  echo ">>> --load (resume): ${CKPT_DIR}"
+else
+  LOAD_PATH="${STUDENT_CKPT}"
+  echo ">>> --load (fresh run, HF bridge): ${STUDENT_CKPT}"
+fi
+
 CKPT_ARGS=(
   --hf-checkpoint "${STUDENT_CKPT}"
   --ref-load "${STUDENT_CKPT}"          # KL ref load path (kl_loss_coef=0 so unused, but Megatron still requires the flag)
-  --load "${CKPT_DIR}"
+  --load "${LOAD_PATH}"
   --save "${CKPT_DIR}"
   --save-interval "${SAVE_INTERVAL}"
   --save-hf "${CKPT_DIR}/hf/step_{rollout_id}"   # HF format needed for T1-eval (run_audit_pass_sglang)
