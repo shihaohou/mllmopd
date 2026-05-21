@@ -68,7 +68,8 @@ MILES_DIR="${MILES_DIR:-third_party/Uni-OPD/miles}"
 LIST="${MILES_DIR}/Uni_OPD_utils/OPD_reward/teacher_server_list.json"
 MAP="${MILES_DIR}/Uni_OPD_utils/OPD_reward/teacher_server_map.json"
 
-TEACHER_URL="http://localhost:${TEACHER_PORT}/generate"
+TEACHER_ADVERTISE_HOST="${TEACHER_ADVERTISE_HOST:-localhost}"
+TEACHER_URL="http://${TEACHER_ADVERTISE_HOST}:${TEACHER_PORT}/generate"
 
 python - <<PY
 import json, pathlib
@@ -91,9 +92,12 @@ LOG_DIR="${MLLMOPD_RUNS:-runs}/teacher_server"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/${TEACHER_NAME}-${TEACHER_PORT}-$(date +%Y%m%d-%H%M%S).log"
 
+TEACHER_HOST="${TEACHER_HOST:-0.0.0.0}"
+
 LAUNCH_CMD=(
   python -m sglang.launch_server
   --model-path "${TEACHER_MODEL_PATH}"
+  --host "${TEACHER_HOST}"
   --port "${TEACHER_PORT}"
   --tp-size "${TEACHER_TP_SIZE}"
   --dtype bfloat16
@@ -119,7 +123,7 @@ SGLANG_PID=$!
 echo ">>> sglang pid:     ${SGLANG_PID}"
 
 # Wait for /get_model_info to return 200 (sglang's ready signal).
-INFO_URL="http://localhost:${TEACHER_PORT}/get_model_info"
+INFO_URL="http://127.0.0.1:${TEACHER_PORT}/get_model_info"
 echo ">>> waiting for ${INFO_URL} ..."
 for i in $(seq 1 120); do
   if ! kill -0 "${SGLANG_PID}" 2>/dev/null; then
