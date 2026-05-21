@@ -331,13 +331,15 @@ OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
 ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
 # v0 used 2048 → train-eval mismatch (eval uses 4096) + truncated MathVision's
 # natural distribution (MMR1-3B-SFT MathVision avg=2559 tokens, hitmax 77% at
-# the 4096 eval cap). Bumped to 8192 for v1 so long CoT responses train
-# unimpeded. Memory budget unchanged: --max-tokens-per-gpu still 8192, so
-# packed-tokens-per-CE-call (the dominant fp32 logits driver, ~4.6 GiB) is
-# unchanged — a single 8192-token response just monopolizes one micro-batch
-# instead of packing with shorter siblings. Total micro-batches per opt step
-# rises modestly; per-step wallclock ~30-50% longer.
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-8192}"
+# the 4096 eval cap). v1 first attempt at 8192 OOM'd on the trainer: even
+# though --max-tokens-per-gpu still caps packed tokens at 8192, a single
+# 8192-token response monopolizes a micro-batch and its per-sequence
+# attention/backward state peaks higher than four packed 2048-token sequences
+# at the same packed length. 6144 (GPT review recommendation) truncates only
+# the p95-p99 long-tail responses, keeps the two-arm comparison fair (both
+# arms use the same cap), and stays well above the 4096 eval cap. Don't
+# bump --max-tokens-per-gpu past 8192 in tandem — that's the v11 OOM driver.
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-6144}"
 
 # --- Parallelism (8-GPU host; teacher already binds GPU 0) ---
 # Megatron requires GBS % (MICRO_BATCH_SIZE * DP) == 0 where DP = N_GPU / TP.
