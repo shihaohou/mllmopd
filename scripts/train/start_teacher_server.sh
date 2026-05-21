@@ -82,15 +82,31 @@ MAP="${MILES_DIR}/Uni_OPD_utils/OPD_reward/teacher_server_map.json"
 
 # Pick the IP this host should advertise to the student. Priority:
 #   1. TEACHER_ADVERTISE_HOST if set explicitly.
-#   2. `ip route get $STUDENT_IP` src — the kernel picks the right NIC for
-#      the route to the student, avoiding RDMA/overlay/docker bridges that
-#      hostname -I may list first. Pass at the call site, do NOT bake into .env
-#      (the box pair changes between experiments).
+#   2. STUDENT_IP set → ask the kernel which local IP would route to it.
+#      Tries `ip route get` first; falls back to a Python UDP-connect trick
+#      that works inside slim containers without iproute2. Avoids
+#      `hostname -I` picking RDMA/overlay/docker bridges other boxes can't
+#      reach. Pass at the call site, do NOT bake into .env (the box pair
+#      changes between experiments).
 #   3. Fallback "localhost" (single-box mode).
-if [ -z "${TEACHER_ADVERTISE_HOST:-}" ]; then
-  if [ -n "${STUDENT_IP:-}" ] && command -v ip >/dev/null 2>&1; then
+if [ -z "${TEACHER_ADVERTISE_HOST:-}" ] && [ -n "${STUDENT_IP:-}" ]; then
+  if command -v ip >/dev/null 2>&1; then
     TEACHER_ADVERTISE_HOST=$(ip route get "${STUDENT_IP}" 2>/dev/null \
       | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  fi
+  if [ -z "${TEACHER_ADVERTISE_HOST:-}" ]; then
+    # UDP connect doesn't send a packet; getsockname returns the src IP
+    # the kernel would use to reach STUDENT_IP.
+    TEACHER_ADVERTISE_HOST=$(STUDENT_IP="${STUDENT_IP}" python - <<'PY' 2>/dev/null
+import os, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect((os.environ["STUDENT_IP"], 1))
+    print(s.getsockname()[0])
+finally:
+    s.close()
+PY
+)
   fi
 fi
 TEACHER_ADVERTISE_HOST="${TEACHER_ADVERTISE_HOST:-localhost}"
