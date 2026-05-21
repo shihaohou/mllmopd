@@ -43,6 +43,16 @@ cd "$(git rev-parse --show-toplevel)"
 # shellcheck disable=SC1091
 source .env
 
+# H800 container has http_proxy/https_proxy pointed at an oversea squid for
+# outbound internet. sglang's startup self-warmup curls 127.0.0.1:${port}/
+# model_info; requests respects the proxy env var and routes the loopback
+# call through the squid, which returns 502 → assert fails → sglang exits
+# (shows up as "Killed" in the parent shell). Strip proxies for this process
+# and add loopback + intranet to NO_PROXY for any child that re-reads them.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+export NO_PROXY="localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,${NO_PROXY:-}"
+export no_proxy="${NO_PROXY}"
+
 # Prepend NGC CUDA forward-compat lib to LD_LIBRARY_PATH. Driver 535 +
 # cu128 runtime need it; the path is sometimes missing from the env Ray
 # / sglang daemons inherit. See opd_mmr1_3b_baseline.sh for the full
