@@ -149,16 +149,28 @@ echo "    LD_LIBRARY_PATH after  : ${LD_LIBRARY_PATH:-(empty)}"
 # noise so the real error is the first NCCL log line.
 export NCCL_ENV_PLUGIN="${NCCL_ENV_PLUGIN:-none}"
 
-# Strip outbound HTTP proxy so actor → local sglang (10.x intranet)
-# calls don't get routed through the dev box's NGC proxy and 502'd.
-# Smoke #19 root cause: shell had http_proxy=oversea-squid1.jp.txyun:11080
-# from the dev box's interactive setup, requests library happily routed
-# `requests.post("http://10.82.121.12:15004/...")` through it, and squid
-# returned 502 because the internal IP isn't reachable from outside.
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-# Defense in depth: explicitly whitelist intranet ranges in no_proxy.
+# Proxy handling:
+#   Default (MLLMOPD_KEEP_PROXY unset or 0): strip http_proxy/https_proxy
+#     to prevent the v0 bug where requests.post("http://10.82.121.12:...")
+#     was routed through oversea-squid1.jp.txyun:11080, which returned 502
+#     because the internal IP isn't reachable from outside (smoke #19 root
+#     cause). Safe default for sglang/ray intranet HTTP traffic.
+#   MLLMOPD_KEEP_PROXY=1: keep http_proxy/https_proxy intact. Required for
+#     wandb online sync (api.wandb.ai is external, needs the squid). Relies
+#     on no_proxy whitelisting 10.x intranet to keep sglang/ray bypass.
+#     Tested 2026-05-22 — if sglang student/teacher 502s reappear, fall
+#     back to default (unset MLLMOPD_KEEP_PROXY).
+# Defense in depth: always set no_proxy for intranet, regardless of mode.
+# Set this BEFORE the optional unset so requests honors it either way.
 export no_proxy="${no_proxy:+${no_proxy},}localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 export NO_PROXY="${no_proxy}"
+if [ "${MLLMOPD_KEEP_PROXY:-0}" = "1" ]; then
+  echo ">>> proxy kept (MLLMOPD_KEEP_PROXY=1): http_proxy=${http_proxy:-(unset)}"
+  echo "                                       no_proxy will bypass 10.x intranet"
+else
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+  echo ">>> proxy stripped (default; set MLLMOPD_KEEP_PROXY=1 to keep for wandb)"
+fi
 
 # Strip torch_memory_saver from LD_PRELOAD. This .so hijacks
 # cudaMalloc/cudaFree to support sglang's incremental KV-cache eviction;
