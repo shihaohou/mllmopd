@@ -143,6 +143,21 @@ async def get_reward(args: Namespace, sample: Sample, **kwargs) -> dict:
     start_time = time.time()
     image_mode = _resolve_image_mode()
 
+    # T1 v0 bug guard. miles Dataset silently sets sample.multimodal_inputs
+    # to None when launcher omits --multimodal-keys → make_blank_image_data
+    # returns [] → BlankTeacher === FullTeacher (both text-only). The full
+    # T1 v0 run hit this and produced a fake "vision-invariance" negative.
+    # Set MLLMOPD_REQUIRE_MM=1 in smoke / paranoid runs to assert image is
+    # actually flowing through. Default off (0) so legacy text-only smoke
+    # tests aren't broken.
+    if os.environ.get("MLLMOPD_REQUIRE_MM", "0") == "1":
+        mm = getattr(sample, "multimodal_inputs", None)
+        assert mm and mm.get("images"), (
+            f"[MLLMOPD_REQUIRE_MM=1] sample (idx={getattr(sample, 'index', '?')}) "
+            f"has no multimodal_inputs.images — multimodal pipeline broken. "
+            f"Check launcher --multimodal-keys and JSONL `images` field."
+        )
+
     rm_manager = RMSystemManager(args)
     session_manager = RewardSessionManager()
 

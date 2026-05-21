@@ -459,6 +459,17 @@ ROLLOUT_ARGS=(
   --prompt-data "${TRAIN_JSONL}"
   --input-key problem
   --label-key answer
+  # T1 v0 BUG (caught 2026-05-21, mid GPT review): without --multimodal-keys
+  # miles Dataset (third_party/Uni-OPD/miles/miles/utils/data.py:324) computes
+  # has_mm = multimodal_keys and any(...) = False, so every sample gets
+  # multimodal_inputs=None. The rollout payload then ships no image_data and
+  # make_blank_image_data returns [] early, so BOTH FullTeacher and
+  # BlankTeacher ended up scoring text-only — OPD_TEACHER_IMAGE_MODE became
+  # a no-op. The "T1-2 ≈ T1-3 vision-invariance" result from
+  # t1_v0_eval_20260521-140736 was bug-induced, not a real negative.
+  # Wire the JSONL `images` field as the image multimodal key so the
+  # full MLLM data flow actually runs.
+  --multimodal-keys '{"image":"images"}'
   --apply-chat-template
   --rollout-shuffle
   --num-epoch "${NUM_EPOCH}"
