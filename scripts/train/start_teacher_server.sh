@@ -16,8 +16,20 @@
 #   FOREGROUND           (default: 0)          — set 1 to keep stdout attached
 #                                                 instead of nohupping into a log
 #
+# Cross-box deploy:
+#   TEACHER_ADVERTISE_HOST    explicit IP written into teacher_server_list.json
+#   STUDENT_IP                if ADVERTISE_HOST unset, use `ip route get` src
+#                             to that IP — auto-picks the NIC that actually
+#                             reaches the student. Avoids hostname -I picking
+#                             an RDMA/overlay/docker bridge by accident.
+#
 # Usage:
+#   # single-box (teacher + student on same machine)
 #   bash scripts/train/start_teacher_server.sh
+#
+#   # cross-box (student lives at 10.x.y.z — pass at call site, don't .env it)
+#   STUDENT_IP=10.x.y.z bash scripts/train/start_teacher_server.sh
+#
 #   # waits until /get_model_info returns 200, then prints the URL and exits.
 #
 # Verify alive:
@@ -68,6 +80,19 @@ MILES_DIR="${MILES_DIR:-third_party/Uni-OPD/miles}"
 LIST="${MILES_DIR}/Uni_OPD_utils/OPD_reward/teacher_server_list.json"
 MAP="${MILES_DIR}/Uni_OPD_utils/OPD_reward/teacher_server_map.json"
 
+# Pick the IP this host should advertise to the student. Priority:
+#   1. TEACHER_ADVERTISE_HOST if set explicitly.
+#   2. `ip route get $STUDENT_IP` src — the kernel picks the right NIC for
+#      the route to the student, avoiding RDMA/overlay/docker bridges that
+#      hostname -I may list first. Pass at the call site, do NOT bake into .env
+#      (the box pair changes between experiments).
+#   3. Fallback "localhost" (single-box mode).
+if [ -z "${TEACHER_ADVERTISE_HOST:-}" ]; then
+  if [ -n "${STUDENT_IP:-}" ] && command -v ip >/dev/null 2>&1; then
+    TEACHER_ADVERTISE_HOST=$(ip route get "${STUDENT_IP}" 2>/dev/null \
+      | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  fi
+fi
 TEACHER_ADVERTISE_HOST="${TEACHER_ADVERTISE_HOST:-localhost}"
 TEACHER_URL="http://${TEACHER_ADVERTISE_HOST}:${TEACHER_PORT}/generate"
 
