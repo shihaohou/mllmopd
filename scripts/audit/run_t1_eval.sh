@@ -69,15 +69,40 @@
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+
+# CKPT_T1_2/3 preservation. If the caller pre-exported them, `source .env`
+# below would silently overwrite the caller's values with any CKPT_T1_2/3
+# lines that live in .env. This bit us in T1 v1: .env carried v0 step_249
+# paths from an earlier session and the caller's interactive
+# `export CKPT_T1_2=.../t1_v1.../step_99` had no effect — the eval
+# evaluated the wrong checkpoints and produced a "v1 ≈ v0 equivalence"
+# finding that was nothing of the sort. Capture caller-supplied values
+# here, source .env, then restore.
+_CKPT_T1_2_CALLER="${CKPT_T1_2:-}"
+_CKPT_T1_3_CALLER="${CKPT_T1_3:-}"
 # shellcheck disable=SC1091
 source .env
+if [ -n "${_CKPT_T1_2_CALLER}" ]; then
+  CKPT_T1_2="${_CKPT_T1_2_CALLER}"
+fi
+if [ -n "${_CKPT_T1_3_CALLER}" ]; then
+  CKPT_T1_3="${_CKPT_T1_3_CALLER}"
+fi
+unset _CKPT_T1_2_CALLER _CKPT_T1_3_CALLER
 
 # --- Required env -----------------------------------------------------------
 : "${MLLMOPD_RUNS:?MLLMOPD_RUNS must be set}"
 : "${MLLMOPD_DATA:?MLLMOPD_DATA must be set}"
 : "${MMR1_3B_SFT_CKPT:?MMR1_3B_SFT_CKPT must be set (T1-0 baseline)}"
-: "${CKPT_T1_2:?CKPT_T1_2 must point at the T1-2 FullTeacher HF checkpoint (e.g. \${MLLMOPD_RUNS}/t1_v0_T1_2_full/ckpt/hf/step_250)}"
-: "${CKPT_T1_3:?CKPT_T1_3 must point at the T1-3 BlankTeacher HF checkpoint (e.g. \${MLLMOPD_RUNS}/t1_v0_T1_3_blank/ckpt/hf/step_250)}"
+: "${CKPT_T1_2:?CKPT_T1_2 must point at the T1-2 FullTeacher HF checkpoint (e.g. \${MLLMOPD_RUNS}/t1_v1_T1_2_full_mm/ckpt/hf/step_99)}"
+: "${CKPT_T1_3:?CKPT_T1_3 must point at the T1-3 BlankTeacher HF checkpoint (e.g. \${MLLMOPD_RUNS}/t1_v1_T1_3_blank_mm/ckpt/hf/step_99)}"
+
+# Echo the resolved checkpoints loudly so any future "wrong ckpt was
+# evaluated" bug is visible at the top of the launcher log. Don't trust
+# stdout alone — the audit pass dispatcher also writes the same paths
+# in each per-pass log (sglang server_args.model_path / jsonl row.model).
+echo ">>> CKPT_T1_2  resolved : ${CKPT_T1_2}"
+echo ">>> CKPT_T1_3  resolved : ${CKPT_T1_3}"
 
 # Fail fast if the checkpoints aren't there. Cheap; prevents 25 min of work
 # falling over on the second arm.

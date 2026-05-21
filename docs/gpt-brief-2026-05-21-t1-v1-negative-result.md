@@ -1,5 +1,39 @@
 # GPT review brief — T1 v1 negative result (2026-05-21)
 
+> ## ⚠️ INVALIDATED — Eval-side checkpoint-routing bug (caught 2026-05-21 evening, GPT round 2)
+>
+> A second GPT review of this brief caught that the eval artifact in this
+> brief did NOT actually evaluate the v1 step_99 checkpoints. The
+> per-pass logs in `runs/audit/t1_v0_eval_20260521-194955/T1_2_full.log`
+> explicitly show:
+>
+> ```
+> >>> launching sglang engine for /home/.../runs/t1_v0_T1_2_full/ckpt/hf/step_249
+> model_path='/home/.../runs/t1_v0_T1_2_full/ckpt/hf/step_249'
+> ```
+>
+> i.e. the eval evaluated the OLD v0 step_249 checkpoints (trained with
+> the broken text-only OPD bug), NOT the new v1 step_99 checkpoints
+> (trained with the verified MM pipeline). The "v1 ≈ v0 equivalence"
+> headline therefore reflects nothing more than "the eval evaluated v0
+> twice".
+>
+> **Root cause**: `scripts/audit/run_t1_eval.sh:73` sourced `.env` AFTER
+> the caller's interactive `export CKPT_T1_2=.../t1_v1_T1_2_full_mm/ckpt/hf/step_99`,
+> and `.env` carried v0 step_249 paths from an earlier session. The
+> source silently overwrote the caller's exports.
+>
+> **Fix shipped**: see follow-up commit. `run_t1_eval.sh` now captures
+> pre-existing CKPT_T1_2/3 before sourcing `.env` and restores them
+> afterward, plus echoes the resolved checkpoint paths to the launcher
+> stdout so any future routing mistake is visible at the top of the log.
+>
+> **Don't cite numbers in this brief**. The v1 training-side fixes
+> (--multimodal-keys + MLLMOPD_REQUIRE_MM guard + metadata.id) are
+> real and verified by training logs; but a fresh eval with the
+> resolution fix is required before any "MM-flowing OPD result"
+> conclusion is supportable. Re-run is in flight.
+
 T1 v0 was invalidated mid-review by a training-side multimodal pipeline
 bug (the launcher omitted `--multimodal-keys`; both arms trained
 text-only despite carrying images in the JSONL). v1 fixes that bug and
