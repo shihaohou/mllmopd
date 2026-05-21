@@ -236,10 +236,15 @@ if [ "${SKIP_PAIRED_VC:-0}" != "1" ] && [ "${SKIP_T1_0:-0}" != "1" ]; then
   echo "================================================================"
   echo "  Paired vision-critical: T1-2 (FullTeacher) vs T1-0 baseline"
   echo "================================================================"
+  # NOTE: --teacher/--student match the filename-derived arm label
+  # (jsonl stem minus _full/_blank/_text_only), NOT the ckpt basename.
+  # T1-2 and T1-3 both save HF as `step_249`; using basename here caused
+  # the second-loaded arm to overwrite the first in correct_map (silent
+  # bug, fixed 2026-05-21).
   python -m mllmopd.analysis.paired_vision_critical \
     --run_dir "${RUN_DIR}" \
-    --teacher "$(basename "${MMR1_3B_SFT_CKPT}")" \
-    --student "$(basename "${CKPT_T1_2}")" \
+    --teacher T1_0 \
+    --student T1_2 \
     --out-target-ids "${RUN_DIR}/opd_target_ids_T1_2_vs_T1_0.json"
 
   echo
@@ -248,8 +253,8 @@ if [ "${SKIP_PAIRED_VC:-0}" != "1" ] && [ "${SKIP_T1_0:-0}" != "1" ]; then
   echo "================================================================"
   python -m mllmopd.analysis.paired_vision_critical \
     --run_dir "${RUN_DIR}" \
-    --teacher "$(basename "${MMR1_3B_SFT_CKPT}")" \
-    --student "$(basename "${CKPT_T1_3}")" \
+    --teacher T1_0 \
+    --student T1_3 \
     --out-target-ids "${RUN_DIR}/opd_target_ids_T1_3_vs_T1_0.json"
 else
   echo ">>> paired_vision_critical skipped (SKIP_PAIRED_VC=${SKIP_PAIRED_VC:-0}, SKIP_T1_0=${SKIP_T1_0:-0})"

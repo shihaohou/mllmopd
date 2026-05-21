@@ -22,11 +22,23 @@ full-image cells (mean teacher-student gap on full = +6.8pt, on blank/text-only
 ≈ 0 to +2pt). If OPD can transfer the teacher's vision-conditioned advantage,
 the prompts in `opd_target` are where the signal is densest.
 
+Arm labels are derived from the jsonl filename's `<arm>_<mode>` stem
+(stripping `_full`/`_blank`/`_text_only`), so the `--teacher` / `--student`
+substrings must match the filename arm, NOT the ckpt path basename:
+
+    level1_v4_sysprompt_fixed:  Base_full.jsonl  →  Base
+                                S_full.jsonl     →  S
+                                T_RL_full.jsonl  →  T_RL
+
+    t1_v0_eval_*:               T1_0_full.jsonl  →  T1_0
+                                T1_2_full.jsonl  →  T1_2
+                                T1_3_full.jsonl  →  T1_3
+
 Usage:
     python -m mllmopd.analysis.paired_vision_critical \\
         --run_dir runs/audit/level1_v4_sysprompt_fixed \\
-        --teacher MMR1-7B-RL \\
-        --student MMR1-3B-SFT \\
+        --teacher T_RL \\
+        --student S \\
         [--out-target-ids paired_opd_targets.json]
 """
 
@@ -60,21 +72,41 @@ def _model_label(model_path: str) -> str:
     return model_path.rstrip("/").split("/")[-1]
 
 
+def _arm_from_filename(jl_stem: str) -> str | None:
+    """Derive an arm/model label from the jsonl filename by stripping known
+    audit mode suffixes. Matches the audit dispatcher's `<arm>_<mode>.jsonl`
+    naming convention (`T1_2_full`, `S_blank`, `T_RL_text_only`, …).
+    Returns None if no suffix matches → caller should fall back to the row's
+    model-path basename."""
+    for suffix in ("_text_only", "_blank", "_full"):  # longest first
+        if jl_stem.endswith(suffix):
+            return jl_stem[: -len(suffix)]
+    return None
+
+
 def _load_correct_map(run_dir: Path) -> tuple[dict, list[str], list[str]]:
-    """Returns ({(model_label, mode, benchmark, id): is_correct}, models, benches)."""
+    """Returns ({(model_label, mode, benchmark, id): is_correct}, models, benches).
+
+    Model label is taken from the jsonl filename (stripping `_full`/`_blank`/
+    `_text_only` suffix). This is required when multiple arms share a ckpt
+    basename (e.g., T1-2 and T1-3 both saving to `ckpt/hf/step_249/`) —
+    using `_model_label(r["model"])` would collide and silently overwrite
+    one arm's data with the other's. Falls back to model-path basename for
+    jsonls that don't follow the audit naming convention."""
     correct_map: dict = {}
     models: set = set()
     benches: set = set()
     for jl in sorted(run_dir.glob("*.jsonl")):
         if jl.name == "summary.json":
             continue
+        file_arm = _arm_from_filename(jl.stem)
         with jl.open() as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 r = json.loads(line)
-                m = _model_label(r["model"])
+                m = file_arm if file_arm is not None else _model_label(r["model"])
                 models.add(m)
                 benches.add(r["benchmark"])
                 correct_map[(m, r["mode"], r["benchmark"], r["id"])] = _rescore_row(r)
@@ -123,9 +155,11 @@ def _bench_subsets(correct_map, teacher, student, bench):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run_dir", required=True, type=Path)
-    ap.add_argument("--teacher", default="MMR1-7B-RL",
-                    help="Substring matched against model path basename.")
-    ap.add_argument("--student", default="MMR1-3B-SFT")
+    ap.add_argument("--teacher", default="T_RL",
+                    help="Substring matched against the filename-derived arm "
+                         "label (jsonl stem minus _full/_blank/_text_only). "
+                         "For level1_v4_*: Base/S/T_RL. For t1_v0_eval_*: T1_0/T1_2/T1_3.")
+    ap.add_argument("--student", default="S")
     ap.add_argument("--out-target-ids", type=Path, default=None,
                     help="Optional path: dump opd_target ids per benchmark as JSON.")
     args = ap.parse_args()
