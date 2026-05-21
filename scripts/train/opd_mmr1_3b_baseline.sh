@@ -335,23 +335,32 @@ EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
 OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
 ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
-# Memory-driven cap. Three attempts so far:
+# Memory-driven cap. History:
 #   v0 default 2048 → ran, but train-eval mismatch (eval cap=4096) and
-#       truncated MathVision's natural distribution (base avg=2559).
-#   v1 first try 8192 → OOM. Single 8192-token response monopolizes its
-#       micro-batch and per-sequence backward state exceeds budget.
-#   v1 second try 6144 → still OOM. memsnap: logits=(1, 6400, V) fp32 +
-#       non-in-place logits.div(temperature) in get_responses() at
-#       miles/backends/training_utils/loss.py:81 creates a second 3.9 GiB
-#       fp32 copy; CE peak hit 106 GiB on 140 GiB H800.
-# v1 final: 4096. Matches the eval cap exactly — fully resolves the
-# v0 train-eval mismatch, which was the original motivation for bumping.
-# Memory budget under 4096 single-sample is ~70-80 GiB peak, with margin
-# for the early-training step-0 worst case. Both arms share the same cap
-# so FullTeacher vs BlankTeacher comparison stays fair. If a later v1.5
-# experiment wants to test "did response cap matter?" run it as a focused
-# ablation (e.g., 6144 + ZeRO-2) — don't mix it into v1.
+#       truncated MathVision's natural distribution.
+#   v1 try 8192 → OOM (single sample monopolizes micro-batch).
+#   v1 try 6144 → still OOM (logits.div copy + backward state at 106/140 GiB).
+#   v1 final 4096 → ran to step ~148 OOM (response length grew over
+#       training; step_99 ckpt usable).
+# v1.5: keep cap at 4096 (proven safe) and stack TWO additive safety
+# levers on top so the long-tail tail is double-mitigated:
+#   (a) patch_uni_opd.sh P10 — in-place logits.div_() saves ~4 GiB at CE
+#       peak (no behavior change, the old non-in-place div was wasteful).
+#   (b) ROLLOUT_STOP="</answer>" cuts the post-answer continuation. v0
+#       audit showed 94% of T1-2/T1-3 outputs already end with
+#       `</answer>`; the remaining 6% no-close cases are the
+#       OOM-triggering tail.
+# Both levers are non-experimental — same cap on both arms, same stop on
+# both arms — so FullTeacher vs BlankTeacher comparison stays fair.
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
+
+# Stop string: when the student emits this exact sequence, sglang halts
+# generation. v0 audit on T1-2/T1-3 outputs showed `</answer>` closes
+# 94% of all responses; cutting the post-close 6% long-tail saves both
+# wallclock and memory peak without changing the meaningful content of
+# any response. Comma-separated list (sglang accepts multiple). Disable
+# by passing ROLLOUT_STOP="".
+ROLLOUT_STOP="${ROLLOUT_STOP:-</answer>}"
 
 # --- Parallelism (8-GPU host; teacher already binds GPU 0) ---
 # Megatron requires GBS % (MICRO_BATCH_SIZE * DP) == 0 where DP = N_GPU / TP.
@@ -502,6 +511,17 @@ ROLLOUT_ARGS=(
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
   --balance-data
 )
+
+# Long-tail stop string. miles' sglang_rollout.py (line 57/511) forwards
+# args.rollout_stop into sglang's sampling_params.stop. v1 audit showed
+# `</answer>` closes 94% of T1-2/T1-3 outputs; the remaining 6%
+# uncapped long-tail caused the v1 step_148 OOM. Letting sglang
+# truncate at the closing tag eliminates that tail without touching the
+# meaningful response content. Same stop on both arms — comparison fair.
+if [ -n "${ROLLOUT_STOP}" ]; then
+  ROLLOUT_ARGS+=(--rollout-stop "${ROLLOUT_STOP}")
+  echo ">>> rollout stop string : ${ROLLOUT_STOP}"
+fi
 
 # Step-cap selector: --num-rollout takes precedence in miles' arg parser
 # (see third_party/Uni-OPD/miles/miles/utils/arguments.py:1931-1939).

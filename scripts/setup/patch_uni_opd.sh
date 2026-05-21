@@ -609,6 +609,53 @@ else
   echo ">>> ${LOSS}: skipped (file not found for memsnap patch)"
 fi
 
+# --- Patch P10: in-place logits.div_(temperature) in get_responses -----
+# v1 trainer OOM root cause beyond max-tokens-per-gpu: get_responses() at
+# loss.py:81 does `logits = logits.div(args.rollout_temperature)` which
+# creates a NEW fp32 tensor instead of scaling in place. For a packed
+# [T~=6800, V=151936] fp32 tensor that's an extra ~4 GiB at peak — over
+# many CE chunks plus backward state, it pushed v1 step ~148 over the
+# 140 GiB H800 ceiling. In-place div_() removes the copy entirely with
+# zero behavior change (the original tensor isn't referenced after this
+# point — `logits` is rebound to the result of div_, slices below take
+# views of it). 1-character patch (`.div(` → `.div_(`). Sentinel-
+# idempotent via a comment marker.
+LOSS_FILE="${MILES_DIR}/miles/backends/training_utils/loss.py"
+LOSS_INPLACE_SENTINEL="# === mllmopd P10 inplace div ==="
+if [ ! -f "${LOSS_FILE}" ]; then
+  echo ">>> P10: ${LOSS_FILE} not found, skipping"
+elif grep -q "${LOSS_INPLACE_SENTINEL}" "${LOSS_FILE}"; then
+  echo ">>> P10: ${LOSS_FILE} already patched (in-place div sentinel present)"
+else
+  echo ">>> patching ${LOSS_FILE}: get_responses logits.div → div_ (in-place)"
+  export MLLMOPD_PATCH_LOSS_INPLACE_PATH="${LOSS_FILE}"
+  python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_INPLACE_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Match the exact line. If miles refactors get_responses, this assert
+# fires loudly instead of silently doing nothing.
+anchor = "    logits = logits.div(args.rollout_temperature)"
+replacement = (
+    "    # === mllmopd P10 inplace div ===\n"
+    "    # In-place div_() avoids the ~4 GiB fp32 copy of [T, V] logits\n"
+    "    # that v1 step_148 OOM'd on. See docs/handoff-2026-05-20-oom-resolved\n"
+    "    # and t1_v1 retrain diary. Behavior identical: the original\n"
+    "    # tensor isn't referenced after this point.\n"
+    "    logits = logits.div_(args.rollout_temperature)"
+)
+if anchor not in src:
+    sys.exit(f"ERROR: anchor for P10 not found in {path!r}; get_responses may have moved")
+new_src = src.replace(anchor, replacement, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    in-place div_() patch applied")
+PY
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
