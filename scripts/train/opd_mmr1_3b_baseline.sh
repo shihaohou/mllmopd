@@ -329,17 +329,23 @@ EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
 OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
 ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
-# v0 used 2048 → train-eval mismatch (eval uses 4096) + truncated MathVision's
-# natural distribution (MMR1-3B-SFT MathVision avg=2559 tokens, hitmax 77% at
-# the 4096 eval cap). v1 first attempt at 8192 OOM'd on the trainer: even
-# though --max-tokens-per-gpu still caps packed tokens at 8192, a single
-# 8192-token response monopolizes a micro-batch and its per-sequence
-# attention/backward state peaks higher than four packed 2048-token sequences
-# at the same packed length. 6144 (GPT review recommendation) truncates only
-# the p95-p99 long-tail responses, keeps the two-arm comparison fair (both
-# arms use the same cap), and stays well above the 4096 eval cap. Don't
-# bump --max-tokens-per-gpu past 8192 in tandem — that's the v11 OOM driver.
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-6144}"
+# Memory-driven cap. Three attempts so far:
+#   v0 default 2048 → ran, but train-eval mismatch (eval cap=4096) and
+#       truncated MathVision's natural distribution (base avg=2559).
+#   v1 first try 8192 → OOM. Single 8192-token response monopolizes its
+#       micro-batch and per-sequence backward state exceeds budget.
+#   v1 second try 6144 → still OOM. memsnap: logits=(1, 6400, V) fp32 +
+#       non-in-place logits.div(temperature) in get_responses() at
+#       miles/backends/training_utils/loss.py:81 creates a second 3.9 GiB
+#       fp32 copy; CE peak hit 106 GiB on 140 GiB H800.
+# v1 final: 4096. Matches the eval cap exactly — fully resolves the
+# v0 train-eval mismatch, which was the original motivation for bumping.
+# Memory budget under 4096 single-sample is ~70-80 GiB peak, with margin
+# for the early-training step-0 worst case. Both arms share the same cap
+# so FullTeacher vs BlankTeacher comparison stays fair. If a later v1.5
+# experiment wants to test "did response cap matter?" run it as a focused
+# ablation (e.g., 6144 + ZeRO-2) — don't mix it into v1.
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
 
 # --- Parallelism (8-GPU host; teacher already binds GPU 0) ---
 # Megatron requires GBS % (MICRO_BATCH_SIZE * DP) == 0 where DP = N_GPU / TP.
