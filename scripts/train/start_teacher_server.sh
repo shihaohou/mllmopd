@@ -47,11 +47,10 @@ source .env
 # outbound internet. sglang's startup self-warmup curls 127.0.0.1:${port}/
 # model_info; requests respects the proxy env var and routes the loopback
 # call through the squid, which returns 502 → assert fails → sglang exits
-# (shows up as "Killed" in the parent shell). Strip proxies for this process
-# and add loopback + intranet to NO_PROXY for any child that re-reads them.
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-export NO_PROXY="localhost,127.0.0.1,0.0.0.0,10.0.0.0/8,${NO_PROXY:-}"
-export no_proxy="${NO_PROXY}"
+# (shows up as "Killed" in the parent shell). User's canonical fix on this
+# box is to unset the three vars below (lowercase only; uppercase isn't set
+# on this image).
+unset -v http_proxy https_proxy no_proxy
 
 # Prepend NGC CUDA forward-compat lib to LD_LIBRARY_PATH. Driver 535 +
 # cu128 runtime need it; the path is sometimes missing from the env Ray
