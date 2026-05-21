@@ -241,3 +241,63 @@ That call returns the **compile-time** `NCCL_VERSION_CODE` macro baked into `lib
 
 ### Cost of getting this wrong
 ~6 hours in session 2026-05-19/20. The misleading "CUDA driver insufficient" message sent us down ~10 wrong hypotheses (driver version, cuda-compat layer, torch_memory_saver hook, LD_LIBRARY_PATH ordering, placement-group misconfig, NCCL env plugin, ...). All real but secondary. The proximate cause was the bare-pip footgun corrupting the install location. The `ldd torch._C | grep nccl` check would have closed it in 30 seconds.
+
+---
+
+## E6. `hostname -I` picks an unroutable NIC on the H800 train container
+
+**Symptom**: cross-box `teacher_server_list.json` ends up registering a URL like `http://26.2.224.21:30000/generate` that the student box can't reach (timeout / no route from the peer).
+
+**Root cause**: the H800 train container has multiple NICs. `hostname -I | awk '{print $1}'` returns them in an order that puts an **overlay address** (`26.2.x.x` on this image) before the actual intranet IP (`10.86.16.x`). The overlay is **not routable from peer boxes in the cluster**; only the `10.86.16.x` address is. Any script that uses `hostname -I` to "discover its own IP" silently picks the wrong one.
+
+Sister trap: the container is slim and **does not ship iproute2** — `ip` is not on PATH — so the obvious fallback (`ip route get <peer>`) also fails silently.
+
+**Fix**: pass `STUDENT_IP=<peer-ip>` to `scripts/train/start_teacher_server.sh`. The script tries `ip route get` first, falls back to a Python `socket.SOCK_DGRAM + connect(peer,1) + getsockname()` trick that works without iproute2 (commits `c513d74`, `92f2b48`). Or pass `TEACHER_ADVERTISE_HOST=<explicit-ip>` to override entirely. Don't bake IPs into `.env`; the box pair changes between experiments.
+
+**Discrimination tip**: after launch, `cat third_party/Uni-OPD/miles/Uni_OPD_utils/OPD_reward/teacher_server_list.json` — the `servers` URL must contain a routable IP, not `localhost` and not `26.x.x.x`.
+
+---
+
+## E7. `http_proxy` reroutes sglang's self-warmup through an overseas squid → 502 → "Killed"
+
+**Symptom**: sglang starts, `Uvicorn running on http://0.0.0.0:30000` appears, then minutes later in the log:
+```
+AssertionError: res=<Response [502]>, res.text='... 502 Bad Gateway ...
+  Server: oversea-squid1.jp.txyun ...'
+Killed
+```
+Parent shell shows `Killed`, easily misread as OOM — but the process exited on a failed `assert` in `_execute_server_warmup`, not via SIGKILL from oom-killer.
+
+**Root cause**: the H800 train container ships `http_proxy` / `https_proxy` env vars pointing at `oversea-squid1.jp.txyun:11080` for outbound pip / HF Hub access. sglang's startup self-warmup curls `http://127.0.0.1:30000/model_info`; `requests` (and most python HTTP libs) respect the proxy env var **even for loopback**, route the call through the squid, the squid can't reach `127.0.0.1` from Tokyo and returns 502, warmup asserts, sglang exits.
+
+Same trap can bite Ray dashboard polls and any process that hits its own local HTTP endpoint.
+
+**Fix**: unset the proxies before launching any local HTTP server (canonical form per project preference):
+```bash
+unset -v http_proxy https_proxy no_proxy
+```
+Lowercase only — the uppercase variants are not set on this image. `scripts/train/start_teacher_server.sh` does this internally as of commit `899720e`, so cross-box launches via that script are immune. `opd_mmr1_3b_baseline.sh` already had its own variant. Bare `curl` calls from your interactive shell still need the unset if you've sourced the container's default env.
+
+---
+
+## E8. `OPD_RUN_NAME` collision → `OptimizerParamScheduler` assert
+
+**Symptom**: Ray actor init crashes during checkpoint load:
+```
+AssertionError: OptimizerParamScheduler: class input value 40 and
+  checkpointvalue 320 for warmup iterations do not match
+```
+Trace ends in `megatron/core/optimizer_param_scheduler.py:240 _check_and_set`, called from `load_state_dict` inside `miles/.../checkpoint.py:load_checkpoint`.
+
+**Root cause**: `scripts/train/opd_mmr1_3b_baseline.sh` auto-detects "resume vs fresh" at line ~441 by checking whether `$CKPT_DIR` is non-empty. If a previous run with the same `OPD_RUN_NAME` left any `iter_*` checkpoint behind (even from a half-finished smoke), the new run silently switches to resume mode and `--load`s the old ckpt — which carries the old `lr_warmup_iters` (and other Megatron scheduler params) inside `state_dict['opt_param_scheduler']`. When the new config doesn't match, Megatron's strict checker asserts.
+
+Common trigger: smoke ran with `DEBUG_MODE=1 RBS=1` and saved at step 50; the operator then re-launches full (`RBS=8`, default `OPD_RUN_NAME`), and the actor dies before training starts.
+
+**Fix**: use a distinct `OPD_RUN_NAME=` per config change (smoke vs full, single-box vs cross-box, ...) — that gives each its own `CKPT_DIR` and forces the script down the fresh-HF-bridge path. Or `rm -rf "${MLLMOPD_RUNS}/${OPD_RUN_NAME}"` if the previous run truly has no value. Don't change `LR_WARMUP` mid-stream on the same `OPD_RUN_NAME` unless you genuinely mean to resume the schedule.
+
+**Discrimination tip**: the script prints one of these at launch time —
+```
+>>> --load (fresh run, HF bridge): /path/to/MMR1-3B-SFT      ← good, fresh
+>>> --load (resume): /path/to/runs/<name>/ckpt               ← will assert if config differs
+```
+If you see "resume" but didn't intend to, stop and pick a new `OPD_RUN_NAME`.
