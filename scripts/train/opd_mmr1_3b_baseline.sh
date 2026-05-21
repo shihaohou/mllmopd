@@ -575,18 +575,18 @@ PERF_ARGS=(
   --use-dynamic-batch-size
   # Packed-token cap evolution:
   #   v0 32k: original default. OOM at fp32 [1,16k,V]=9.3 GiB logits.
-  #   v11 8k: GPT diag Q1 fix. Worked for v0/v1 at response_len=2048.
-  #   v1.5 6k: T1-2 step ~148 OOM with cap=8k showed packed batches
-  #            commonly hitting 7000-7700 (e.g. 4 mid-length samples
-  #            packing together). pre_ce alloc_gib 80-87 GiB + ~20 GiB
-  #            CE-related forward+backward state pushed peak over 107
-  #            GiB / 140 GiB ceiling. 6144 caps the packed worst case
-  #            (single sample ≤ 4096 fits with headroom; pack of 2-3
-  #            medium samples fits without crossing fp32-logits/backward
-  #            buffer cliff). fp32 logits peak: [1,6144,V]=3.5 GiB (vs
-  #            4.7 GiB at 8k cap). Trade-off: more micro-batches per opt
-  #            step (~30-50% slower wall clock) but no more random OOM.
-  --max-tokens-per-gpu 6144
+  #   v11 8k:  GPT diag Q1 fix. Worked at response_len=2048.
+  #   v1.5 8k: with response_len=4096, mid-length samples (~1500 ea)
+  #            packed 4-at-a-time → packed length 7600+ at alloc_gib 87
+  #            GiB → CE step OOM with 4.35 GiB needed on near-full GPU.
+  #   v1.5b 4k: HARD cap below all known-OOM packed configs. fp32 logits
+  #            peak [1,4096,V]=2.4 GiB (vs 4.7 GiB at 8k, and STRICTLY
+  #            smaller than v11's known-safe peak). max single sample
+  #            (3072 response + ~500-800 prompt incl. image tokens
+  #            ≈ 3800) fits alone in 4096 cap. Short samples pack 3-4
+  #            per micro-batch. ~4 micro-batches/opt-step (vs ~2 at 8k
+  #            cap) → ~30-50% slower wall clock. Acceptable for not OOMing.
+  --max-tokens-per-gpu 4096
 )
 
 # Smoke #21 + T1-2 OOM #3+#7 root cause (docs/gpt-diagnosis-v7-update):
