@@ -254,7 +254,14 @@ TRAIN_JSONL="${TRAIN_JSONL:-data/opd_train/v0_2k/train.jsonl}"
 STUDENT_CKPT="${STUDENT_CKPT:-${MMR1_3B_SFT_CKPT}}"
 TEACHER_NAME="${TEACHER_NAME:-MMR1-7B-RL}"
 TEACHER_PORT="${TEACHER_PORT:-30000}"
-TEACHER_INFO_URL="http://localhost:${TEACHER_PORT}/get_model_info"
+# Cross-box: override TEACHER_HOST=10.86.x.x at the call site to hit a
+# teacher running on a different machine. Default localhost preserves
+# single-box behavior. Reward worker reads servers list from
+# teacher_server_list.json (already cross-box if start_teacher_server.sh
+# was invoked with TEACHER_ADVERTISE_HOST=...); this URL is just the
+# pre-flight liveness probe.
+TEACHER_HOST="${TEACHER_HOST:-localhost}"
+TEACHER_INFO_URL="${TEACHER_INFO_URL:-http://${TEACHER_HOST}:${TEACHER_PORT}/get_model_info}"
 
 if [ ! -f "${TRAIN_JSONL}" ]; then
   echo "ERROR: training JSONL not found at ${TRAIN_JSONL}" >&2
