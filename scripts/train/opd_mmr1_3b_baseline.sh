@@ -589,6 +589,24 @@ TENSORBOARD_ARGS=(
   --tensorboard-dir "${TENSORBOARD_DIR}"
 )
 
+# wandb is opt-in: only enabled when WANDB_API_KEY is non-empty in .env or
+# the calling shell. Group name = OPD_RUN_NAME with random-suffix disabled,
+# so the wandb run matches the on-disk run dir 1:1.
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ]; then
+  WANDB_ARGS=(
+    --use-wandb
+    --wandb-key "${WANDB_API_KEY}"
+    --wandb-project "${WANDB_PROJECT:-mllmopd}"
+    --wandb-group "${OPD_RUN_NAME}"
+    --disable-wandb-random-suffix
+  )
+  [ -n "${WANDB_ENTITY:-}" ] && WANDB_ARGS+=(--wandb-team "${WANDB_ENTITY}")
+  echo ">>> wandb enabled : project=${WANDB_PROJECT:-mllmopd}  group=${OPD_RUN_NAME}"
+else
+  echo ">>> wandb skipped (set WANDB_API_KEY in .env to enable)"
+fi
+
 MISC_ARGS=(
   --attention-dropout 0.0
   --hidden-dropout 0.0
@@ -751,6 +769,7 @@ python "${LAUNCHER_SCRIPT}" train.py \
     --rollout-num-gpus "${ROLLOUT_NUM_GPUS}" \
     "${TRAIN_ENV_ARGS[@]}" \
     "${TENSORBOARD_ARGS[@]}" \
+    "${WANDB_ARGS[@]}" \
     "${OPTIMIZER_ARGS[@]}" \
     "${ROLLOUT_ARGS[@]}" \
     "${SGLANG_ARGS[@]}" \
@@ -768,5 +787,8 @@ echo
 echo ">>> T1 arm ${ARM_TAG} done. Outputs:"
 echo "    checkpoints : ${CKPT_DIR}"
 echo "    tensorboard : ${TENSORBOARD_DIR}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+  echo "    wandb       : project=${WANDB_PROJECT:-mllmopd}  group=${OPD_RUN_NAME}  (grep TRAIN_LOG_FILE for full URL)"
+fi
 echo "    diagnostics : ${EXPERIMENT_DIR}/diagnostics"
 echo "    train log   : ${TRAIN_LOG_FILE}"
