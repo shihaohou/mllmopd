@@ -329,7 +329,15 @@ EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
 OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
 ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-2048}"
+# v0 used 2048 → train-eval mismatch (eval uses 4096) + truncated MathVision's
+# natural distribution (MMR1-3B-SFT MathVision avg=2559 tokens, hitmax 77% at
+# the 4096 eval cap). Bumped to 8192 for v1 so long CoT responses train
+# unimpeded. Memory budget unchanged: --max-tokens-per-gpu still 8192, so
+# packed-tokens-per-CE-call (the dominant fp32 logits driver, ~4.6 GiB) is
+# unchanged — a single 8192-token response just monopolizes one micro-batch
+# instead of packing with shorter siblings. Total micro-batches per opt step
+# rises modestly; per-step wallclock ~30-50% longer.
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-8192}"
 
 # --- Parallelism (8-GPU host; teacher already binds GPU 0) ---
 # Megatron requires GBS % (MICRO_BATCH_SIZE * DP) == 0 where DP = N_GPU / TP.
