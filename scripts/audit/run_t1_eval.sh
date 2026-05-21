@@ -113,7 +113,12 @@ for ck in "${MMR1_3B_SFT_CKPT}" "${CKPT_T1_2}" "${CKPT_T1_3}"; do
   fi
 done
 
-RUN_ID="${RUN_ID:-t1_v0_eval_$(date +%Y%m%d-%H%M%S)}"
+# Default to a neutral t1_eval_* prefix. The version prefix (v0/v1/v2…)
+# now lives in the training run name and the CKPT_T1_2/3 paths, not in
+# the eval RUN_ID. For experiments where the eval output dir should
+# carry an explicit version tag, pass RUN_ID at the call site, e.g.
+# `RUN_ID=t1_v1_eval_step99_$(date +%Y%m%d-%H%M%S)`.
+RUN_ID="${RUN_ID:-t1_eval_$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${MLLMOPD_RUNS}/audit/${RUN_ID}"
 mkdir -p "${RUN_DIR}"
 
