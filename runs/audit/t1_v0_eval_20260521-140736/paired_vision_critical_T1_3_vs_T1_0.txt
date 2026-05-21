@@ -1,0 +1,29 @@
+>>> loaded 10800 (model,mode,bench,id) cells from runs/audit/t1_v0_eval_20260521-140736
+>>> teacher = T1_0
+>>> student = T1_3
+>>> benches = ['ChartQA', 'HallusionBench', 'MathVerse', 'MathVision', 'MathVista', 'POPE_adversarial']
+
+benchmark             n  T_acc  S_acc  VC[T]  VC[S]  T_adv  OPD_t  PureV
+------------------------------------------------------------------------
+ChartQA             200  0.685  0.765    128    140      8      7      6
+HallusionBench      200  0.625  0.620     63     54     25     16     11
+MathVerse           200  0.310  0.285     40     38     25     18     17
+MathVision          200  0.195  0.175     26     19     22     15     11
+MathVista           200  0.610  0.630     65     71     17     12     11
+POPE_adversarial    200  0.880  0.880     78     78      4      2      1
+------------------------------------------------------------------------
+TOTAL              1200                   400    400    101     70     57
+
+Legend:
+  n              = prompts with valid scores in ALL of (T_full, T_blank, S_full, S_blank).
+  T_acc / S_acc  = teacher / student full_image accuracy on `n`.
+  VC[T] / VC[S]  = vision-critical for teacher/student: full=correct AND blank=wrong.
+  T_adv          = teacher advantage: T_full=correct AND S_full=wrong.
+  OPD_t          = OPD target = VC[T] ∩ T_adv (teacher's vision win that student misses).
+  PureV          = pure vision-conditioned: T_full=✓, T_blank=✗, T_text_only=✗, AND in T_adv.
+
+Interpretation key:
+  - If OPD_t / T_adv is HIGH, most of the teacher's wins over student are visual:
+    vanilla OPD's job is to transfer that visual-conditioned capability.
+  - If OPD_t / T_adv is LOW, teacher's advantage is mostly language-prior:
+    vanilla OPD might transfer that easily, but the visual story is weaker.
