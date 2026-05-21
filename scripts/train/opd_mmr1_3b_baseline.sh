@@ -435,12 +435,26 @@ print(json.dumps({
     "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR": "",
     "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
     "NCCL_ENV_PLUGIN": os.environ.get("NCCL_ENV_PLUGIN", "none"),
-    # Strip proxy from actor env so actor → local sglang HTTP calls
-    # don't get squid-502'd (see launcher comment by "smoke #19").
-    "http_proxy": "",
-    "https_proxy": "",
-    "HTTP_PROXY": "",
-    "HTTPS_PROXY": "",
+    # Proxy propagation to Ray actor (parallel to the parent-shell logic
+    # near smoke #19 comment block). Default: strip (sglang local 502
+    # safety). MLLMOPD_KEEP_PROXY=1: propagate parent's proxy so wandb
+    # inside the actor can reach api.wandb.ai. Relies on no_proxy to
+    # keep intranet 10.x bypassing. Both branches always set no_proxy.
+    **(
+        {
+            "http_proxy": os.environ.get("http_proxy", ""),
+            "https_proxy": os.environ.get("https_proxy", ""),
+            "HTTP_PROXY": os.environ.get("HTTP_PROXY", ""),
+            "HTTPS_PROXY": os.environ.get("HTTPS_PROXY", ""),
+        }
+        if os.environ.get("MLLMOPD_KEEP_PROXY", "0") == "1"
+        else {
+            "http_proxy": "",
+            "https_proxy": "",
+            "HTTP_PROXY": "",
+            "HTTPS_PROXY": "",
+        }
+    ),
     "no_proxy": os.environ.get("no_proxy", ""),
     "NO_PROXY": os.environ.get("NO_PROXY", ""),
     # v11 memsnap envs — propagate to Ray actors so memsnap.py + P9 fire
