@@ -1,9 +1,38 @@
 # GPT review brief — T1 negative result (2026-05-21)
 
-Three-layer evidence converges on a negative answer for the "vision-conditioned
-capability transfer" hypothesis. Asking for a second-opinion sanity check on
-the design, the interpretation, and the open questions before we lock the
-result in.
+> ## ⚠️ INVALIDATED — Training-side pipeline bug (caught 2026-05-21 evening)
+>
+> GPT review of this brief surfaced a suspected training-side bug. **Verified
+> conclusively by training-log inspection**:
+>
+> ```text
+> T1-2 (FullTeacher)  MMR1-7B-RL: 2000 (multimodal: 0, text_only: 2000)
+> T1-3 (BlankTeacher) MMR1-7B-RL: 2000 (multimodal: 0, text_only: 2000)
+> ```
+>
+> Launcher `scripts/train/opd_mmr1_3b_baseline.sh` omitted `--multimodal-keys`,
+> causing miles' Dataset (`third_party/Uni-OPD/miles/miles/utils/data.py:324`,
+> `has_mm = multimodal_keys and any(...) = False`) to silently set every
+> sample's `multimodal_inputs = None`. Downstream: rollout payload had no
+> `image_data`, `rm_manager.build_payload(sample)` had no `image_data`, and
+> `make_blank_image_data(sample)` returned `[]` on its early-empty branch.
+>
+> **Net effect**: FullTeacher and BlankTeacher arms received mathematically
+> identical training signal (both text-only). The "Δ ≈ 0" three-layer
+> convergence in this brief is a tautological consequence of identical
+> training, NOT a "vision-conditioning invariance" finding.
+>
+> The +40-45pp recovery on opd_target is real but reflects text-only OPD
+> on a VLM-eval setup — the student's frozen vision encoder did all the
+> visual work at eval time; OPD only updated language-side weights.
+>
+> **Fix shipped**: commit `76c1ec5` adds `--multimodal-keys '{"image":"images"}'`
+> to ROLLOUT_ARGS and a `MLLMOPD_REQUIRE_MM=1` per-sample assert in
+> `dual_teacher_get_reward.py`. T1 will be re-run as v1 once the fix is
+> verified by a smoke pass.
+>
+> **Don't cite numbers in this brief**. Leave it for historical record of
+> the diagnostic chain; a fresh brief will follow once T1 v1 results are in.
 
 ## TL;DR
 
