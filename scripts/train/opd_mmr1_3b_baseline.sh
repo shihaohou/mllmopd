@@ -323,6 +323,12 @@ ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 SAMPLE_N="${SAMPLE_N:-8}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-$((ROLLOUT_BATCH_SIZE * SAMPLE_N))}"
 NUM_EPOCH="${NUM_EPOCH:-1}"
+# Direct step cap override. When set, takes precedence over NUM_EPOCH
+# (miles drops --num-epoch when --num-rollout is also passed). Use for
+# fast A/B ablations (e.g., NUM_ROLLOUT=100 for a quick 100-step probe
+# instead of the full 2000/8=250-step main run). Empty/unset = follow
+# NUM_EPOCH × dataset_size / rollout_batch_size as usual.
+NUM_ROLLOUT="${NUM_ROLLOUT:-}"
 LR="${LR:-1e-6}"
 LR_WARMUP="${LR_WARMUP:-5}"
 EPS_CLIP="${EPS_CLIP:-0.2}"
@@ -488,7 +494,6 @@ ROLLOUT_ARGS=(
   --multimodal-keys '{"image":"images"}'
   --apply-chat-template
   --rollout-shuffle
-  --num-epoch "${NUM_EPOCH}"
   --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
   --n-samples-per-prompt "${SAMPLE_N}"
   --rollout-max-prompt-len "${ROLLOUT_MAX_PROMPT_LEN}"
@@ -497,6 +502,15 @@ ROLLOUT_ARGS=(
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
   --balance-data
 )
+
+# Step-cap selector: --num-rollout takes precedence in miles' arg parser
+# (see third_party/Uni-OPD/miles/miles/utils/arguments.py:1931-1939).
+if [ -n "${NUM_ROLLOUT}" ]; then
+  ROLLOUT_ARGS+=(--num-rollout "${NUM_ROLLOUT}")
+  echo ">>> step cap: --num-rollout ${NUM_ROLLOUT} (overrides --num-epoch)"
+else
+  ROLLOUT_ARGS+=(--num-epoch "${NUM_EPOCH}")
+fi
 
 # T1 plan §4: disable Uni-OPD's improvements on top of vanilla OPD.
 # These flags exist to NOT pass them (no margin shift, no margin mask,
