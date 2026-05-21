@@ -335,24 +335,18 @@ EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
 OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
 ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
-# Memory-driven cap. History:
-#   v0 default 2048 → ran, but train-eval mismatch (eval cap=4096) and
-#       truncated MathVision's natural distribution.
-#   v1 try 8192 → OOM (single sample monopolizes micro-batch).
-#   v1 try 6144 → still OOM (logits.div copy + backward state at 106/140 GiB).
-#   v1 final 4096 → ran to step ~148 OOM (response length grew over
-#       training; step_99 ckpt usable).
-# v1.5: keep cap at 4096 (proven safe) and stack TWO additive safety
-# levers on top so the long-tail tail is double-mitigated:
-#   (a) patch_uni_opd.sh P10 — in-place logits.div_() saves ~4 GiB at CE
-#       peak (no behavior change, the old non-in-place div was wasteful).
-#   (b) ROLLOUT_STOP="</answer>" cuts the post-answer continuation. v0
-#       audit showed 94% of T1-2/T1-3 outputs already end with
-#       `</answer>`; the remaining 6% no-close cases are the
-#       OOM-triggering tail.
-# Both levers are non-experimental — same cap on both arms, same stop on
-# both arms — so FullTeacher vs BlankTeacher comparison stays fair.
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
+# Response-length cap history:
+#   v0 default 2048 → train-eval mismatch.
+#   v1 try 8192 → OOM, try 6144 → OOM, settled 4096 → ran to step ~148 OOM.
+#   v1.5 4096 + in-place div_ + stop string → OOM again at step ~30
+#       because packing 4 mid-length samples (avg ~1500 each) into a
+#       7000+ packed micro-batch pushed CE peak over the cliff.
+#   v1.5b 3072 + lowered --max-tokens-per-gpu to 6144 → this version.
+# The operative lever is --max-tokens-per-gpu (packed cap, see PERF_ARGS
+# below); 3072 single-sample cap is belt-and-suspenders. Most responses
+# under stop string </answer> are far shorter; 3072 only truncates the
+# few real long-CoT outliers. Same caps on both arms — comparison fair.
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-3072}"
 
 # Stop string: when the student emits this exact sequence, sglang halts
 # generation. v0 audit on T1-2/T1-3 outputs showed `</answer>` closes
@@ -579,13 +573,20 @@ PERF_ARGS=(
   # CE chunk buffer (256→128) saves ~600 MiB at the peak.
   --log-probs-chunk-size "${LOG_PROBS_CHUNK_SIZE:-128}"
   --use-dynamic-batch-size
-  # v11: 16384 -> 8192 per GPT diag Q1 falsification test
-  # (docs/gpt-reply-2026-05-20-v10-update.md). Dynamic packing was making
-  # "MBS=1" a fiction: the actor_train peak packed up to 16k tokens which
-  # forced a fp32 [1, 16384, 151936] logits tensor (~9.3 GiB) plus
-  # backward-graph temporaries scaling linearly with T. Halving caps the
-  # per-rank packed-token peak; GBS=64 / MAX_RESPONSE_LEN=2048 unchanged.
-  --max-tokens-per-gpu 8192
+  # Packed-token cap evolution:
+  #   v0 32k: original default. OOM at fp32 [1,16k,V]=9.3 GiB logits.
+  #   v11 8k: GPT diag Q1 fix. Worked for v0/v1 at response_len=2048.
+  #   v1.5 6k: T1-2 step ~148 OOM with cap=8k showed packed batches
+  #            commonly hitting 7000-7700 (e.g. 4 mid-length samples
+  #            packing together). pre_ce alloc_gib 80-87 GiB + ~20 GiB
+  #            CE-related forward+backward state pushed peak over 107
+  #            GiB / 140 GiB ceiling. 6144 caps the packed worst case
+  #            (single sample ≤ 4096 fits with headroom; pack of 2-3
+  #            medium samples fits without crossing fp32-logits/backward
+  #            buffer cliff). fp32 logits peak: [1,6144,V]=3.5 GiB (vs
+  #            4.7 GiB at 8k cap). Trade-off: more micro-batches per opt
+  #            step (~30-50% slower wall clock) but no more random OOM.
+  --max-tokens-per-gpu 6144
 )
 
 # Smoke #21 + T1-2 OOM #3+#7 root cause (docs/gpt-diagnosis-v7-update):
