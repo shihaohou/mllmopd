@@ -387,6 +387,19 @@ def main() -> None:
                 "teacher_model": "MMR1-7B-RL",
                 "raw_problem": problem,
                 "source_row_idx": src_idx,
+                # miles Dataset reads metadata from the JSONL field named by
+                # --metadata-key (default "metadata"). Without this nested
+                # block, sample.metadata={} on every sample, and the OPD
+                # diagnostics hook (opd_diagnostics_hook.py:219) gets
+                # sample_id=None — breaking per-prompt aggregation of VD /
+                # lp_full / old_log_probs in downstream analysis. Top-level
+                # `id` above is kept for backward compat / human readability;
+                # `metadata.id` is the canonical training-side identifier.
+                "metadata": {
+                    "id": f"mmr1_rl_v0_{out_idx:06d}",
+                    "source_row_idx": src_idx,
+                    "teacher_model": "MMR1-7B-RL",
+                },
             }
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
             n_written += 1
