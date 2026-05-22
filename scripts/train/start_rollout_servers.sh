@@ -250,6 +250,19 @@ done
 
 echo ">>> ${ROLLOUT_NUM_ENGINES} engines spawning. Waiting for readiness..."
 
+# Optional: tail the engine logs while waiting (single-pane UX). Default
+# off because output gets noisy with N>1 engines (7 interleaved streams).
+# Recommended pattern: leave STREAM_LOGS unset and run
+#   tail -F $MLLMOPD_RUNS/rollout_servers/rollout_*.log
+# in a separate tmux pane.
+if [ "${STREAM_LOGS:-0}" = "1" ]; then
+  echo ">>> STREAM_LOGS=1 — tailing all engine logs (Ctrl-C to stop tail, engines stay up)"
+  tail -F "${LOG_DIR}"/rollout_*.log 2>/dev/null &
+  _TAIL_PID=$!
+  # Kill tail on script exit so engines stay running but tail stops cluttering.
+  trap "kill ${_TAIL_PID} 2>/dev/null || true" EXIT
+fi
+
 # Poll each engine's /get_model_info; collect addr list.
 ADDRS=()
 for i in $(seq 0 $((ROLLOUT_NUM_ENGINES - 1))); do
