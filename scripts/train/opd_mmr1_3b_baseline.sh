@@ -287,7 +287,23 @@ if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
 fi
 export MLLMOPD_USE_VD_WEIGHTING MLLMOPD_VD_TAU MLLMOPD_VD_BETA
 
-if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
+# Tier-2a off-policy KD overrides the arm tag — these runs train against
+# teacher completions stored in JSONL; the teacher's image_mode is
+# determined at gen time (encoded in the filename), not by
+# OPD_TEACHER_IMAGE_MODE. The arm name picks up which dataset feeds in
+# so run dirs / logs / wandb groups don't collide with the on-policy
+# T1_2_* / T1_3_* runs.
+if [ -n "${OPD_OFFLINE_KD_JSONL:-}" ]; then
+  case "${OPD_OFFLINE_KD_JSONL}" in
+    *blank*) ARM_TAG="T2A_offline_kd_blank" ;;
+    *full*)  ARM_TAG="T2A_offline_kd_full"  ;;
+    *)       ARM_TAG="T2A_offline_kd"       ;;
+  esac
+fi
+
+if [ -n "${OPD_OFFLINE_KD_JSONL:-}" ]; then
+  OPD_RUN_NAME_DEFAULT="t2a_v0_${ARM_TAG}"
+elif [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
   OPD_RUN_NAME_DEFAULT="t2_1_v0_${ARM_TAG}"
 else
   OPD_RUN_NAME_DEFAULT="t1_v0_${ARM_TAG}"
@@ -315,13 +331,22 @@ if [ ! -f "${TRAIN_JSONL}" ]; then
   exit 1
 fi
 
-# --- Pre-flight: teacher must be alive ---
-if ! curl -sf "${TEACHER_INFO_URL}" >/dev/null; then
-  echo "ERROR: teacher not reachable at ${TEACHER_INFO_URL}" >&2
-  echo "  start it first: bash scripts/train/start_teacher_server.sh" >&2
-  exit 1
+# --- Pre-flight: teacher must be alive (skipped in offline-KD mode) ---
+# Tier-2a off-policy KD reads teacher logprobs from JSONL; no live
+# teacher server is needed. The custom_generate_function also sets
+# sample.reward to a non-None dict, which keeps batched_async_rm from
+# firing — but the launcher's curl probe runs before the rollout
+# system loads, so we gate it explicitly here too.
+if [ -n "${OPD_OFFLINE_KD_JSONL:-}" ]; then
+  echo ">>> teacher preflight: SKIPPED (offline KD mode, OPD_OFFLINE_KD_JSONL set)"
+else
+  if ! curl -sf "${TEACHER_INFO_URL}" >/dev/null; then
+    echo "ERROR: teacher not reachable at ${TEACHER_INFO_URL}" >&2
+    echo "  start it first: bash scripts/train/start_teacher_server.sh" >&2
+    exit 1
+  fi
+  echo ">>> teacher OK at ${TEACHER_INFO_URL}"
 fi
-echo ">>> teacher OK at ${TEACHER_INFO_URL}"
 
 # --- Output dirs ---
 EXPERIMENT_DIR="${MLLMOPD_RUNS}/${OPD_RUN_NAME}"
