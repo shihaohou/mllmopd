@@ -174,12 +174,19 @@ async def _call_sglang(
             r = await client.post(endpoint, json=payload)
             r.raise_for_status()
             return r.json()
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError) as e:
+        except Exception as e:  # broaden: httpx subclasses don't all share a useful base
             last_err = e
             backoff = 2 ** attempt
+            # Some httpx exceptions (e.g. RemoteProtocolError on server-side
+            # disconnect during warmup) carry an empty str(). Use repr() so
+            # we always see the type + any args, and surface HTTP status if
+            # this is an HTTPStatusError.
+            detail = repr(e)
+            if isinstance(e, httpx.HTTPStatusError):
+                detail = f"{e.response.status_code} {e.response.reason_phrase}: {e.response.text[:200]}"
             logger.warning(
                 "sglang call failed (attempt %d/%d): %s; retry in %ds",
-                attempt + 1, max_retries, e, backoff,
+                attempt + 1, max_retries, detail, backoff,
             )
             await asyncio.sleep(backoff)
     assert last_err is not None
@@ -190,39 +197,50 @@ def _extract_completion(
     resp: dict[str, Any],
     sampling_params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Pull tokens + logprobs from SGLang's response. Field names per
-    third_party/sglang/python/sglang/srt/managers/io_struct.py.
+    """Pull tokens + logprobs from SGLang's HTTP response.
 
-    Note SGLang's output_top_logprobs_{val,idx} are parallel arrays:
-      val[t][k] = logprob of the k-th top token at position t
-      idx[t][k] = its vocabulary id
-    We collapse them into the more canonical [[token_id, logprob], ...]
-    so the downstream training loader doesn't have to know SGLang's
-    storage convention."""
+    Response schema (per third_party/sglang/python/sglang/srt/managers/
+    tokenizer_manager.py:1706-1740):
+      meta_info["output_token_logprobs"]:
+          List[Tuple[float, int, str|None]]   # (logprob, token_id, text|None)
+      meta_info["output_top_logprobs"]:
+          List[List[Tuple[float, int, str|None]] | None]
+              # per-position list of K alternatives; entry can be None if
+              # logprobs weren't requested at that position.
+    `return_text_in_logprobs` defaults to False so element [2] is None and
+    we drop it on extraction.
+
+    The `_val`/`_idx` fields seen in io_struct.py are the internal IPC
+    structure (BatchTokenIDOut) — not what the HTTP server emits."""
     text = resp["text"]
     meta = resp["meta_info"]
 
-    tok_val = meta["output_token_logprobs_val"]
-    tok_idx = meta["output_token_logprobs_idx"]
-    if len(tok_val) != len(tok_idx):
-        raise ValueError(
-            f"output_token_logprobs_{{val,idx}} length mismatch: "
-            f"{len(tok_val)} vs {len(tok_idx)}"
+    out_tok = meta.get("output_token_logprobs")
+    if out_tok is None:
+        raise KeyError(
+            f"sglang response missing `output_token_logprobs`. meta_info keys: "
+            f"{list(meta.keys())}"
         )
+    # Each element: (logprob, token_id, text|None)
+    completion_token_logprobs = [float(t[0]) for t in out_tok]
+    completion_token_ids = [int(t[1]) for t in out_tok]
 
-    top_val = meta.get("output_top_logprobs_val") or []
-    top_idx = meta.get("output_top_logprobs_idx") or []
+    out_top = meta.get("output_top_logprobs") or []
     top_pairs: list[list[list[float | int]]] = []
-    for v_at_t, i_at_t in zip(top_val, top_idx, strict=False):
-        # Each position contributes K (token_id, logprob) pairs.
-        top_pairs.append(
-            [[int(tid), float(lp)] for tid, lp in zip(i_at_t, v_at_t, strict=False)]
-        )
+    for top_at_pos in out_top:
+        if top_at_pos is None:
+            top_pairs.append([])
+        else:
+            # Sort by logprob desc for stable downstream consumption.
+            # SGLang already returns them sorted but we don't rely on it.
+            top_pairs.append(
+                [[int(t[1]), float(t[0])] for t in top_at_pos]
+            )
 
     return {
         "completion_text": text,
-        "completion_token_ids": [int(t) for t in tok_idx],
-        "completion_token_logprobs": [float(v) for v in tok_val],
+        "completion_token_ids": completion_token_ids,
+        "completion_token_logprobs": completion_token_logprobs,
         "completion_top_logprobs": top_pairs,
         "finish_reason": meta.get("finish_reason"),
         "sampling_params": sampling_params,
@@ -348,6 +366,39 @@ async def run(args: argparse.Namespace) -> None:
 
     try:
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+            # Warmup probe: one serial call against the first non-done prompt,
+            # so any slow first-time path (CUDA-graph capture, KV pre-alloc,
+            # vision encoder JIT) completes before the parallel storm. This
+            # avoids 200 simultaneous "attempt 1/3" retries during warmup.
+            first_idx = next(
+                (i for i in range(len(rows))
+                 if (str(rows[i]["id"]), 0) not in done),
+                None,
+            )
+            if first_idx is not None:
+                logger.info("warmup: probing teacher with prompt[%d]", first_idx)
+                t_warm = time.time()
+                row = rows[first_idx]
+                img = _load_image(row["images"][0])
+                if args.image_mode == "blank":
+                    img = _to_blank(img)
+                warmup_text = build_templated_text(tokenizer, row["problem"])
+                warmup_b64 = encode_image_b64(img)
+                try:
+                    _ = await _call_sglang(
+                        client, endpoint, warmup_text, warmup_b64,
+                        sampling_params, args.top_k_logprobs, max_retries=8,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "warmup probe failed after 8 retries (%.1fs). "
+                        "Teacher likely not actually serving /generate. "
+                        "Curl test: `curl -s %s/get_model_info`. detail=%r",
+                        time.time() - t_warm, args.teacher_endpoint, e,
+                    )
+                    raise
+                logger.info("warmup OK in %.1fs", time.time() - t_warm)
+
             tasks = [
                 _one(row, s)
                 for row in rows
