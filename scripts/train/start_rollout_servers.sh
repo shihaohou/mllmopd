@@ -77,7 +77,11 @@ done
 STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-${MMR1_3B_SFT_CKPT:?}}"
 ROLLOUT_NUM_ENGINES="${ROLLOUT_NUM_ENGINES:-7}"
 ROLLOUT_PORT_BASE="${ROLLOUT_PORT_BASE:-30001}"
-ROLLOUT_HOST="${ROLLOUT_HOST:-0.0.0.0}"
+# ROLLOUT_HOST default deferred until after ROLLOUT_ADVERTISE_HOST is
+# resolved below — we want sglang to bind to the EXACT advertised IP so
+# its self-reported `host` field matches what the trainer's
+# _init_external sanity check expects. Binding to 0.0.0.0 makes sglang
+# report host="0.0.0.0" which mismatches the addr file's "10.82.121.12".
 ROLLOUT_MEM_FRACTION="${ROLLOUT_MEM_FRACTION:-0.25}"
 ROLLOUT_MAX_TOTAL_TOKENS="${ROLLOUT_MAX_TOTAL_TOKENS:-200000}"
 ROLLOUT_MAX_RUNNING="${ROLLOUT_MAX_RUNNING:-32}"
@@ -132,6 +136,20 @@ PY
   fi
 fi
 ROLLOUT_ADVERTISE_HOST="${ROLLOUT_ADVERTISE_HOST:-localhost}"
+
+# Default bind host = advertised IP so sglang's `--host` (which sets the
+# self-reported `host` field in /get_server_info) matches the addr the
+# trainer extracts from --rollout-external-engine-addrs. Otherwise the
+# _init_external sanity check fails with name='host' mismatch.
+ROLLOUT_HOST="${ROLLOUT_HOST:-${ROLLOUT_ADVERTISE_HOST}}"
+
+# Defensive: localhost bind means cross-box trainer can't reach sglang.
+if [ "${ROLLOUT_HOST}" = "localhost" ] || [ "${ROLLOUT_HOST}" = "127.0.0.1" ]; then
+  echo "WARNING: ROLLOUT_HOST=${ROLLOUT_HOST} — sglang will only bind to loopback." >&2
+  echo "         Trainer on a different host won't be able to reach these engines." >&2
+  echo "         Pass TRAINER_IP=<box2-ip> so ROLLOUT_ADVERTISE_HOST resolves to" >&2
+  echo "         the actual NIC IP, or pass ROLLOUT_HOST explicitly." >&2
+fi
 
 LOG_DIR="${MLLMOPD_RUNS:-runs}/rollout_servers"
 mkdir -p "${LOG_DIR}"
