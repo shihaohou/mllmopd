@@ -863,6 +863,133 @@ else
   echo ">>> ${LOSS}: skipped (file not found for P13)"
 fi
 
+# --- Patch P14: external rollout placement group + engine actor -----
+# Cross-box T2-1: rollout sglang servers run on Box 1 as standalone HTTP
+# (--rollout-external). Their Ray "wrapper" actors run locally on the
+# trainer (Box 2) and only proxy HTTP — they don't need a GPU bundle.
+#
+# Without this patch, miles' placement_group.create_placement_groups
+# allocates GPU bundles for BOTH trainer ranks AND rollout engines
+# (line ~99: `num_gpus = actor_num_nodes*actor_num_gpus_per_node + rollout_num_gpus`).
+# On Box 2's 8-GPU Ray cluster with actor=8, asking for 9 (=8+1) or 15
+# (=8+7) bundles hangs forever waiting for non-existent GPUs.
+#
+# Fix is two-part:
+#   A) placement_group.py: in external mode skip rollout GPU bundles,
+#      so the placement group only sizes to actor GPUs.
+#   B) rollout.py:init_rollout_engines: in external mode spawn engine
+#      wrappers with num_gpus=0 and scheduling_strategy=None,
+#      base_gpu_id=None (forcing _compute_server_args to fall back to
+#      get_base_gpu_id(args, rank) which yields the same values we
+#      configured on start_rollout_servers.sh).
+PG_FILE="${MILES_DIR}/miles/ray/placement_group.py"
+PG_SENTINEL="# === mllmopd P14 external rollout placement ==="
+if [ -f "${PG_FILE}" ]; then
+  if grep -q "${PG_SENTINEL}" "${PG_FILE}"; then
+    echo ">>> ${PG_FILE}: already patched (P14 placement sentinel present)"
+  else
+    echo ">>> patching ${PG_FILE}: skip rollout GPU bundles in external mode"
+    export MLLMOPD_PATCH_PG_PATH="${PG_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_PG_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '''    else:
+        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.rollout_num_gpus
+        rollout_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
+        if args.use_critic:'''
+patch = '''    else:
+        # === mllmopd P14 external rollout placement ===
+        # In rollout_external mode, rollout engines are non-Ray HTTP servers
+        # on Box 1. Their Ray wrappers (init_rollout_engines) run locally
+        # with num_gpus=0 and need no GPU bundle. Skipping the rollout
+        # slice lets the whole placement group fit on the trainer-only
+        # Ray cluster (otherwise asks for 9..15 bundles on 8-GPU Box 2).
+        if getattr(args, "rollout_external", False):
+            num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+            rollout_offset = num_gpus
+        else:
+            num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.rollout_num_gpus
+            rollout_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
+        # === end mllmopd P14 external rollout placement ===
+        if args.use_critic:'''
+if anchor not in src:
+    sys.exit(f"ERROR: P14 placement anchor not found in {path!r} — create_placement_groups may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P14 placement_group.py applied")
+PY
+  fi
+else
+  echo ">>> ${PG_FILE}: skipped (file not found for P14 placement)"
+fi
+
+# P14 part B: rollout.py:init_rollout_engines engine-actor spawn.
+RO_FILE="${MILES_DIR}/miles/ray/rollout.py"
+RO_SENTINEL="# === mllmopd P14 external rollout engine ==="
+if [ -f "${RO_FILE}" ]; then
+  if grep -q "${RO_SENTINEL}" "${RO_FILE}"; then
+    echo ">>> ${RO_FILE}: already patched (P14 engine sentinel present)"
+  else
+    echo ">>> patching ${RO_FILE}: external-mode num_gpus=0 + no placement strategy"
+    export MLLMOPD_PATCH_RO_PATH="${RO_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_RO_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '''        num_gpus = 0.2
+        num_cpus = num_gpus
+
+        # Get the base GPU ID from placement group
+        base_gpu_id = int(reordered_gpu_ids[i * num_gpu_per_engine])
+
+        scheduling_strategy = PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=reordered_bundle_indices[i * num_gpu_per_engine],
+        )'''
+patch = '''        # === mllmopd P14 external rollout engine ===
+        if getattr(args, "rollout_external", False):
+            # External engines: wrapper actor is HTTP-only, needs no GPU,
+            # not bound to the placement group's rollout slice (P14 part A
+            # already shrunk that slice to empty). base_gpu_id=None makes
+            # _compute_server_args fall through to get_base_gpu_id(args,
+            # rank), matching the --base-gpu-id values start_rollout_servers.sh
+            # passed when launching the external sglang on Box 1.
+            num_gpus = 0
+            num_cpus = 0.1
+            base_gpu_id = None
+            scheduling_strategy = None
+        else:
+            num_gpus = 0.2
+            num_cpus = num_gpus
+
+            # Get the base GPU ID from placement group
+            base_gpu_id = int(reordered_gpu_ids[i * num_gpu_per_engine])
+
+            scheduling_strategy = PlacementGroupSchedulingStrategy(
+                placement_group=pg,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=reordered_bundle_indices[i * num_gpu_per_engine],
+            )
+        # === end mllmopd P14 external rollout engine ==='''
+if anchor not in src:
+    sys.exit(f"ERROR: P14 engine anchor not found in {path!r} — init_rollout_engines may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P14 rollout.py applied")
+PY
+  fi
+else
+  echo ">>> ${RO_FILE}: skipped (file not found for P14 engine)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
