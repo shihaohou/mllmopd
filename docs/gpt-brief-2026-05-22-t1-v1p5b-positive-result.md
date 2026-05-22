@@ -1,4 +1,15 @@
-# GPT review brief — T1 v1.5b POSITIVE result (2026-05-22)
+# GPT review brief v2 — T1 v1.5b POSITIVE result (2026-05-22)
+
+> **v2 changes vs round-3 review (2026-05-22)**: canonical per-benchmark
+> table regenerated programmatically from `t1_compare.json` (drift on
+> T1-0 base row corrected), framing upgraded to "OPD is
+> condition-sensitive", T1-2 reframed as positive control rather than
+> method win, "phase transition" wording replaced with "on-policy prefix
+> self-conditioning on a blank-template attractor", literature anchors
+> added (RL overoptimization, biased soft labels, perception
+> bottleneck, blind-reasoner), reviewer-defense §added, blankness-rate
+> trajectory figure paired with accuracy trajectory. Numbers,
+> commits, and bug-fix lineage unchanged from v1.
 
 > **Status note**: This supersedes the v0 and v1 briefs, both of which
 > were invalidated by sequential bugs caught in earlier review rounds:
@@ -16,14 +27,16 @@
 
 ## TL;DR
 
-**Vanilla MLLM OPD's effectiveness depends critically on the teacher's
-visual input.** Trained against a teacher that scores with the
-original image (FullTeacher / T1-2), the student preserves its
-vision capability and gains modestly (+1.3pp mean full_image acc).
-Trained against a teacher that scores with a same-shape blank image
-(BlankTeacher / T1-3), dense token-level KL transfers the teacher's
-learned visual blindness to the student, causing catastrophic
-capability collapse (−21.7pp mean full_image acc; ChartQA: 0.695
+**MLLM OPD is condition-sensitive: dense token-level KL faithfully
+transfers the teacher's input-conditioned behavior distribution, with
+the teacher's visual input as the dominant conditioning variable.**
+When the teacher is vision-grounded (FullTeacher / T1-2), OPD
+preserves the student's vision-conditioned capability with a modest
+gain (+1.3pp mean full_image acc). When the teacher is image-blind
+(BlankTeacher / T1-3, same-shape blank image), OPD actively transfers
+an **anti-vision response template** — the student progressively
+learns to disavow the image even at eval time, causing catastrophic
+capability collapse (−21.7pp mean full_image acc; ChartQA: 0.685
 → 0.155). The single-knob FullTeacher-vs-BlankTeacher comparison
 produces:
 
@@ -33,15 +46,24 @@ produces:
 McNemar on 133 opd_target prompts           = b=44, c=9, p = 1.22e-6
 ```
 
-Qualitative samples confirm the mechanism: T1-3 (BlankTeacher),
-when handed a **real** chart at eval time, **insists the image is
-blank** and answers from priors / hallucination. T1-2 (FullTeacher)
-reads the chart and answers from visual evidence.
+The +23pp gap is **not** "FullTeacher OPD is a great method" —
+T1-2's +1.3pp is small. The gap is the contrast between **preserved**
+(T1-2) and **actively destroyed** (T1-3) vision behavior. T1 is a
+causal probe of what vanilla OPD transfers; the +23pp says the
+teacher-condition knob alone controls a 23pp swing. Method evidence
+must come from T2.
 
-This is the cleanest causal demonstration we have of vision-conditioned
-capability transfer at OPD scale: the teacher's visual input isn't just
-"helpful" — it's the load-bearing element that prevents the student
-from learning visual blindness.
+Mechanism (qualitatively confirmed): T1-3 students, when handed a
+**real** chart at eval time, explicitly reason `"the image is blank
+white"` and refuse to read it. Trajectory analysis pins the failure
+to **on-policy prefix self-conditioning on a blank-template
+attractor**: dense KL gradually raises the probability of
+image-denial templates in the student's distribution; once these
+templates are likely enough to appear in the student's own rollout
+prefixes, on-policy self-conditioning rapidly pulls the rest of the
+response into the attractor. Blankness-phrase rate goes from
+**2.2% baseline → 64% within 50 training steps** (149 → 199), the
+same window where accuracy cliff-falls.
 
 ## v1.5b: the configuration that produced this result
 
@@ -109,30 +131,64 @@ Bootstrap CI lower bound +20.0pp is the strongest possible
 McNemar 44 wins for T1-2 vs 9 for T1-3 on the 133 opd_target prompts
 gives p = 1.22 × 10⁻⁶ (~one in a million).
 
-### (2) Per-benchmark: BlankTeacher destroys ChartQA the worst, but the effect is uniform
+### (2) Per-benchmark: collapse direction is consistent, magnitude varies ~30×
+
+Numbers below are regenerated from the canonical `t1_compare.json` via
+`mllmopd.analysis.t1_brief_table` (single source of truth — no
+hand-typing). Rows are full_image accuracy for T1-0 / T1-2 / T1-3, then
+T1-2 / T1-3 gain over T1-0, then Δ_b = G_T1-2 − G_T1-3.
 
 | Benchmark | T1-0 base | **T1-2 (Full)** | **T1-3 (Blank)** | G_T1-2 | **G_T1-3** | **Δ_b** |
 |---|---|---|---|---|---|---|
-| ChartQA | 0.695 | 0.775 | **0.155** | +8.0pp | **−54.0pp** | **+62.0pp** |
-| HallusionBench | 0.635 | 0.605 | 0.505 | −3.0pp | −13.0pp | +10.0pp |
-| MathVerse | 0.320 | 0.310 | 0.110 | −1.0pp | −21.0pp | +20.0pp |
-| MathVision | 0.180 | 0.180 | 0.160 | 0.0pp | −2.0pp | +2.0pp |
-| MathVista | 0.630 | 0.645 | 0.330 | +1.5pp | −30.0pp | +31.5pp |
-| POPE_adv | 0.875 | 0.885 | 0.760 | +1.0pp | −11.5pp | +12.5pp |
-| **Mean** | **0.556** | **0.567** | **0.337** | **+1.3pp** | **−21.7pp** | **+23.0pp** |
+| ChartQA | 0.685 | 0.775 | **0.155** | +9.0pp | **−53.0pp** | **+62.0pp** |
+| HallusionBench | 0.640 | 0.605 | **0.505** | −3.5pp | **−13.5pp** | **+10.0pp** |
+| MathVerse | 0.305 | 0.310 | **0.110** | +0.5pp | **−19.5pp** | **+20.0pp** |
+| MathVision | 0.230 | 0.180 | **0.160** | −5.0pp | **−7.0pp** | **+2.0pp** |
+| MathVista | 0.595 | 0.645 | **0.330** | +5.0pp | **−26.5pp** | **+31.5pp** |
+| POPE_adversarial | 0.865 | 0.885 | **0.760** | +2.0pp | **−10.5pp** | **+12.5pp** |
+| **Mean** | **0.553** | **0.567** | **0.337** | **+1.3pp** | **−21.7pp** | **+23.0pp** |
 
-T1-2 (FullTeacher) is essentially baseline-preserving with mild
-improvements where teacher-student gap is largest (ChartQA +8pp,
-MathVista +1.5pp). T1-3 (BlankTeacher) collapses every benchmark
-that requires visual reasoning, with ChartQA — the most
-chart-reading-heavy benchmark — taking the biggest hit (−54pp).
-MathVision is the smallest effect, consistent with v0 audit's
-"MathVision is the most teacher-RL-flat benchmark" observation.
+**Direction**: all six benchmarks land negative for T1-3 (range
+−7.0pp to −53.0pp). T1-3 collapse is **direction-consistent**.
+
+**Magnitude**: varies ~30× across benchmarks (Δ_b = +2.0pp on
+MathVision to +62.0pp on ChartQA). The effect concentrates on
+chart/visual-evidence-heavy tasks; on text-heavy or visually-trivial
+tasks (MathVision, POPE_adversarial) the collapse is mild. So the
+right summary is **"consistent in direction across all six
+benchmarks; magnitude varies ~30× and is largest where visual
+evidence is load-bearing"** — not "uniform".
+
+T1-2 (FullTeacher) is essentially baseline-preserving with mixed
+small effects (ChartQA +9.0pp, MathVista +5.0pp, MathVision −5.0pp).
+The mean +1.3pp gain is **not** a method win; it's the positive-control
+end of the single-knob counterfactual. Method evidence has to come
+from T2. The story of T1 is the BlankTeacher catastrophe + its
+mechanism, not the FullTeacher win.
 
 ### (3) Paired vision-critical decomposition
 
 `opd_target_ids.json` (n=133, defined by `vc_t[T1-0-base] ∩
 teacher_advantage[T1-0-base, T1-X]` per current PV pass).
+
+> **Caveat (pending re-derivation)**: this opd_target set uses T1-0-base
+> as the "teacher" axis because the new PV pass derived it from the v1.5b
+> eval-time T1-0 jsonls. The canonical level1_v4 definition uses
+> MMR1-7B-RL as the teacher (`vc_t[T_RL] ∩ teacher_advantage[T_RL, S]`).
+> The re-derivation against the real teacher is in Tier-2 of the
+> Tier-1.1 follow-up; ratio of T1-2 vs T1-3 recovery is expected to
+> shift in magnitude but not in sign. Listed here so reviewers know the
+> set is teacher-axis-pending.
+>
+> For paper writeup, GPT round-4 recommends carrying **two
+> target sets** side-by-side: (i) a **Student-diagnostic** target
+> (current — derived from T1-0/T1-2/T1-3, measures "where the student
+> moved"), and (ii) a **Teacher-diagnostic** target (re-derived from
+> MMR1-7B-RL teacher full/blank/text, measures "where the teacher's
+> vision-conditioned advantage actually is"). The two definitions
+> answer different questions; reporting both insulates against the
+> "your target set is teacher-derived from the student itself"
+> reviewer attack.
 
 | Metric | T1-2 (Full) | **T1-3 (Blank)** | Δ | Interpretation |
 |---|---|---|---|---|
@@ -142,7 +198,25 @@ teacher_advantage[T1-0-base, T1-X]` per current PV pass).
 | PureV (only-vision-conditioned) | 41 | **232** | **+191** | T1-3 fails 232 prompts that can ONLY be answered with vision |
 | opd_target_recovery | 41.3% | **23.0%** | −18.3pp | Both recover some opd_target signal but BlankTeacher much less |
 
-## Mechanism: learned visual blindness (qualitative)
+## Mechanism: teacher-conditioned anti-vision template (qualitative)
+
+We use "learned visual blindness" as the informal name; the formal
+description is **teacher-conditioned anti-vision response template
+transferred via dense token-level KL**. (Equivalent framing:
+"transfer of a biased policy computed under an image-blind condition";
+the BlankTeacher's logp distribution over response tokens — measured
+under a blank image — is a vision-suppressing biased soft label, and
+OPD's dense KL faithfully fits the student to it.)
+
+**This is not generic hallucination.** Hallucination, as the term is
+usually used, is a behavior that emerges anywhere a model lacks
+grounding. The T1-3 collapse is a **causally reproducible, modality-
+conditioned anti-vision policy**: it is reliably induced by the
+BlankTeacher knob, has a quantifiable trajectory (blankness-phrase rate
+2.2% → 64% in 50 steps), and disappears entirely when the knob is
+flipped to FullTeacher. Treating it as "the BlankTeacher distillation
+made the student hallucinate more" would lose the causal-knob
+character of the finding.
 
 Three randomly-sampled ChartQA predictions, T1-3 (BlankTeacher), at
 **eval-time full_image mode** (i.e., the model is shown the real chart):
@@ -197,14 +271,18 @@ preserved. What collapsed is the **content**: the model has learned
 that under image-presentation, the canonical response is to disavow
 the image.
 
-## Trajectory evidence: phase transition between step 149 and 199
+## Trajectory: on-policy prefix self-conditioning on a blank-template attractor
 
 A separate trajectory eval (`run_t1_trajectory.sh`, commit `2a905e8`)
 runs full_image-mode eval against every saved ckpt (step_49 / 99 / 149 /
 199 / 230) of both arms plus T1-0 base. Re-scored via the canonical
 `mllmopd.diagnostics.scorers` (the same code path t1_compare uses).
-Output: `runs/audit/t1_trajectory_20260522-105745/`. Figure:
-`runs/analysis/t1_v1p5b_trajectory.png`.
+Output: `runs/audit/t1_trajectory_20260522-105745/`. Figure pair:
+`runs/analysis/t1_v1p5b_trajectory.png` (accuracy) +
+`runs/analysis/t1_v1p5b_blankness.png` (paired accuracy ↔
+blankness-phrase rate).
+
+### Accuracy trajectory
 
 | Step | T1-2 (Full) overall | T1-3 (Blank) overall | T1-3 ChartQA | T1-3 MathVista |
 |---|---|---|---|---|
@@ -215,80 +293,290 @@ Output: `runs/audit/t1_trajectory_20260522-105745/`. Figure:
 | **199** | 0.574 | **0.335** ❗ | **0.105** | 0.365 |
 | 230 | 0.576 | 0.331 | 0.155 | 0.315 |
 
-**The BlankTeacher arm doesn't degrade gradually — it cliff-falls between
-step 149 and step 199.** Three regions:
+T1-3 doesn't degrade smoothly — it loses 16.7pp overall (61.5pp
+ChartQA) in the single 50-step window between step_149 and step_199,
+then stabilizes near the bottom. T1-2 stays flat at the baseline +
+small upward drift. The step-99 v1 snapshot (an earlier brief saw
++1.5pp at step_99) was sampled *before* T1-3 entered the attractor;
+the full +23pp signal requires training past the cliff.
 
-1. **Step 0–99 (looks fine)**: Both arms gain similar small amounts.
-   At step_99, T1-3 (0.566) is even slightly higher than T1-2 (0.547).
-   This is consistent with the earlier v1 step_99 brief that saw
-   "Δ ≈ +1.5pp" — at step 99 the BlankTeacher's training-time blindness
-   pattern hadn't yet dominated the student's distribution.
+### Blankness-phrase rate trajectory (paired figure)
 
-2. **Step 99–149 (cracks start)**: T1-3 drops 6.4pp (0.566 → 0.502).
-   T1-2 keeps improving (+4.4pp). Gap opens to 9pp.
+For each saved ckpt jsonl, we scan the 1200 full-image predictions
+(200 prompts × 6 benchmarks) for blank-image refusal phrases:
+`"blank"`, `"completely white"`, `"no information"`, `"cannot see"`,
+`"no visible"`, `"placeholder"`, `"I cannot determine"`,
+`"image is empty"`, `"no chart"`, `"no image"`, `"irrelevant"`.
+(Phrases surveyed from the dominant T1-3-step_230 templates;
+`mllmopd.analysis.t1_blankness_trajectory`.)
 
-3. **Step 149–199 (catastrophic collapse)**: T1-3 drops a further
-   16.7pp in just 50 steps; ChartQA specifically loses **61.5pp**
-   (0.720 → 0.105). T1-2 stays stable. Gap blows out to 24pp.
+| Step | T1-2 blank-rate | T1-3 blank-rate | T1-3 median first-blank word-pos |
+|---|---|---|---|
+| 0 (base) | 2.2% (T1-0 baseline) | 2.2% (T1-0 baseline) | 143 |
+| 49 | 3.0% | 2.3% | 110 |
+| 99 | 2.2% | 2.8% | 151 |
+| 149 | 2.8% | **10.1%** ⬇ | 94 |
+| **199** | 2.9% | **63.8%** ❗ | **25** |
+| 230 | 3.1% | 57.0% | 25 |
 
-4. **Step 199–230 (stabilized at bottom)**: T1-3 makes no recovery,
-   stays at ~0.33 overall.
+Two signatures of on-policy prefix self-conditioning:
 
-**This is the cleanest signature so far that the BlankTeacher mechanism
-is a phase-transition, not a smooth slope.** Dense KL distills the
-"image is blank" template progressively, and at some critical point
-(~step 150-200 in this setup) the student's distribution flips from
-"vision-conditioned with mild BlankTeacher contamination" to
-"BlankTeacher-template-dominated, ignoring image".
+1. **Blankness rate cliff (step 149→199, +53.7pp)** matches the
+   accuracy cliff (step 149→199, −16.7pp overall, −61.5pp on
+   ChartQA) precisely. The student's response distribution flips
+   from "vision-conditioned with mild blank contamination" to
+   "blank-template-dominated".
+2. **First-blank-token median word position drops from 94 (step
+   149) → 25 (step 199)**. Before the cliff, when the student does
+   say "blank", it appears late in the chain-of-thought as a tail
+   explanation. After the cliff, "blank" enters the response in the
+   first ~25 words, becoming the **template opener** that conditions
+   the rest of the generation.
 
-This timing also resolves the puzzle of why v1 step_99 (with the
-ckpt-routing bug aside) showed only a weak +1.5pp signal: **at step 99,
-the collapse hadn't happened yet**. The full +23pp signal requires
-training past the phase transition.
+This is the **OPD-specific** failure mode that distinguishes dense
+on-policy KL from off-policy KD or SFT. Under dense KL, the student
+generates rollouts on-policy at each step; once those rollouts contain
+"blank" early enough, the rest of the response is generated conditioned
+on a prefix that already disavows the image, so the canonical
+continuation under the BlankTeacher is to keep disavowing. The
+attractor is self-reinforcing: more KL → higher P("blank" early in
+prefix) → more self-conditioned blank-image refusals at rollout time →
+more BlankTeacher score on those refusals → more KL updates. This
+explains the abrupt regime switch — it's not a slow drift; it's a
+positive-feedback loop that crosses an attractor threshold.
 
-The phase-transition behavior is itself paper-figure material: it
-implies dense KL on a misspecified teacher accumulates a hidden
-"blindness budget" that only releases catastrophically once enough has
-been transferred.
+The dynamics are **reminiscent of noisy-label memorization and reward
+overoptimization**: a model that initially fits clean structure later
+fits a noisy/misspecified target as updates accumulate, and the
+transition can be abrupt. The novelty here is that the misspecification
+is **modality-conditioned** rather than label-noise-conditioned — the
+student does not merely imitate corrupted labels, it learns a
+"deny-the-image" response template that only takes hold once the
+template is likely enough to seed its own rollout prefixes. (See
+§Literature anchors for the connection to noisy-label memorization,
+biased soft labels, RL overoptimization, and perception-reasoning
+decoupling.)
+
+Whether the cliff should be called a formal "phase transition" depends
+on multi-seed evidence (with n=1 seed, sharp timing could be a
+coincidence of the save schedule). For paper writeup we'll call it
+**"abrupt cliff-like collapse"** and reserve "phase transition" for
+after multi-seed runs. The **mechanism** ("on-policy prefix
+self-conditioning on a blank-template attractor") is the load-bearing
+claim; the cliff shape is supporting evidence for the mechanism.
 
 ## Implications
 
 ### For the original hypothesis (project_hypotheses.md)
 
 The prompt-level claim ("OPD transfers vision-conditioned teacher
-capability") is **confirmed**, but more sharply: vanilla dense OPD
-doesn't just fail to transfer vision when the teacher can't see — it
-**actively transfers anti-vision (learned blindness)**. The signal
-strength was hidden in v0/v1 due to bugs; v1.5b reveals it cleanly.
+capability") is **confirmed in a sharper form**: vanilla dense OPD
+isn't merely sensitive to whether the teacher saw the image — it
+**actively transfers the teacher's input-conditioned response
+distribution**. If that distribution was built under a vision-grounded
+condition, the student inherits vision-grounded behavior. If it was
+built under a blank-image condition, the student inherits
+image-disavowal behavior. The signal strength was hidden in v0/v1 by
+bugs; v1.5b reveals it cleanly.
+
+### What T1 does *not* establish
+
+- T1-2 is **not** evidence that vanilla FullTeacher OPD is a strong
+  method. +1.3pp mean gain over an already-RL'd 3B student is small
+  and not a method headline. T1 is the **causal probe** that fixes
+  the teacher-vision knob and shows the knob alone controls a 23pp
+  swing. T2 has to actually beat FullTeacher OPD on a harder
+  setting for the method narrative to land.
+- T1 does not establish that the cliff is a *formal* phase
+  transition (single seed, 5 ckpts in the cliff window). It
+  establishes the **mechanism shape** — accuracy cliff aligned with
+  blankness-rate cliff and template-onset-position drop — that any
+  formal phase-transition claim would have to match.
 
 ### For T2 method design
 
-The original T2 plan (PGPO/VPPO-style token-level reweighting on
-high-VD tokens) is now well-motivated:
+The on-policy-attractor mechanism narrows the T2 design space. GPT
+round-3 recommended **not** going straight to pure differential
+(`lp_T_full − lp_T_blank` as the only loss) — pure differential says
+"image makes this token more/less likely" but not "this token is a
+good answer". Layered ablation (record-of-decision):
 
-- vd_decay observation (preliminary, from v1 diagnostics): teacher's
-  full-vs-blank logp gap shrinks during training as student outputs
-  template-ize. So the high-VD signal **is** sparse.
-- v1.5b confirms that this sparse signal is **causally load-bearing**
-  — when the entire teacher signal is forced into a no-vision
-  distribution (BlankTeacher), the student collapses.
-- T2 method direction: amplify the differential signal between
-  FullTeacher logp and BlankTeacher logp, rather than distilling
-  the full teacher distribution. Concretely:
+| ID | Loss / change vs T1-2 | Purpose |
+|---|---|---|
+| T2-0 | FullTeacher OPD (= T1-2 reuse, no change) | Baseline anchor for the T2 grid |
+| **T2-1** | **VD-weighted FullTeacher OPD**: `L = Σ_t (1 + α·clip(Δ_t, 0, c)) · L^full_OPD(t)` where `Δ_t = log p_T^full − log p_T^blank` | First T2 cut, conservative. Keeps FullTeacher main signal; uses Δ_t as a per-token *upweight* on tokens where vision actually matters. PGPO/VPPO-style allocation, but on teacher-KL not RL advantage |
+| T2-3 | Residual-β: `r_t = (lp_T^full − lp_old) − β(lp_T^blank − lp_old)` | β=0 → T1-2; β=1 → pure differential; scan β to trace the anti-vision-contamination/method-gain tradeoff |
+| T2-4 | Prompt-level vision-conditioned oversampling (no loss change) | Oversample prompts where `teacher_full=correct ∩ teacher_blank=wrong`. Replaces token-level reweighting with selection; relies on T1's paired analysis as the prompt-selection signal |
 
-  ```
-  r_t^vis = log p_T(y_t | image, q, y_<t) − log p_T(y_t | blank, q, y_<t)
-  ```
+Start with **T2-1**. It's the safest first cut: a strict superset of
+FullTeacher OPD signal, with a per-token upweight on vision-load-bearing
+tokens. If T2-1 beats T1-2 cleanly on the 6 benchmarks, that's the T2
+headline. T2-3 / T2-4 are secondary ablations.
 
-  Use this differential as the primary supervisory signal (perhaps
-  weighted by |r_t^vis| to focus on tokens where vision matters).
-  This is "image-differential OPD" — orthogonal to PGPO/VPPO's
-  per-token reweighting based on advantage, but they could compose.
+The v1.5b BlankTeacher arm is, in retrospect, the disaster end of
+T2-3 (β=∞ on the blank side): when you train ONLY on the "blank"
+component of the differential, the student collapses. This bounds
+the β scan.
 
-The v1.5b BlankTeacher arm is, in retrospect, a natural ablation
-showing what happens when you train ONLY on the "blank" half of
-this differential — disaster. So the differential's sign matters,
-not just its magnitude.
+### Safety monitors during T2 (not a method — a wrapper)
+
+The T1-3 cliff at step ~150 means we cannot deploy "train until the
+last step" naively. T2's job is to *remove* the anti-vision component
+from the loss so the cliff can't happen; **early stopping is only a
+safety wrapper, not the method**. Five monitors to run alongside every
+T2 arm (cheap; data already collected for T1):
+
+| Monitor | Signal | Rationale |
+|---|---|---|
+| `blankness_phrase_rate` per ckpt | Background ≈ 2.2%; T1-3 cliffs to 64% at step 199. Trip threshold ~5× background | Direct trace of the attractor entering the student's distribution |
+| Full-image vs blank-image gap on a 50–100-prompt dev set | T1-3 (collapsed) gap flips sign / closes to ~0; T1-2 keeps gap | Probes whether the student is still using vision |
+| OPD loss-mass distribution over VD bins | Sustained mass on `lp_T^full ≈ lp_T^blank` tokens = wasted KL on vision-irrelevant tokens | Diagnoses whether the method is allocating supervision correctly |
+| `opd_target_recovery` mini-eval (50–100 vision-critical prompts) | Cheaper than full 6-benchmark eval; tracks the headline knob directly | Cheap version of the §(3) decomposition |
+| `first_blank_token_position` (median word offset) | Drops 94 → 25 in the T1-3 cliff window; an early-warning signal — earlier appearance precedes rate cliff | Detects the on-policy prefix self-conditioning loop tightening |
+
+Differential / VD-weighted OPD should be **theoretically more robust**
+(it cancels the blank teacher's anti-vision component by construction),
+so we expect these monitors to stay flat under T2-1/T2-3. The monitors
+are the falsification test: if a T2 arm trips them, the method failed
+to remove the attractor.
+
+## Literature anchors
+
+Five anchor families place the v1.5b finding in existing work
+(synthesized from GPT round-3 + round-4 pointers):
+
+1. **RL overoptimization / reward hacking.** When the surrogate signal
+   diverges from the true target, optimization is pushed toward
+   undesired responses. Standard reference: Gao et al., *Scaling laws
+   for reward model overoptimization*; the broader RLHF / RLVR
+   literature on Goodharting. Our BlankTeacher is the OPD-shaped
+   analog: the surrogate (teacher logp under a blank image) is a
+   high-fidelity but vision-stripped target; dense KL optimization
+   against it produces a textbook overoptimization mode whose form
+   is "respond by disavowing the image".
+
+2. **Biased soft labels + noisy-label memorization.** Classical KD
+   assumes soft labels close to ground truth; biased soft labels'
+   validity is conditional. OpenReview *Learning From Biased Soft
+   Labels* (gevmGxsTSI) formalizes when a biased soft label still
+   helps. The noisy-supervision literature (*Early Stopping Against
+   Label Noise* — OpenReview CMzF2aOfqp, and the broader
+   memorization-of-noisy-labels line) documents the same shape we see
+   in T1-3: an early phase that fits clean structure, then an abrupt
+   regime where the model starts memorizing the noisy/misspecified
+   target. Our BlankTeacher = **modality-conditioned biased soft
+   label**: it is locally calibrated (the teacher *did* see only a
+   blank and is honest about it), but the bias is correlated with the
+   modality channel — when the modality flips at eval time, the bias
+   becomes maladaptive. The T1-3 step-149→199 cliff is the
+   modality-conditioned analog of noisy-label memorization onset.
+
+3. **Perception bottleneck under outcome-only RL.** *Perception-R1*
+   (arXiv 2506.07218) and *Seeing with You* (arXiv 2603.28618) report
+   that RLVR with outcome-only reward improves reasoning patterns but
+   not perception; McNemar tests in Perception-R1 confirm no
+   perception gain. Reading: outcome-only reward gives a signal that
+   is *vision-blind* in expectation, so RL post-training improves
+   reasoning shape without strengthening the perception channel. Our
+   BlankTeacher pushes this further: when the *teacher signal itself*
+   is vision-blind by construction, dense KL doesn't just fail to
+   improve perception — it overwrites the student's existing
+   perception with image-disavowal.
+
+4. **Multimodal blind reasoner.** *Thinking with Deltas: Incentivizing
+   Reinforcement Learning via Differential Visual Reasoning Policy*
+   and related work show that some MLLMs perform comparably or even
+   better with the visual input removed — they "degenerate to
+   linguistic shortcuts" / behave as **blind reasoners**. Our T1-3
+   explicitly does this on-policy: the student learns to *announce*
+   the image is absent and answer from priors. This places "learned
+   visual blindness" at the distillation-channel end of a literature
+   spectrum whose other end is "MLLM is already a blind reasoner
+   before training".
+
+5. **Token-level perception reweighting (method anchor for T2).**
+   *Not All Tokens See Equally: Perception-Grounded Policy
+   Optimization* (PGPO, arXiv 2604.01840) and *Spotlight on Token
+   Perception for Multimodal Reinforcement Learning* (VPPO, OpenReview
+   bRA4lVWJVQ) show that low-VD / low-perception tokens can be
+   downweighted and high-perception tokens upweighted in RLVR without
+   loss — i.e., teacher/advantage allocation is non-uniform along the
+   token axis and exploitable. T2-1 (VD-weighted FullTeacher OPD)
+   ports this idea from RL advantage to teacher-KL supervision: tokens
+   where `lp_T^full − lp_T^blank` is large are exactly the tokens
+   where vision is load-bearing, and they get upweighted in the OPD
+   loss. PGPO/VPPO are the method anchors for T2-1; our differentiator
+   is the *teacher-KL* axis (sparse-to-correctly-dense) instead of the
+   *RL advantage* axis (sparse-to-dense).
+
+## Reviewer concerns and responses
+
+Preemptively, three attacks GPT predicted, with the defense:
+
+### (a) "BlankTeacher is a contrived setup. Who runs OPD with a blank image?"
+
+The BlankTeacher arm is a **causal probe**, not a deployment setting.
+It isolates one variable — the teacher's visual conditioning at scoring
+time — while holding everything else fixed (student rollout image,
+prompts, sampling seed, loss, optimizer). The fact that no one would
+deliberately train OPD with a blank teacher is exactly the point: the
+counterfactual gives us a sign-controlled measurement of *what dense
+OPD transfers*.
+
+Real-world analogs of teacher-side vision degradation that this probe
+generalizes to:
+
+- vision-encoder failure modes (image fails to load, image preprocessing
+  bug, dropout-corrupted visual tokens),
+- partial occlusion / low-resolution images,
+- OCR-fail screenshots,
+- text-only teachers used out-of-distribution in MLLM distillation,
+- distillation across vision-encoder versions where the teacher's
+  encoder is weaker than the student's.
+
+The compensating experiment, ranked by cost: a **mild-corruption
+teacher** grid — blurred image, low-res image, random natural image,
+text-only — to show the collapse is on a continuum, not a binary
+"blank vs. not blank" trigger. Tier 3 in the followup menu.
+
+### (b) "Why is this specific to OPD vs. all distillation?"
+
+Mechanism: **dense token KL + on-policy prefix self-conditioning**.
+The student isn't imitating fixed teacher outputs offline; the student
+generates its own rollouts, and once its own rollouts contain
+"blank"/"white" early in the prefix, the BlankTeacher scores those
+continuations well, the KL points there, and the loop tightens. This
+is structurally different from off-policy KD (fixed teacher outputs as
+SFT-style targets) and from SFT on teacher completions.
+
+Compensating experiments (Tier 2 in the followup menu):
+
+- **Off-policy KD on BlankTeacher completions**: generate BlankTeacher
+  completions, then KL-match student logp to teacher logp on those
+  fixed completions (no on-policy rollouts).
+- **SFT on BlankTeacher completions**: simple supervised loss against
+  the fixed completions.
+
+If off-policy KD and SFT both also cliff-fall like OPD does, the
+mechanism is "dense KL to a biased teacher" in general, not OPD
+specifically. If only OPD cliff-falls, the on-policy attractor is the
+distinguishing component. The blankness-rate + first-blank-position
+trajectory we already have predicts the latter — the
+positive-feedback loop requires the prefix to grow from the student's
+own generations.
+
+### (c) "T1-2 only gains 1.3pp — that's not a method win."
+
+Correct. T1-2 is **not** a method; it's the positive-control end of
+the single-knob counterfactual. The contribution of T1 is the **causal
+probe + mechanism discovery**, not a strong FullTeacher OPD headline.
+Method evidence has to come from T2 (VD-weighted FullTeacher OPD or
+residual-β formulation), where the headline is "T2-X beats T1-2 on
+the same 6 benchmarks". The +23pp Δ from T1 is the magnitude of the
+*teacher-condition knob*, not the magnitude of any method. That's the
+right size for a probe; it would be the wrong size for a method
+because it's an upper bound on the gap any teacher-conditioning
+intervention can recover.
 
 ## Caveats
 
@@ -299,7 +587,7 @@ not just its magnitude.
    with more training (would be theoretically possible if longer
    training rediscovers vision capability through some other route).
 2. **T1-3 not just "worse than baseline" but actively destroyed**.
-   T1-0 base mean = 0.556; T1-3 = 0.337. So BlankTeacher OPD is
+   T1-0 base mean = 0.553; T1-3 = 0.337. So BlankTeacher OPD is
    net harmful (−21.7pp) relative to no-training-at-all. Worth
    noting in the framing — it's not "T1-2 is +23pp better than a
    regressed T1-3", it's "T1-2 is the only viable arm; T1-3 is
@@ -318,86 +606,92 @@ not just its magnitude.
    the `--tensorboard-dir` CLI arg). Need a launcher patch to fix
    for future runs; for v1.5b, train log has step-level `perf_*`
    metrics we can grep into a hand-built loss/throughput curve.
-5. **Multi-ckpt trajectory eval in flight** — T1-3 has saves at
-   step_49 / 99 / 149 / 199 / 230; the trajectory eval (in flight
-   as of this brief) will show **at what step the BlankTeacher
-   arm flipped from "still using vision" to "denying vision exists"**.
-   That's a paper-grade figure.
-6. **opd_target subset is teacher-derived**. PV uses T1-0-base as
-   the "teacher" axis for opd_target_ids in the new run. For the
-   true MMR1-7B-RL teacher's perspective, would need to re-evaluate
-   from teacher-trained logs (out of scope here).
+5. **Multi-ckpt trajectory eval — done.** T1-3 trajectory at
+   step_49 / 99 / 149 / 199 / 230 is in
+   `runs/audit/t1_trajectory_20260522-105745/` and the paired
+   accuracy ↔ blankness-phrase-rate figure is at
+   `runs/analysis/t1_v1p5b_blankness.png`. The blank-template cliff
+   (2.8% → 64% blankness rate, step 149→199) is exactly aligned with
+   the accuracy cliff over the same window, and the first-blank-token
+   median word position drops from 94 → 25 — the template moves from
+   tail-explanation to response-opener.
+6. **opd_target subset is teacher-axis-pending**. PV in the v1.5b
+   run uses T1-0-base as the "teacher" axis for opd_target_ids
+   because the eval rerun derived the set from the new T1-0 jsonls
+   (not the canonical level1_v4 MMR1-7B-RL-teacher derivation). To
+   recompute against the real MMR1-7B-RL teacher, rerun PV with
+   `runs/audit/level1_v4_sysprompt_fixed/{T_RL,Base,S}_*.jsonl` as
+   the teacher-axis. Expected to shift opd_target counts by ~10-30%
+   in magnitude but not sign. Listed for transparency; queued for
+   Tier-2 in the followup menu.
+7. **Single seed.** "Phase transition" wording was deliberately
+   removed in v2: with n=1 seed, a sharp transition could be a
+   coincidence of where ckpts were saved. We claim the mechanism
+   shape ("on-policy prefix self-conditioning on a blank-template
+   attractor"), not the formal transition. Multi-seed runs (Tier 3)
+   would resolve.
+8. **Single teacher / student pair.** MMR1-7B-RL → MMR1-3B-SFT only.
+   Generality of the BlankTeacher catastrophe across teachers
+   (Perception-R1-7B, PEARL-7B per `project_teacher_student.md`)
+   and across student sizes is unstudied. Listed as a Tier-3 next
+   step in the followup menu.
 
-## Open questions for review (round 3)
+## Open questions for review (round 4)
 
-1. **Does the BlankTeacher catastrophic collapse hold up at scale?**
-   Specifically: if we train BlankTeacher for 1000 steps instead of
-   230, does the student rediscover vision (because at some point
-   the dense KL signal becomes weak enough that the student drifts
-   back), or does it keep degrading? Worth running a 1000-step
-   BlankTeacher arm to confirm the collapse is monotone.
+Round-3 questions on framing, literature, and mechanism are addressed
+in §Implications, §Literature anchors, and §Trajectory above. Remaining
+open questions (round 4):
 
-2. **Is the FullTeacher's +1.3pp gain "real" or also at risk?**
-   Compared to T1-3's −21.7pp catastrophe, T1-2's +1.3pp looks tiny.
-   Is there a reading where FullTeacher is **also undertrained** at
-   this scale, and the "real" win shape is "FullTeacher would gain
-   much more with longer training, BlankTeacher destroys much more
-   with longer training, gap widens further"? This would justify
-   the scale-up experiment.
+1. **Are the literature anchors right?** Specifically — is there a
+   tighter prior for the on-policy prefix self-conditioning mechanism
+   than the four anchor families we listed (RL overoptimization /
+   biased soft labels / perception bottleneck / blind reasoner)? In
+   particular, are there KD-collapse-on-confidently-wrong-teacher
+   studies that already report the late-step cliff pattern, that we
+   should be citing as direct prior art rather than the broader
+   anchors?
 
-3. **What's the natural interpretation of the per-benchmark variance?**
-   ChartQA: T1-3 −54pp (devastating). MathVision: T1-3 only −2pp.
-   Is MathVision's resilience because (a) MathVision is hard enough
-   that even base T1-0 gets 18% so there's nowhere to fall, (b)
-   MathVision's visual reasoning relies on geometric primitives that
-   the student internalized pre-OPD, or (c) something about the
-   prompt structure makes the BlankTeacher signal less
-   counterproductive on MathVision? Has the literature on
-   benchmark-specific RL collapse identified similar patterns?
+2. **Off-policy controls before T2-1?** Tier-2 of the followup menu
+   has off-policy KD and SFT on BlankTeacher completions. They are
+   cheap (no new training of either arm) and would lock the
+   "OPD-specific" claim before we spend Tier-3 compute on T2-1. Worth
+   running these *before* T2-1, or are they reviewer-defense-only
+   experiments that can be cited as "if asked, we will run"?
 
-4. **The "learned visual blindness" terminology — does this connect
-   to existing work in the literature?** Specifically:
-   - Inverse cross-entropy / KL collapse studies (would dense KL
-     to a confidently-wrong teacher always produce this pattern?)
-   - "Hallucination during distillation" papers — is the BlankTeacher
-     arm essentially distilling hallucination?
-   - Multimodal RL post-training collapse modes (PAPO, Perception-R1,
-     "Seeing with You" — do any of them report this exact pattern?)
+3. **Multi-seed for the cliff timing.** Round-3 caveat: with n=1 seed,
+   we can't claim a formal phase transition; the step 149→199 cliff
+   could be a coincidence of the save schedule. Worth running 2 more
+   T1-3 seeds for cliff-timing confirmation, or is the
+   mechanism-shape claim (blankness-rate cliff aligned with accuracy
+   cliff + first-blank-token-position drop) already enough for the
+   paper figure?
 
-5. **Method design for T2 — image-differential OPD vs. token-reweighting.**
-   Given the v1.5b mechanism (BlankTeacher's contribution to dense KL
-   is purely a "no-vision distribution"), the differential
-   formulation `r_t^vis = lp_T_full − lp_T_blank` is naturally
-   protective: it cancels exactly the blindness-pulling component.
-   Is this likely to:
-   (a) Recover the full +23pp gap from a single-teacher setup
-       (i.e., training a single student with `lp_T_full − lp_T_blank`
-       as supervision)?
-   (b) Be redundant with FullTeacher OPD if the gap is already
-       achievable from FullTeacher alone?
-   (c) Add value primarily on a HARDER setting where FullTeacher
-       gain saturates and we need to push further?
+4. **Paper structure** (Hybrid C is the working choice — confirming):
+   audit (existing) → causal probe with v1.5b headline → mechanism
+   (qualitative samples + paired blankness/accuracy trajectory) →
+   image-differential OPD as the natural fix (T2 motivation) → T2
+   ablation grid → discussion. Per-benchmark variance interpretation
+   (ChartQA -53pp / MathVision -7pp) goes in discussion, motivated
+   by visual-evidence-load-bearing-ness.
 
-6. **For paper structure**: which framing reads better?
-   - **(A) Causal mechanism paper**: "Vanilla MLLM OPD requires
-     vision-grounded teacher signal; the BlankTeacher counterfactual
-     shows what happens without it." Lead with mechanism + figure.
-   - **(B) Method paper**: "Vision-differential OPD outperforms
-     vanilla, motivated by the BlankTeacher catastrophe finding."
-     Lead with method + T2 ablation.
-   - **(C) Diagnostic-first paper**: "We diagnose what vanilla MLLM
-     OPD actually transfers, find that teacher's vision-conditioned
-     distribution is load-bearing, and propose image-differential
-     OPD as the natural fix." (A → B, hybrid.)
+5. **Method-T2 ablation grid prioritization.** Tier-3 (which T2 arm
+   first): T2-1 VD-weighted FullTeacher OPD (safest), T2-3 residual-β
+   scan (informative), T2-4 prompt-level oversampling (lightest
+   training change). Sequential or parallel? Parallel costs more
+   compute but yields the full grid in one cycle.
 
 ## Reproduction artifacts
 
 **Public** (in this repo):
 - Launcher: `scripts/train/opd_mmr1_3b_baseline.sh` (HEAD `2a905e8`)
 - Eval matrix: `scripts/audit/run_t1_eval.sh`
-- Trajectory eval: `scripts/audit/run_t1_trajectory.sh` (new this round)
+- Trajectory eval: `scripts/audit/run_t1_trajectory.sh`
 - Training-data prep: `scripts/data/prep_opd_train_data.py`
-- Analyzers: `src/mllmopd/analysis/{t1_compare,paired_vision_critical,vd_decay}.py`
+- Analyzers: `src/mllmopd/analysis/{t1_compare,paired_vision_critical,vd_decay,t1_brief_table,t1_blankness_trajectory}.py`
+  (last two are new this round — `t1_brief_table` is the canonical
+  per-benchmark table renderer that produced §(2); `t1_blankness_trajectory`
+  is the blank-phrase rate + first-blank-token-position analyzer that
+  produced the paired figure)
 - Miles patches: `scripts/setup/patch_uni_opd.sh` (incl. P10 in-place div_)
 - Prior briefs: `docs/gpt-brief-2026-05-21-{,t1-v1-}negative-result.md`
   (both INVALIDATED — kept for the bug-fix history they document)
@@ -408,9 +702,15 @@ not just its magnitude.
   was `step_230` because training settled there)
   - 9 audit jsonls + summary + t1_compare.json + PV outputs
 
-**Trajectory eval dir** (in flight as of this brief):
-- `runs/audit/t1_trajectory_<timestamp>/` once `run_t1_trajectory.sh`
-  completes.
+**Trajectory eval dir** (force-added):
+- `runs/audit/t1_trajectory_20260522-105745/` — 11 jsonls
+  (T1-0 base + T1-2 × 5 steps + T1-3 × 5 steps), all full_image mode.
+
+**Analysis outputs** (force-added):
+- `runs/analysis/t1_v1p5b_trajectory.json` + `.png` — accuracy trajectory
+- `runs/analysis/t1_v1p5b_blankness.json` + `.png` — blank-phrase rate
+  + first-blank-token-position trajectory, paired with accuracy
+  (new this round)
 
 **Training run dirs** (ceph only, not on GitHub):
 - `runs/t1_v1p5b_T1_{2_full_mm, 3_blank_mm}/` with ckpts at

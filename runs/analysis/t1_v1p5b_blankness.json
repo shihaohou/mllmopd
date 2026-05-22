@@ -1,0 +1,195 @@
+{
+  "phrases": [
+    "\\bblank\\b",
+    "completely white",
+    "no information",
+    "cannot see",
+    "no visible",
+    "\\bplaceholder\\b",
+    "I cannot determine",
+    "image is empty",
+    "no chart\\b",
+    "no image\\b",
+    "\\birrelevant\\b"
+  ],
+  "T1_2": {
+    "49": {
+      "n": 1200,
+      "hits": 36,
+      "rate": 0.03,
+      "first_blank_word_pos_median": 179,
+      "first_blank_word_pos_mean": 227.80555555555554,
+      "n_first_blank_positions": 36,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.08,
+        "MathVerse": 0.02,
+        "MathVista": 0.025,
+        "ChartQA": 0.005,
+        "HallusionBench": 0.03,
+        "MathVision": 0.02
+      }
+    },
+    "99": {
+      "n": 1200,
+      "hits": 27,
+      "rate": 0.0225,
+      "first_blank_word_pos_median": 133,
+      "first_blank_word_pos_mean": 156.92592592592592,
+      "n_first_blank_positions": 27,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.08,
+        "MathVerse": 0.015,
+        "MathVista": 0.005,
+        "ChartQA": 0.0,
+        "HallusionBench": 0.02,
+        "MathVision": 0.015
+      }
+    },
+    "149": {
+      "n": 1200,
+      "hits": 34,
+      "rate": 0.028333333333333332,
+      "first_blank_word_pos_median": 128,
+      "first_blank_word_pos_mean": 183.38235294117646,
+      "n_first_blank_positions": 34,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.085,
+        "MathVerse": 0.035,
+        "MathVista": 0.02,
+        "ChartQA": 0.0,
+        "HallusionBench": 0.01,
+        "MathVision": 0.02
+      }
+    },
+    "199": {
+      "n": 1200,
+      "hits": 35,
+      "rate": 0.029166666666666667,
+      "first_blank_word_pos_median": 192,
+      "first_blank_word_pos_mean": 290.37142857142857,
+      "n_first_blank_positions": 35,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.07,
+        "MathVerse": 0.025,
+        "MathVista": 0.02,
+        "ChartQA": 0.0,
+        "HallusionBench": 0.03,
+        "MathVision": 0.03
+      }
+    },
+    "230": {
+      "n": 1200,
+      "hits": 37,
+      "rate": 0.030833333333333334,
+      "first_blank_word_pos_median": 163,
+      "first_blank_word_pos_mean": 207.9189189189189,
+      "n_first_blank_positions": 37,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.095,
+        "MathVerse": 0.02,
+        "MathVista": 0.02,
+        "ChartQA": 0.0,
+        "HallusionBench": 0.03,
+        "MathVision": 0.02
+      }
+    }
+  },
+  "T1_3": {
+    "49": {
+      "n": 1200,
+      "hits": 28,
+      "rate": 0.023333333333333334,
+      "first_blank_word_pos_median": 110,
+      "first_blank_word_pos_mean": 200.46428571428572,
+      "n_first_blank_positions": 28,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.035,
+        "MathVerse": 0.015,
+        "MathVista": 0.035,
+        "ChartQA": 0.0,
+        "HallusionBench": 0.035,
+        "MathVision": 0.02
+      }
+    },
+    "99": {
+      "n": 1200,
+      "hits": 34,
+      "rate": 0.028333333333333332,
+      "first_blank_word_pos_median": 151,
+      "first_blank_word_pos_mean": 245.7058823529412,
+      "n_first_blank_positions": 34,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.035,
+        "MathVerse": 0.025,
+        "MathVista": 0.035,
+        "ChartQA": 0.005,
+        "HallusionBench": 0.04,
+        "MathVision": 0.03
+      }
+    },
+    "149": {
+      "n": 1200,
+      "hits": 121,
+      "rate": 0.10083333333333333,
+      "first_blank_word_pos_median": 94,
+      "first_blank_word_pos_mean": 168.0909090909091,
+      "n_first_blank_positions": 121,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.05,
+        "MathVerse": 0.17,
+        "MathVista": 0.1,
+        "ChartQA": 0.035,
+        "HallusionBench": 0.085,
+        "MathVision": 0.165
+      }
+    },
+    "199": {
+      "n": 1200,
+      "hits": 766,
+      "rate": 0.6383333333333333,
+      "first_blank_word_pos_median": 25,
+      "first_blank_word_pos_mean": 48.775456919060055,
+      "n_first_blank_positions": 766,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.175,
+        "MathVerse": 0.84,
+        "MathVista": 0.68,
+        "ChartQA": 0.745,
+        "HallusionBench": 0.765,
+        "MathVision": 0.625
+      }
+    },
+    "230": {
+      "n": 1200,
+      "hits": 684,
+      "rate": 0.57,
+      "first_blank_word_pos_median": 25,
+      "first_blank_word_pos_mean": 50.796783625730995,
+      "n_first_blank_positions": 684,
+      "per_bench_rate": {
+        "POPE_adversarial": 0.215,
+        "MathVerse": 0.735,
+        "MathVista": 0.615,
+        "ChartQA": 0.67,
+        "HallusionBench": 0.695,
+        "MathVision": 0.49
+      }
+    }
+  },
+  "T1_0_base": {
+    "n": 1200,
+    "hits": 26,
+    "rate": 0.021666666666666667,
+    "first_blank_word_pos_median": 143,
+    "first_blank_word_pos_mean": 183.53846153846155,
+    "n_first_blank_positions": 26,
+    "per_bench_rate": {
+      "POPE_adversarial": 0.05,
+      "MathVerse": 0.015,
+      "MathVista": 0.03,
+      "ChartQA": 0.005,
+      "HallusionBench": 0.02,
+      "MathVision": 0.01
+    }
+  }
+}
