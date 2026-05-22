@@ -16,6 +16,16 @@
 #                                                 per-replica TP must be in {1,2,4};
 #                                                 so on 8 H800: TP=8 DP=2 (or DP=4/8)
 #                                                 sidesteps the head-divisibility limit.
+#   TEACHER_NCCL_PORT    (default: auto)       — explicit NCCL/dist-init port.
+#                                                 sglang's auto-pick is
+#                                                 `--port + rand(100,1000)` with an
+#                                                 is_port_available check; that
+#                                                 races when two instances start
+#                                                 in parallel on the same box,
+#                                                 leaving the second stuck in
+#                                                 NCCL rendezvous. Set distinct
+#                                                 values per instance, e.g.
+#                                                 teacher1 -> 30100, teacher2 -> 30200.
 #   TEACHER_MEM_FRACTION (default: 0.75)       — plan §6
 #   TEACHER_MAX_RUNNING  (default: 64)
 #   TEACHER_NAME         (default: MMR1-7B-RL)
@@ -77,6 +87,7 @@ TEACHER_PORT="${TEACHER_PORT:-30000}"
 TEACHER_GPUS="${TEACHER_GPUS:-0}"
 TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-1}"
 TEACHER_DP_SIZE="${TEACHER_DP_SIZE:-1}"
+TEACHER_NCCL_PORT="${TEACHER_NCCL_PORT:-}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 TEACHER_MAX_RUNNING="${TEACHER_MAX_RUNNING:-64}"
 TEACHER_NAME="${TEACHER_NAME:-MMR1-7B-RL}"
@@ -173,6 +184,9 @@ LAUNCH_CMD=(
   --trust-remote-code
   --log-level info
 )
+if [ -n "${TEACHER_NCCL_PORT}" ]; then
+  LAUNCH_CMD+=(--nccl-port "${TEACHER_NCCL_PORT}")
+fi
 
 echo ">>> teacher model:  ${TEACHER_MODEL_PATH}"
 echo ">>> URL:            ${TEACHER_URL}"
