@@ -44,6 +44,13 @@
 #   SAVE_INTERVAL           checkpoint frequency in optimizer steps
 #                           (default: 50; ~5 ckpts over 250 steps)
 #
+# T2-1 (method tier, on top of T1 plumbing):
+#   MLLMOPD_USE_VD_WEIGHTING  0 | 1   (default 0 = T1 byte-identical)
+#   MLLMOPD_VD_TAU            float    (default 0.4; PGPO Eq 6 threshold on min-max normalized vd_t)
+#   MLLMOPD_VD_BETA           float    (default 2.0; PGPO Eq 6 boost slope)
+#   When MLLMOPD_USE_VD_WEIGHTING=1, OPD_TEACHER_IMAGE_MODE must be 'full'
+#   (T2-1 is VD-weighted FullTeacher OPD; see docs/t2_1_design.md).
+#
 # Usage (run from repo root):
 #   # 10-step smoke (T1-2 arm)
 #   DEBUG_MODE=1 ROLLOUT_BATCH_SIZE=1 NUM_EPOCH=1 \
@@ -56,6 +63,10 @@
 #
 #   # Full T1-3 run (BlankTeacher arm)
 #   OPD_TEACHER_IMAGE_MODE=blank bash scripts/train/opd_mmr1_3b_baseline.sh
+#
+#   # T2-1 run (VD-weighted FullTeacher OPD)
+#   MLLMOPD_USE_VD_WEIGHTING=1 OPD_TEACHER_IMAGE_MODE=full \
+#     bash scripts/train/opd_mmr1_3b_baseline.sh
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -258,7 +269,30 @@ case "${OPD_TEACHER_IMAGE_MODE}" in
 esac
 export OPD_TEACHER_IMAGE_MODE
 
-OPD_RUN_NAME="${OPD_RUN_NAME:-t1_v0_${ARM_TAG}}"
+# T2-1: VD-weighted FullTeacher OPD. PGPO-style per-token weighting on
+# vd_t = lp_teacher_full(t) - lp_teacher_blank(t). See
+# docs/t2_1_design.md and src/mllmopd/training/vd_weighting.py.
+# Defaults match PGPO Table 2 (tau=0.4, beta=2.0). Set MLLMOPD_USE_VD_WEIGHTING=1
+# to enable; otherwise this script runs as T1-2 / T1-3 byte-identical.
+MLLMOPD_USE_VD_WEIGHTING="${MLLMOPD_USE_VD_WEIGHTING:-0}"
+MLLMOPD_VD_TAU="${MLLMOPD_VD_TAU:-0.4}"
+MLLMOPD_VD_BETA="${MLLMOPD_VD_BETA:-2.0}"
+if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
+  if [ "${OPD_TEACHER_IMAGE_MODE}" != "full" ]; then
+    echo "ERROR: T2-1 (MLLMOPD_USE_VD_WEIGHTING=1) requires OPD_TEACHER_IMAGE_MODE=full" >&2
+    echo "  reason: VD = lp_full - lp_blank; weighting only meaningful on the FullTeacher primary arm" >&2
+    exit 1
+  fi
+  ARM_TAG="T2_1_full_vd"
+fi
+export MLLMOPD_USE_VD_WEIGHTING MLLMOPD_VD_TAU MLLMOPD_VD_BETA
+
+if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
+  OPD_RUN_NAME_DEFAULT="t2_1_v0_${ARM_TAG}"
+else
+  OPD_RUN_NAME_DEFAULT="t1_v0_${ARM_TAG}"
+fi
+OPD_RUN_NAME="${OPD_RUN_NAME:-${OPD_RUN_NAME_DEFAULT}}"
 export OPD_RUN_NAME
 
 # --- Paths ---
@@ -463,6 +497,10 @@ print(json.dumps({
     "MLLMOPD_MEMSNAP_DIR": os.environ.get("MLLMOPD_MEMSNAP_DIR", ""),
     "MLLMOPD_MEMSNAP_MAX_ENTRIES": os.environ.get("MLLMOPD_MEMSNAP_MAX_ENTRIES", ""),
     "MLLMOPD_MEMSNAP_MAX_DUMPS": os.environ.get("MLLMOPD_MEMSNAP_MAX_DUMPS", ""),
+    # T2-1 VD weighting (read by opd_diagnostics_hook + vd_weighting).
+    "MLLMOPD_USE_VD_WEIGHTING": os.environ.get("MLLMOPD_USE_VD_WEIGHTING", ""),
+    "MLLMOPD_VD_TAU": os.environ.get("MLLMOPD_VD_TAU", ""),
+    "MLLMOPD_VD_BETA": os.environ.get("MLLMOPD_VD_BETA", ""),
 }))
 PYEOF
   TRAIN_ENV_VARS_JSON=$(python "${_ENVJSON_PY}")
@@ -782,9 +820,10 @@ source "${STUDENT_MODEL_ARGS}"
 
 # --- Sanity logging ---
 echo "================================================================"
-echo "  T1 ARM                  : ${ARM_TAG}"
+echo "  ARM                     : ${ARM_TAG}"
 echo "  OPD_TEACHER_IMAGE_MODE  : ${OPD_TEACHER_IMAGE_MODE}"
 echo "  OPD_RUN_NAME            : ${OPD_RUN_NAME}"
+echo "  VD weighting (T2-1)     : ${MLLMOPD_USE_VD_WEIGHTING}  (tau=${MLLMOPD_VD_TAU}, beta=${MLLMOPD_VD_BETA})"
 echo "  STUDENT                 : ${STUDENT_CKPT}"
 echo "  TEACHER (server)        : ${TEACHER_NAME} @ ${TEACHER_INFO_URL}"
 echo "  TRAIN_JSONL             : ${TRAIN_JSONL}"

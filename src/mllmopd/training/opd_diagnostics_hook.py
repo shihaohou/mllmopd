@@ -43,6 +43,8 @@ from pathlib import Path
 
 import torch
 
+from mllmopd.training.vd_weighting import compute_vd_weights
+
 # We can't `from Uni_OPD_utils.OPD_reward.post_process_rewards import ...`
 # because that module's top-level pulls in `exps.OPD.utils.reward.get_reward`
 # which chains into `rule_base_reward.py`'s missing external dependencies
@@ -179,18 +181,30 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
     writes the diagnostic JSONL row, deriving lp_full / lp_blank from
     the primary/diagnostic teacher responses and the current arm's
     `image_mode`.
+
+    T2-1: if MLLMOPD_USE_VD_WEIGHTING=1, also attach
+    `sample.teacher_vd_weights` (PGPO-style per-token weight, computed
+    from lp_full/lp_blank). Uni-OPD's rollout.py plumbs it through to
+    `rollout_data["teacher_vd_weights"]`, and our patched loss.py
+    multiplies the OPD advantage by it. When the flag is unset, the
+    attribute is not added → upstream plumbing's `__dict__` check skips
+    it → T1-2/T1-3 stay byte-identical.
     """
+    use_vd_weighting = os.environ.get("MLLMOPD_USE_VD_WEIGHTING", "0") == "1"
+
     # 1. Canonical path — mutates sample.teacher_log_probs in place,
     # returns the (raw, processed) tuple Uni-OPD's trainer expects.
     raw_rewards, processed_rewards = post_process_rewards(args, samples, **kwargs)
 
-    # 2. Diagnostics dump.
+    # 2. Diagnostics dump + (optional) VD weight attachment.
     step_i = _STEP_COUNTER["i"]
     _STEP_COUNTER["i"] += 1
 
     out_path = _diag_out_dir() / f"step_{step_i:06d}.jsonl.gz"
     t0 = time.time()
     n_written = 0
+    n_vd_attached = 0
+    n_vd_degenerate = 0
 
     with gzip.open(out_path, "wt") as fout:
         for sample in samples:
@@ -215,6 +229,18 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
             if lp_full and lp_blank and len(lp_full) == len(lp_blank):
                 vd = [a - b for a, b in zip(lp_full, lp_blank)]
 
+            vd_weights: list[float] = []
+            if use_vd_weighting and response_length > 0:
+                if vd and len(vd) == response_length:
+                    w = compute_vd_weights(lp_full, lp_blank, response_length)
+                    sample.teacher_vd_weights = w
+                    vd_weights = w.tolist()
+                    n_vd_attached += 1
+                else:
+                    sample.teacher_vd_weights = torch.ones(response_length, dtype=torch.float32)
+                    vd_weights = sample.teacher_vd_weights.tolist()
+                    n_vd_degenerate += 1
+
             sample_id = None
             md = getattr(sample, "metadata", None)
             if isinstance(md, dict):
@@ -235,13 +261,21 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
                 "lp_full": lp_full,
                 "lp_blank": lp_blank,
                 "vd": vd,
+                "vd_weights": vd_weights,
                 "old_lp_student": old_lp_student,
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_written += 1
 
-    logger.info(
-        f"[opd_diag] step {step_i}: wrote {n_written} rows to {out_path} "
-        f"({time.time() - t0:.2f}s)"
-    )
+    if use_vd_weighting:
+        logger.info(
+            f"[opd_diag] step {step_i}: wrote {n_written} rows to {out_path} "
+            f"({time.time() - t0:.2f}s); VD weights attached on "
+            f"{n_vd_attached}/{n_written} samples ({n_vd_degenerate} degenerate→ones)"
+        )
+    else:
+        logger.info(
+            f"[opd_diag] step {step_i}: wrote {n_written} rows to {out_path} "
+            f"({time.time() - t0:.2f}s)"
+        )
     return raw_rewards, processed_rewards

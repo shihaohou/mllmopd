@@ -656,6 +656,213 @@ print("    in-place div_() patch applied")
 PY
 fi
 
+# --- Patch P11: rollout.py — collect + partition teacher_vd_weights ----
+# T2-1 method tier: plumb the per-token VD weight tensor produced by
+# mllmopd.training.opd_diagnostics_hook through to rollout_data["teacher_vd_weights"]
+# so the trainer-side OPD branch (loss.py P13) can multiply it into the
+# OPD advantage. Two anchors: (A) collect block in _convert_samples_to_train_data,
+# (B) partition keys list in _split_train_data_by_dp.
+# T1-2/T1-3 baselines never set sample.teacher_vd_weights → both anchors
+# are no-ops at runtime. See docs/t2_1_design.md.
+ROLLOUT="${MILES_DIR}/miles/ray/rollout.py"
+ROLLOUT_SENTINEL="# === mllmopd P11 vd weights collect ==="
+if [ -f "${ROLLOUT}" ]; then
+  if grep -q "${ROLLOUT_SENTINEL}" "${ROLLOUT}"; then
+    echo ">>> ${ROLLOUT}: already patched (P11 vd-weights sentinel present)"
+  else
+    echo ">>> patching ${ROLLOUT}: collect + partition teacher_vd_weights"
+    export MLLMOPD_PATCH_ROLLOUT_PATH="${ROLLOUT}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_ROLLOUT_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor A: collect block. The two-line response_correct collect plus
+# the blank line and `return train_data` are unique to this method.
+anchor_a = '''            if "response_correct" in samples[0].__dict__:
+                train_data["response_correct"] = [sample.response_correct for sample in samples]
+
+        return train_data'''
+patch_a = '''            if "response_correct" in samples[0].__dict__:
+                train_data["response_correct"] = [sample.response_correct for sample in samples]
+            # === mllmopd P11 vd weights collect ===
+            # Per-token VD weights computed by
+            # mllmopd.training.opd_diagnostics_hook when
+            # MLLMOPD_USE_VD_WEIGHTING=1 (see docs/t2_1_design.md). The
+            # attribute is absent in T1 baselines so this branch silently
+            # skips. Loss-side application is in loss.py P13.
+            if "teacher_vd_weights" in samples[0].__dict__:
+                train_data["teacher_vd_weights"] = [sample.teacher_vd_weights for sample in samples]
+            # === end mllmopd P11 vd weights collect ===
+
+        return train_data'''
+
+# Anchor B: partition keys list — add teacher_vd_weights right after
+# response_correct in the keys-to-partition list.
+anchor_b = '''                "teacher_log_probs",
+                "response_correct",
+            ]:'''
+patch_b = '''                "teacher_log_probs",
+                "response_correct",
+                "teacher_vd_weights",  # === mllmopd P11 vd partition key ===
+            ]:'''
+
+if anchor_a not in src:
+    sys.exit(f"ERROR: P11 anchor A not found in {path!r} — _convert_samples_to_train_data may have moved")
+if anchor_b not in src:
+    sys.exit(f"ERROR: P11 anchor B not found in {path!r} — partition keys list may have moved")
+
+new_src = src.replace(anchor_a, patch_a, 1).replace(anchor_b, patch_b, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P11 applied (collect block + partition key entry)")
+PY
+  fi
+else
+  echo ">>> ${ROLLOUT}: skipped (file not found for P11)"
+fi
+
+# --- Patch P12: data.py — cuda conversion for teacher_vd_weights -------
+# Mirror the existing teacher_log_probs cuda-move block for VD weights
+# when present. Skipped at runtime on T1-2/T1-3 baselines (no
+# teacher_vd_weights key in rollout_data).
+DATA_FILE="${MILES_DIR}/miles/backends/training_utils/data.py"
+DATA_SENTINEL="# === mllmopd P12 vd weights cuda ==="
+if [ -f "${DATA_FILE}" ]; then
+  if grep -q "${DATA_SENTINEL}" "${DATA_FILE}"; then
+    echo ">>> ${DATA_FILE}: already patched (P12 vd-cuda sentinel present)"
+  else
+    echo ">>> patching ${DATA_FILE}: cuda conversion for teacher_vd_weights"
+    export MLLMOPD_PATCH_DATA_PATH="${DATA_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_DATA_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor on the end of the teacher_log_probs cuda block + the blank
+# line before the next `if "rollout_routed_experts"` block.
+anchor = '''                for log_prob in rollout_data["teacher_log_probs"]
+            ]
+
+    if "rollout_routed_experts" in rollout_data:'''
+patch = '''                for log_prob in rollout_data["teacher_log_probs"]
+            ]
+        # === mllmopd P12 vd weights cuda ===
+        # Same cuda move for VD weights when present (absent on T1
+        # baselines; loss.py P13 OPD branch guards with .get(...)).
+        if "teacher_vd_weights" in rollout_data:
+            rollout_data["teacher_vd_weights"] = [
+                torch.tensor(w, device=torch.cuda.current_device(), dtype=torch.float32)
+                if not isinstance(w, torch.Tensor)
+                else w.to(device=torch.cuda.current_device(), dtype=torch.float32)
+                for w in rollout_data["teacher_vd_weights"]
+            ]
+        # === end mllmopd P12 vd weights cuda ===
+
+    if "rollout_routed_experts" in rollout_data:'''
+if anchor not in src:
+    sys.exit(f"ERROR: P12 anchor not found in {path!r} — data.py teacher_log_probs block may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P12 applied (teacher_vd_weights cuda conversion)")
+PY
+  fi
+else
+  echo ">>> ${DATA_FILE}: skipped (file not found for P12)"
+fi
+
+# --- Patch P13: loss.py — multiply OPD advantage by VD weight ----------
+# Two-part patch inside the on_policy_distillation branch of
+# compute_advantages_and_returns:
+#   (A) read teacher_vd_weights from rollout_data + slice to response length
+#   (B) inside the per-sample loop, multiply adv by vd_w when present
+# Both gated by `rollout_data.get(...)`; absent on T1-2/T1-3 baselines.
+LOSS_VD_SENTINEL="# === mllmopd P13 vd weights apply ==="
+if [ -f "${LOSS}" ]; then
+  if grep -q "${LOSS_VD_SENTINEL}" "${LOSS}"; then
+    echo ">>> ${LOSS}: already patched (P13 vd-apply sentinel present)"
+  else
+    echo ">>> patching ${LOSS}: read + apply teacher_vd_weights in OPD branch"
+    export MLLMOPD_PATCH_LOSS_VD_PATH="${LOSS}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_VD_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor A: insert vd_weights reader between the teacher_log_probs slice
+# and the "Reverse KL divergence" comment. Captures the closing `]` of
+# the list-comp + the blank line + the comment header — unique anchor.
+anchor_a = '''        teacher_log_probs: list[torch.Tensor] = [
+            t_log_prob[-response_length:]
+            for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
+        ]
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+patch_a = '''        teacher_log_probs: list[torch.Tensor] = [
+            t_log_prob[-response_length:]
+            for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
+        ]
+        # === mllmopd P13 vd weights apply ===
+        # Per-token VD weights computed by mllmopd.training.opd_diagnostics_hook
+        # (PGPO-style; see mllmopd/training/vd_weighting.py +
+        # docs/t2_1_design.md). Absent on T1-2/T1-3 baselines so this is a
+        # no-op (None ⇒ unit weight) when MLLMOPD_USE_VD_WEIGHTING is unset.
+        teacher_vd_weights_list: list[torch.Tensor] | None = rollout_data.get("teacher_vd_weights")
+        if teacher_vd_weights_list is not None:
+            teacher_vd_weights_list = [
+                w.to(device=device) for w in teacher_vd_weights_list
+            ]
+            teacher_vd_weights_list = [
+                w[-response_length:]
+                for w, response_length in zip(teacher_vd_weights_list, response_lengths, strict=False)
+            ]
+        # === end mllmopd P13 vd weights apply (reader) ===
+
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+
+# Anchor B: replace the inner-loop adv assignment block. The original
+# closes with `advantages.append(adv)`. The patched version inserts the
+# VD multiplier between the existing `adv: torch.Tensor = ...` line and
+# the append.
+anchor_b = '''                teacher_valid_mask = (t_logps != TEACHER_LOGP_FAILED_SENTINEL).float()
+                adv: torch.Tensor = (t_logps - s_logps) * teacher_valid_mask  # 失败位置直接置 0
+            advantages.append(adv)'''
+patch_b = '''                teacher_valid_mask = (t_logps != TEACHER_LOGP_FAILED_SENTINEL).float()
+                adv: torch.Tensor = (t_logps - s_logps) * teacher_valid_mask  # 失败位置直接置 0
+                # === mllmopd P13 vd weights apply (multiplier) ===
+                if teacher_vd_weights_list is not None:
+                    vd_w = teacher_vd_weights_list[i]
+                    if vd_w.shape[0] == adv.shape[0]:
+                        adv = adv * vd_w
+                    else:
+                        logger.warning(
+                            f"[OPD/VD] sample {i}: vd_weight length {vd_w.shape[0]} "
+                            f"!= advantage length {adv.shape[0]}; skipping weight."
+                        )
+                # === end mllmopd P13 vd weights apply (multiplier) ===
+            advantages.append(adv)'''
+
+if anchor_a not in src:
+    sys.exit(f"ERROR: P13 anchor A (vd reader) not found in {path!r} — OPD branch may have moved")
+if anchor_b not in src:
+    sys.exit(f"ERROR: P13 anchor B (vd multiplier) not found in {path!r} — OPD inner loop may have moved")
+
+new_src = src.replace(anchor_a, patch_a, 1).replace(anchor_b, patch_b, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P13 applied (vd reader + vd multiplier)")
+PY
+  fi
+else
+  echo ">>> ${LOSS}: skipped (file not found for P13)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
@@ -666,3 +873,5 @@ echo "    # weight-sync receiver path:"
 echo "    grep '\\[mllmopd weight-sync' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
 echo "    # default_weight_loader fallback diag (should not fire if P5/P6 work):"
 echo "    grep -A3 '\\[mllmopd diag\\]' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
+echo "    # T2-1 VD weights flow (when MLLMOPD_USE_VD_WEIGHTING=1):"
+echo "    zcat \${MLLMOPD_RUNS}/t2_1_v0_*/diagnostics/step_*.jsonl.gz | head -1 | python -m json.tool | grep -A2 vd_weights"
