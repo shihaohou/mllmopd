@@ -874,8 +874,14 @@ if [ "${DEBUG_MODE}" = "1" ]; then
   DEBUG_ARGS=(
     --save-debug-rollout-data "${EXPERIMENT_DIR}/debug/rollout_${CUR_TIME:-now}/step_{rollout_id}.pt"
   )
+  echo ">>> DEBUG_MODE=1 (per-rollout .pt dumps to ${EXPERIMENT_DIR}/debug/)"
+fi
+# Separate NCCL verbose toggle. DEBUG_MODE used to also force NCCL_DEBUG=INFO,
+# which floods the log once cross-host NCCL is debugged. Use VERBOSE_NCCL=1
+# explicitly when debugging NCCL transport (e.g., first cross-host bring-up).
+if [ "${VERBOSE_NCCL:-0}" = "1" ]; then
   export NCCL_DEBUG=INFO
-  echo ">>> DEBUG_MODE=1 (smoke profile: per-rollout dumps, NCCL_DEBUG=INFO)"
+  echo ">>> VERBOSE_NCCL=1 → NCCL_DEBUG=INFO (heavy log volume)"
 fi
 
 # Megatron model arch — Qwen2.5-VL-3B shares the language backbone with
