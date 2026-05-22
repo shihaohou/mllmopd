@@ -420,6 +420,17 @@ NUM_EPOCH="${NUM_EPOCH:-1}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-}"
 LR="${LR:-1e-6}"
 LR_WARMUP="${LR_WARMUP:-5}"
+# Megatron's OptimizerParamScheduler asserts lr_warmup_steps < lr_decay_steps,
+# and lr_decay_steps derives from total training steps. For tiny smokes
+# (NUM_ROLLOUT=2 for Gate B), the default warmup=5 fails the assert before
+# any step runs. Auto-clamp: max(0, NUM_ROLLOUT-1) when NUM_ROLLOUT is
+# explicitly small. Full-length runs (NUM_ROLLOUT unset, ~250 steps) keep
+# the original default.
+if [ -n "${NUM_ROLLOUT}" ] && [ "${NUM_ROLLOUT}" -lt $((LR_WARMUP + 1)) ]; then
+  _CLAMPED=$(( NUM_ROLLOUT > 0 ? NUM_ROLLOUT - 1 : 0 ))
+  echo ">>> LR_WARMUP auto-clamp: ${LR_WARMUP} -> ${_CLAMPED} (NUM_ROLLOUT=${NUM_ROLLOUT})"
+  LR_WARMUP="${_CLAMPED}"
+fi
 EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
 OPD_CLIP_RANGE="${OPD_CLIP_RANGE:-10.0}"
