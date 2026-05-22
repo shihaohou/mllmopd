@@ -1361,6 +1361,51 @@ else
   echo ">>> ${EXT_ENG_FILE}: skipped (file not found for P17)"
 fi
 
+# --- Patch P18: silence MilesRouter uvicorn access log -----------------
+# Default uvicorn logs every HTTP request:
+#   INFO: 10.86.16.16:60602 - "POST /generate HTTP/1.1" 200 OK
+# With 7 engines × ~64 generations/step × 250 steps that's ~110k lines
+# of access noise drowning out real training signal.
+#
+# Fix: pass `access_log=False` to uvicorn.run AND bump log_level to
+# "warning" so uvicorn only logs startup/error events. Doesn't suppress
+# our own logger.info("...") business logs elsewhere in the codebase.
+ROUTER_FILE="${MILES_DIR}/miles/router/router.py"
+ROUTER_QUIET_SENTINEL="# === mllmopd P18 silence uvicorn access log ==="
+if [ -f "${ROUTER_FILE}" ]; then
+  if grep -q "${ROUTER_QUIET_SENTINEL}" "${ROUTER_FILE}"; then
+    echo ">>> ${ROUTER_FILE}: already patched (P18 quiet-uvicorn sentinel present)"
+  else
+    echo ">>> patching ${ROUTER_FILE}: silence uvicorn access log"
+    export MLLMOPD_PATCH_ROUTER_QUIET_PATH="${ROUTER_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_ROUTER_QUIET_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '    uvicorn.run(miles_router.app, host=args.sglang_router_ip, port=args.sglang_router_port, log_level="info")'
+patch = '''    # === mllmopd P18 silence uvicorn access log ===
+    uvicorn.run(
+        miles_router.app,
+        host=args.sglang_router_ip,
+        port=args.sglang_router_port,
+        log_level="warning",
+        access_log=False,
+    )
+    # === end mllmopd P18 ==='''
+if anchor not in src:
+    sys.exit(f"ERROR: P18 anchor not found in {path!r} — uvicorn.run line may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P18 router.py applied")
+PY
+  fi
+else
+  echo ">>> ${ROUTER_FILE}: skipped (file not found for P18)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
