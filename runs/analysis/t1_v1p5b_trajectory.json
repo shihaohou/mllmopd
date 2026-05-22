@@ -1,0 +1,149 @@
+{
+  "T1_2": {
+    "0": {
+      "overall": 0.55,
+      "per_bench": {
+        "POPE_adversarial": 0.875,
+        "MathVerse": 0.31,
+        "MathVista": 0.625,
+        "ChartQA": 0.68,
+        "HallusionBench": 0.615,
+        "MathVision": 0.195
+      }
+    },
+    "49": {
+      "overall": 0.5425,
+      "per_bench": {
+        "POPE_adversarial": 0.845,
+        "MathVerse": 0.36,
+        "MathVista": 0.59,
+        "ChartQA": 0.695,
+        "HallusionBench": 0.57,
+        "MathVision": 0.195
+      }
+    },
+    "99": {
+      "overall": 0.5475,
+      "per_bench": {
+        "POPE_adversarial": 0.87,
+        "MathVerse": 0.33,
+        "MathVista": 0.64,
+        "ChartQA": 0.715,
+        "HallusionBench": 0.585,
+        "MathVision": 0.145
+      }
+    },
+    "149": {
+      "overall": 0.5908333333333333,
+      "per_bench": {
+        "POPE_adversarial": 0.895,
+        "MathVerse": 0.365,
+        "MathVista": 0.655,
+        "ChartQA": 0.81,
+        "HallusionBench": 0.62,
+        "MathVision": 0.2
+      }
+    },
+    "199": {
+      "overall": 0.5741666666666667,
+      "per_bench": {
+        "POPE_adversarial": 0.885,
+        "MathVerse": 0.3,
+        "MathVista": 0.64,
+        "ChartQA": 0.8,
+        "HallusionBench": 0.61,
+        "MathVision": 0.21
+      }
+    },
+    "230": {
+      "overall": 0.5758333333333333,
+      "per_bench": {
+        "POPE_adversarial": 0.885,
+        "MathVerse": 0.34,
+        "MathVista": 0.655,
+        "ChartQA": 0.79,
+        "HallusionBench": 0.6,
+        "MathVision": 0.185
+      }
+    }
+  },
+  "T1_3": {
+    "0": {
+      "overall": 0.55,
+      "per_bench": {
+        "POPE_adversarial": 0.875,
+        "MathVerse": 0.31,
+        "MathVista": 0.625,
+        "ChartQA": 0.68,
+        "HallusionBench": 0.615,
+        "MathVision": 0.195
+      }
+    },
+    "49": {
+      "overall": 0.5533333333333333,
+      "per_bench": {
+        "POPE_adversarial": 0.87,
+        "MathVerse": 0.29,
+        "MathVista": 0.675,
+        "ChartQA": 0.695,
+        "HallusionBench": 0.59,
+        "MathVision": 0.2
+      }
+    },
+    "99": {
+      "overall": 0.5658333333333333,
+      "per_bench": {
+        "POPE_adversarial": 0.87,
+        "MathVerse": 0.32,
+        "MathVista": 0.64,
+        "ChartQA": 0.78,
+        "HallusionBench": 0.6,
+        "MathVision": 0.185
+      }
+    },
+    "149": {
+      "overall": 0.5025,
+      "per_bench": {
+        "POPE_adversarial": 0.825,
+        "MathVerse": 0.185,
+        "MathVista": 0.515,
+        "ChartQA": 0.72,
+        "HallusionBench": 0.575,
+        "MathVision": 0.195
+      }
+    },
+    "199": {
+      "overall": 0.335,
+      "per_bench": {
+        "POPE_adversarial": 0.72,
+        "MathVerse": 0.125,
+        "MathVista": 0.365,
+        "ChartQA": 0.105,
+        "HallusionBench": 0.54,
+        "MathVision": 0.155
+      }
+    },
+    "230": {
+      "overall": 0.3308333333333333,
+      "per_bench": {
+        "POPE_adversarial": 0.75,
+        "MathVerse": 0.115,
+        "MathVista": 0.315,
+        "ChartQA": 0.155,
+        "HallusionBench": 0.49,
+        "MathVision": 0.16
+      }
+    }
+  },
+  "T1_0_base": {
+    "overall": 0.55,
+    "per_bench": {
+      "POPE_adversarial": 0.875,
+      "MathVerse": 0.31,
+      "MathVista": 0.625,
+      "ChartQA": 0.68,
+      "HallusionBench": 0.615,
+      "MathVision": 0.195
+    }
+  }
+}

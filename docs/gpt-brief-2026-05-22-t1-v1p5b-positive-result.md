@@ -197,6 +197,60 @@ preserved. What collapsed is the **content**: the model has learned
 that under image-presentation, the canonical response is to disavow
 the image.
 
+## Trajectory evidence: phase transition between step 149 and 199
+
+A separate trajectory eval (`run_t1_trajectory.sh`, commit `2a905e8`)
+runs full_image-mode eval against every saved ckpt (step_49 / 99 / 149 /
+199 / 230) of both arms plus T1-0 base. Re-scored via the canonical
+`mllmopd.diagnostics.scorers` (the same code path t1_compare uses).
+Output: `runs/audit/t1_trajectory_20260522-105745/`. Figure:
+`runs/analysis/t1_v1p5b_trajectory.png`.
+
+| Step | T1-2 (Full) overall | T1-3 (Blank) overall | T1-3 ChartQA | T1-3 MathVista |
+|---|---|---|---|---|
+| 0 (base) | 0.550 | 0.550 | 0.680 | 0.625 |
+| 49 | 0.542 | 0.553 | 0.695 | 0.675 |
+| **99** | 0.547 | **0.566** | 0.780 | 0.640 |
+| 149 | 0.591 | 0.502 ⬇ | 0.720 | 0.515 |
+| **199** | 0.574 | **0.335** ❗ | **0.105** | 0.365 |
+| 230 | 0.576 | 0.331 | 0.155 | 0.315 |
+
+**The BlankTeacher arm doesn't degrade gradually — it cliff-falls between
+step 149 and step 199.** Three regions:
+
+1. **Step 0–99 (looks fine)**: Both arms gain similar small amounts.
+   At step_99, T1-3 (0.566) is even slightly higher than T1-2 (0.547).
+   This is consistent with the earlier v1 step_99 brief that saw
+   "Δ ≈ +1.5pp" — at step 99 the BlankTeacher's training-time blindness
+   pattern hadn't yet dominated the student's distribution.
+
+2. **Step 99–149 (cracks start)**: T1-3 drops 6.4pp (0.566 → 0.502).
+   T1-2 keeps improving (+4.4pp). Gap opens to 9pp.
+
+3. **Step 149–199 (catastrophic collapse)**: T1-3 drops a further
+   16.7pp in just 50 steps; ChartQA specifically loses **61.5pp**
+   (0.720 → 0.105). T1-2 stays stable. Gap blows out to 24pp.
+
+4. **Step 199–230 (stabilized at bottom)**: T1-3 makes no recovery,
+   stays at ~0.33 overall.
+
+**This is the cleanest signature so far that the BlankTeacher mechanism
+is a phase-transition, not a smooth slope.** Dense KL distills the
+"image is blank" template progressively, and at some critical point
+(~step 150-200 in this setup) the student's distribution flips from
+"vision-conditioned with mild BlankTeacher contamination" to
+"BlankTeacher-template-dominated, ignoring image".
+
+This timing also resolves the puzzle of why v1 step_99 (with the
+ckpt-routing bug aside) showed only a weak +1.5pp signal: **at step 99,
+the collapse hadn't happened yet**. The full +23pp signal requires
+training past the phase transition.
+
+The phase-transition behavior is itself paper-figure material: it
+implies dense KL on a misspecified teacher accumulates a hidden
+"blindness budget" that only releases catastrophically once enough has
+been transferred.
+
 ## Implications
 
 ### For the original hypothesis (project_hypotheses.md)
