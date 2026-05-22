@@ -1171,6 +1171,83 @@ else
   echo ">>> ${QWEN3VL_FILE}: skipped (file not found for P15)"
 fi
 
+# --- Patch P16: best-effort cleanup of orphan NCCL update groups --------
+# After a trainer crash without clean shutdown, the sglang engine retains
+# the NCCL "miles-pp_0" group from the dead trainer's session. Next trainer
+# launch calls init_weights_update_group with the same group name and
+# sglang returns 400: "The specified group name has already been created."
+#
+# Fix: at the START of connect_rollout_engines_from_distributed, send a
+# best-effort destroy_weights_update_group to every engine. If the group
+# doesn't exist (clean state), the engine returns an error that we
+# swallow. If it does exist (orphan), it's now gone and the subsequent
+# init_weights_update_group succeeds.
+UWFD_FILE="${MILES_DIR}/miles/backends/megatron_utils/update_weight/update_weight_from_distributed.py"
+UWFD_SENTINEL="# === mllmopd P16 cleanup orphan NCCL group ==="
+if [ -f "${UWFD_FILE}" ]; then
+  if grep -q "${UWFD_SENTINEL}" "${UWFD_FILE}"; then
+    echo ">>> ${UWFD_FILE}: already patched (P16 orphan-cleanup sentinel present)"
+  else
+    echo ">>> patching ${UWFD_FILE}: best-effort destroy before connect"
+    export MLLMOPD_PATCH_UWFD_PATH="${UWFD_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_UWFD_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '''def connect_rollout_engines_from_distributed(
+    args: Namespace, group_name: str, rollout_engines: Sequence[ActorHandle]
+) -> dist.ProcessGroup:
+    """
+    Create NCCL group: training rank 0 + all engine GPUs. Blocks until joined.
+    """
+    master_address = ray._private.services.get_node_ip_address()'''
+patch = '''def connect_rollout_engines_from_distributed(
+    args: Namespace, group_name: str, rollout_engines: Sequence[ActorHandle]
+) -> dist.ProcessGroup:
+    """
+    Create NCCL group: training rank 0 + all engine GPUs. Blocks until joined.
+    """
+    # === mllmopd P16 cleanup orphan NCCL group ===
+    # Best-effort destroy of any orphan `group_name` left over from a
+    # previous trainer instance that crashed without clean shutdown.
+    # Sglang's init_weights_update_group returns 400 on duplicate group
+    # names; orphans accumulate across crashes during xbox bring-up.
+    # If the group doesn't exist on the engine side, the destroy call
+    # errors and we silently continue — that's the expected clean-state path.
+    import logging as _mllmopd_log
+    try:
+        _cleanup_refs = [
+            engine.destroy_weights_update_group.remote(group_name)
+            for engine in rollout_engines
+        ]
+        ray.get(_cleanup_refs)
+        _mllmopd_log.getLogger(__name__).info(
+            f"[P16] pre-connect cleanup destroyed orphan group {group_name!r} "
+            f"on {len(rollout_engines)} engines"
+        )
+    except Exception as _mllmopd_e:
+        _mllmopd_log.getLogger(__name__).info(
+            f"[P16] pre-connect cleanup of {group_name!r} returned "
+            f"{type(_mllmopd_e).__name__}: {_mllmopd_e} (no orphan or "
+            f"clean state; continuing to init_weights_update_group)"
+        )
+    # === end mllmopd P16 ===
+
+    master_address = ray._private.services.get_node_ip_address()'''
+if anchor not in src:
+    sys.exit(f"ERROR: P16 anchor not found in {path!r} — connect_rollout_engines_from_distributed may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P16 update_weight_from_distributed.py applied")
+PY
+  fi
+else
+  echo ">>> ${UWFD_FILE}: skipped (file not found for P16)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
