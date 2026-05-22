@@ -9,7 +9,13 @@
 #   TEACHER_MODEL_PATH   (default: $MMR1_7B_RL_CKPT from .env)
 #   TEACHER_PORT         (default: 30000)
 #   TEACHER_GPUS         (default: 0)          — single GPU for 7B bf16
-#   TEACHER_TP_SIZE      (default: 1)
+#   TEACHER_TP_SIZE      (default: 1)          — total GPU count seen by sglang;
+#                                                 with DP>1, per-replica TP = TP/DP.
+#   TEACHER_DP_SIZE      (default: 1)          — number of DP replicas. For
+#                                                 Qwen2.5-VL-7B (KV heads=4, Q heads=28)
+#                                                 per-replica TP must be in {1,2,4};
+#                                                 so on 8 H800: TP=8 DP=2 (or DP=4/8)
+#                                                 sidesteps the head-divisibility limit.
 #   TEACHER_MEM_FRACTION (default: 0.75)       — plan §6
 #   TEACHER_MAX_RUNNING  (default: 64)
 #   TEACHER_NAME         (default: MMR1-7B-RL)
@@ -70,6 +76,7 @@ TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MMR1_7B_RL_CKPT:?}}"
 TEACHER_PORT="${TEACHER_PORT:-30000}"
 TEACHER_GPUS="${TEACHER_GPUS:-0}"
 TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-1}"
+TEACHER_DP_SIZE="${TEACHER_DP_SIZE:-1}"
 TEACHER_MEM_FRACTION="${TEACHER_MEM_FRACTION:-0.75}"
 TEACHER_MAX_RUNNING="${TEACHER_MAX_RUNNING:-64}"
 TEACHER_NAME="${TEACHER_NAME:-MMR1-7B-RL}"
@@ -159,6 +166,7 @@ LAUNCH_CMD=(
   --host "${TEACHER_HOST}"
   --port "${TEACHER_PORT}"
   --tp-size "${TEACHER_TP_SIZE}"
+  --dp-size "${TEACHER_DP_SIZE}"
   --dtype bfloat16
   --mem-fraction-static "${TEACHER_MEM_FRACTION}"
   --max-running-requests "${TEACHER_MAX_RUNNING}"
@@ -168,7 +176,7 @@ LAUNCH_CMD=(
 
 echo ">>> teacher model:  ${TEACHER_MODEL_PATH}"
 echo ">>> URL:            ${TEACHER_URL}"
-echo ">>> GPU(s):         ${TEACHER_GPUS}  (TP=${TEACHER_TP_SIZE})"
+echo ">>> GPU(s):         ${TEACHER_GPUS}  (TP=${TEACHER_TP_SIZE}, DP=${TEACHER_DP_SIZE} → per-replica TP=$((TEACHER_TP_SIZE / TEACHER_DP_SIZE)))"
 echo ">>> mem_fraction:   ${TEACHER_MEM_FRACTION}  max_running: ${TEACHER_MAX_RUNNING}"
 echo ">>> log:            ${LOG_FILE}"
 
