@@ -1023,20 +1023,24 @@ QWEN3VL_FILE="${MILES_DIR}/miles/backends/megatron_utils/megatron_to_hf/qwen3vl.
 # branch also needs the `model.` prefix dropped (sglang's load_weights
 # expects `language_model.` not `model.language_model.`, mirroring how
 # visual expects `visual.` not `model.visual.`).
-QWEN3VL_SENTINEL="# === mllmopd P15v2 qwen2.5-vl converter (visual + LLM prefix fix) ==="
+QWEN3VL_SENTINEL="# === mllmopd P15v3 qwen2.5-vl converter (LLM nested model. prefix) ==="
 if [ -f "${QWEN3VL_FILE}" ]; then
   if grep -q "${QWEN3VL_SENTINEL}" "${QWEN3VL_FILE}"; then
     echo ">>> ${QWEN3VL_FILE}: already patched (P15 visual converter sentinel present)"
   else
     echo ">>> patching ${QWEN3VL_FILE}: full visual-tower Qwen2.5-VL converter"
     cat > "${QWEN3VL_FILE}" <<'PYEOF'
-# === mllmopd P15v2 qwen2.5-vl converter (visual + LLM prefix fix) ===
-# v2 bump: first Gate B smoke after P15 showed LLM branch ALSO crashed
-# at the same "partially updated" error on
-#   model.language_model.layers.0.self_attn.qkv_proj.weight
-# Same root cause as visual: sglang's load_weights internal root for the
-# LLM is `language_model.` (without leading `model.`), mirroring visual's
-# `visual.` root. Drop the `model.` prefix from the LLM branch as well.
+# === mllmopd P15v3 qwen2.5-vl converter (LLM nested model. prefix) ===
+# v3 bump: P15v2 dropped `model.` from LLM but sglang still rejected.
+# Reason: sglang Qwen2_5_VL nests LLM as
+#   Qwen2_5_VLForConditionalGeneration.language_model = Qwen2ForCausalLM
+#   Qwen2ForCausalLM.model = Qwen2Model
+#   Qwen2Model.layers = [...]
+# So named_parameters yields `language_model.model.layers.X...` — the
+# inner `.model.` comes from Qwen2ForCausalLM.model wrapping. P15v3
+# uses `language_model.model.` prefix for LLM. Visual still uses
+# `visual.` (Qwen2_5_VisionTransformer is flat, no inner `.model`).
+# === legacy P15v2/P15 banner ===
 # === legacy P15 banner ===
 # Source: GPT analysis 2026-05-22 (chat log). Replaces the passthrough
 # visual branch with a complete Qwen2.5-VL visual-tower name converter
@@ -1162,14 +1166,16 @@ def convert_qwen3vl_to_hf(args, name: str, param):
         rest = name[len(_LM_PREFIX):]
         proxy_name = _PROXY_PREFIX + rest
         qwen2_results = convert_qwen2_to_hf(args, proxy_name, param)
-        # P15v2: rewrite `model.X` → `language_model.X` (drop leading `model.`).
-        # Sglang Qwen2_5_VL internal LLM root is `language_model.`; the
-        # `model.` prefix from qwen2 converter is what made the first LLM
-        # bucket flush fail with "qkv_proj partially updated".
+        # P15v3: rewrite `model.X` → `language_model.model.X`.
+        # qwen2 converter emits `model.layers.X...` (i.e., `model.` =
+        # Qwen2Model's named root). Sglang's Qwen2_5_VLForConditionalGeneration
+        # wraps Qwen2ForCausalLM as `language_model.`, and that one wraps
+        # Qwen2Model as `language_model.model.`. So the full path is
+        # `language_model.model.layers.X...`.
         patched = []
         for hf_name, tensor in qwen2_results:
             if hf_name.startswith("model."):
-                hf_name = "language_model." + hf_name[len("model."):]
+                hf_name = "language_model." + hf_name  # "model.X" stays inside
             patched.append((hf_name, tensor))
         return patched
 
