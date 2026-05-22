@@ -77,6 +77,20 @@ done
 STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-${MMR1_3B_SFT_CKPT:?}}"
 ROLLOUT_NUM_ENGINES="${ROLLOUT_NUM_ENGINES:-7}"
 ROLLOUT_PORT_BASE="${ROLLOUT_PORT_BASE:-30001}"
+# Cross-host NCCL: same defaults as the xbox trainer launcher. Engine
+# joins trainer's NCCL group via init_weights_update_group; both sides
+# must agree on transport (no IB between A800↔H800 → force TCP) and
+# NIC (auto-resolve via `ip route get <trainer-ip>`).
+if [ -z "${NCCL_SOCKET_IFNAME:-}" ] && [ -n "${TRAINER_IP:-}" ]; then
+  _AUTO_IFNAME=$(ip route get "${TRAINER_IP}" 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  if [ -n "${_AUTO_IFNAME}" ]; then
+    export NCCL_SOCKET_IFNAME="${_AUTO_IFNAME}"
+    echo ">>> NCCL_SOCKET_IFNAME auto-resolved: ${NCCL_SOCKET_IFNAME} (reaches ${TRAINER_IP})"
+  fi
+fi
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+echo ">>> NCCL_IB_DISABLE=${NCCL_IB_DISABLE}  NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-(unset)}"
 # ROLLOUT_HOST default deferred until after ROLLOUT_ADVERTISE_HOST is
 # resolved below — we want sglang to bind to the EXACT advertised IP so
 # its self-reported `host` field matches what the trainer's

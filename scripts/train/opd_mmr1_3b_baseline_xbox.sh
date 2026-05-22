@@ -284,6 +284,28 @@ fi
 echo ">>> xbox topology: ${ROLLOUT_NUM_ENGINES} external rollout engines"
 echo "    addrs: ${ROLLOUT_ENGINE_ADDRS}"
 
+# Cross-host NCCL: auto-resolve NCCL_SOCKET_IFNAME from `ip route get
+# <box1-ip>` if unset, and default NCCL_IB_DISABLE=1 (H800↔A800 cluster
+# typically has no IB direct link; without disabling, NCCL spends time
+# probing then fails. With disabled, falls straight to TCP/socket).
+# Operator can override either via explicit env.
+if [ -z "${NCCL_SOCKET_IFNAME:-}" ]; then
+  # Use the first addr to figure out the NIC reaching Box 1.
+  _BOX1_HOST=$(echo "${ROLLOUT_ENGINE_ADDRS}" | awk '{print $1}' | cut -d: -f1)
+  _AUTO_IFNAME=$(ip route get "${_BOX1_HOST}" 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  if [ -n "${_AUTO_IFNAME}" ]; then
+    export NCCL_SOCKET_IFNAME="${_AUTO_IFNAME}"
+    echo ">>> NCCL_SOCKET_IFNAME auto-resolved: ${NCCL_SOCKET_IFNAME} (reaches ${_BOX1_HOST})"
+  else
+    echo ">>> WARNING: could not auto-resolve NCCL_SOCKET_IFNAME; NCCL may pick wrong NIC"
+  fi
+else
+  echo ">>> NCCL_SOCKET_IFNAME (explicit): ${NCCL_SOCKET_IFNAME}"
+fi
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+echo ">>> NCCL_IB_DISABLE=${NCCL_IB_DISABLE}  (xbox A800↔H800 no IB; force TCP)"
+
 # In-repo submodule paths as fallbacks. The repo ships
 # third_party/Uni-OPD and third_party/Megatron-LM as git submodules; if the
 # operator's .env doesn't override, those are the right paths. We canonicalize
@@ -572,6 +594,12 @@ print(json.dumps({
     "MLLMOPD_USE_VD_WEIGHTING": os.environ.get("MLLMOPD_USE_VD_WEIGHTING", ""),
     "MLLMOPD_VD_TAU": os.environ.get("MLLMOPD_VD_TAU", ""),
     "MLLMOPD_VD_BETA": os.environ.get("MLLMOPD_VD_BETA", ""),
+    # xbox cross-host NCCL: trainer rank 0 broadcasts weights to rollout
+    # engines on Box 1 over TCP (no IB between H800 and A800 clusters).
+    # Without these, NCCL auto-selects a NIC that doesn't reach Box 1
+    # (e.g., docker bridge) and dist.broadcast hangs after rendezvous.
+    "NCCL_SOCKET_IFNAME": os.environ.get("NCCL_SOCKET_IFNAME", ""),
+    "NCCL_IB_DISABLE": os.environ.get("NCCL_IB_DISABLE", ""),
 }))
 PYEOF
   TRAIN_ENV_VARS_JSON=$(python "${_ENVJSON_PY}")
