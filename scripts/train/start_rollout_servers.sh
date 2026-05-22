@@ -241,7 +241,10 @@ ADDRS=()
 for i in $(seq 0 $((ROLLOUT_NUM_ENGINES - 1))); do
   PORT="${PORTS[i]}"
   PID="${PIDS[i]}"
-  INFO_URL="http://127.0.0.1:${PORT}/get_model_info"
+  # Probe via the bind host, not 127.0.0.1. Sglang now binds to
+  # ROLLOUT_HOST (= advertised IP); localhost is NOT reachable unless
+  # bind was 0.0.0.0 or 127.0.0.1.
+  INFO_URL="http://${ROLLOUT_HOST}:${PORT}/get_model_info"
   ready=0
   for attempt in $(seq 1 180); do
     if ! kill -0 "${PID}" 2>/dev/null; then
