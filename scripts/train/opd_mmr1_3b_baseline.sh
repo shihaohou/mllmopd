@@ -590,6 +590,29 @@ else
   ROLLOUT_ARGS+=(--num-epoch "${NUM_EPOCH}")
 fi
 
+# Tier-2a off-policy KD: when OPD_OFFLINE_KD_JSONL is set, swap the
+# on-policy rollout for our custom generate function that hydrates
+# Sample from a pre-generated teacher-completion JSONL. The loss path
+# (on_policy_distillation) is unchanged — its math doesn't depend on
+# who sampled the response tokens; only that teacher_log_probs and
+# student_log_probs are available at each position. See
+# src/mllmopd/training/offline_kd_generate.py for details + the env
+# contract.
+if [ -n "${OPD_OFFLINE_KD_JSONL:-}" ]; then
+  if [ ! -f "${OPD_OFFLINE_KD_JSONL}" ]; then
+    echo "ERROR: OPD_OFFLINE_KD_JSONL=${OPD_OFFLINE_KD_JSONL} does not exist" >&2
+    exit 1
+  fi
+  export OPD_OFFLINE_KD_JSONL  # read by offline_kd_generate._build_lookup
+  ROLLOUT_ARGS+=(
+    --custom-generate-function-path
+    "mllmopd.training.offline_kd_generate.offline_teacher_generate_func"
+  )
+  echo ">>> Tier-2a OFF-POLICY KD mode"
+  echo ">>>   offline JSONL: ${OPD_OFFLINE_KD_JSONL}"
+  echo ">>>   teacher server: SKIPPED (logprobs come from JSONL)"
+fi
+
 # T1 plan §4: disable Uni-OPD's improvements on top of vanilla OPD.
 # These flags exist to NOT pass them (no margin shift, no margin mask,
 # no filter, no adv shift) — already absent from ROLLOUT_ARGS above.
