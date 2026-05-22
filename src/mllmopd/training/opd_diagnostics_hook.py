@@ -152,22 +152,38 @@ def _safe_list(x) -> list:
 
 def _extract_response_logprobs(reward_subdict: dict, response_length: int) -> list[float]:
     """Pull the response slice of input_token_logprobs from a teacher
-    response dict's `meta_info` (or `meta_info_diagnostic`). Returns
-    [] on any parse error; the caller can decide whether to fill with
-    sentinel or skip the row."""
+    response dict's `meta_info` (or `meta_info_diagnostic`).
+
+    Mirrors canonical `post_process_rewards` slicing EXACTLY so the
+    extracted vector is alignment-equivalent to `sample.teacher_log_probs`:
+      - drop the first entry ([1:]) — that's the BOS / first input
+        position with no logprob
+      - DO NOT filter mid-response None values; if one appears, let
+        float(None) raise. Filtering would silently shift alignment
+        relative to canonical teacher_log_probs (which crashes on None
+        and falls back to the -100 sentinel). Misaligned vd_weights
+        would then multiply mismatched advantage positions.
+      - tail-slice to `response_length`, assert sufficient length
+
+    Returns [] on any parse error; the caller falls back to ones (unit
+    no-op weight), keeping vd_weights and teacher_log_probs always
+    co-aligned per sample.
+    """
     if not isinstance(reward_subdict, dict):
         return []
     raw = reward_subdict.get("input_token_logprobs")
     if not raw:
         return []
     try:
-        # Each entry is `[logprob, token_id, token_text]` per Uni-OPD's
-        # comment in get_reward.py. The first entry is always None
-        # (no logprob for the BOS / first input position) — match the
-        # default post_process_rewards which slices `[1:]`.
-        all_lp = [float(item[0]) for item in raw[1:] if item[0] is not None]
-        return all_lp[-response_length:]
-    except Exception as e:
+        all_lp = [float(item[0]) for item in raw[1:]]
+        sliced = all_lp[-response_length:]
+        if len(sliced) != response_length:
+            raise ValueError(
+                f"input_token_logprobs length {len(all_lp)} insufficient for "
+                f"response_length {response_length}"
+            )
+        return sliced
+    except (TypeError, ValueError) as e:
         logger.warning(f"[opd_diag] could not parse input_token_logprobs: {e}")
         return []
 
@@ -230,14 +246,24 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
                 vd = [a - b for a, b in zip(lp_full, lp_blank)]
 
             vd_weights: list[float] = []
-            if use_vd_weighting and response_length > 0:
-                if vd and len(vd) == response_length:
+            if use_vd_weighting:
+                # Always attach the attribute when env is on, even on
+                # degenerate samples (response_length=0, vd parse error,
+                # length mismatch). P11's "if 'teacher_vd_weights' in
+                # samples[0].__dict__" gate inspects sample 0 ONLY; if
+                # that one happens to be degenerate without unconditional
+                # attach, the entire batch silently skips VD weighting.
+                # Degenerate cases get unit-ones (no-op weight); the
+                # multiplier in loss.py P13 still runs but is identity.
+                if response_length > 0 and vd and len(vd) == response_length:
                     w = compute_vd_weights(lp_full, lp_blank, response_length)
                     sample.teacher_vd_weights = w
                     vd_weights = w.tolist()
                     n_vd_attached += 1
                 else:
-                    sample.teacher_vd_weights = torch.ones(response_length, dtype=torch.float32)
+                    sample.teacher_vd_weights = torch.ones(
+                        max(response_length, 0), dtype=torch.float32
+                    )
                     vd_weights = sample.teacher_vd_weights.tolist()
                     n_vd_degenerate += 1
 
