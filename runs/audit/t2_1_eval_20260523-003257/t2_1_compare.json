@@ -1,0 +1,266 @@
+{
+  "delta_headline": -0.01666666666666668,
+  "delta_bootstrap_ci_95": [
+    -0.03916666666666665,
+    0.004999999999999972
+  ],
+  "delta_per_benchmark": {
+    "ChartQA": -0.0050000000000000044,
+    "HallusionBench": -0.010000000000000009,
+    "MathVerse": -0.03500000000000003,
+    "MathVision": -0.010000000000000009,
+    "MathVista": -0.0050000000000000044,
+    "POPE_adversarial": -0.03500000000000003
+  },
+  "G_full": {
+    "T1-2": {
+      "ChartQA": 0.09999999999999998,
+      "HallusionBench": -0.06000000000000005,
+      "MathVerse": 0.025000000000000022,
+      "MathVision": -0.04000000000000001,
+      "MathVista": 0.05500000000000005,
+      "POPE_adversarial": 0.025000000000000022
+    },
+    "T2-1": {
+      "ChartQA": 0.09499999999999997,
+      "HallusionBench": -0.07000000000000006,
+      "MathVerse": -0.010000000000000009,
+      "MathVision": -0.05000000000000002,
+      "MathVista": 0.050000000000000044,
+      "POPE_adversarial": -0.010000000000000009
+    }
+  },
+  "G_blank": {
+    "T1-2": {
+      "ChartQA": -0.0049999999999999975,
+      "HallusionBench": 0.0050000000000000044,
+      "MathVerse": 0.024999999999999994,
+      "MathVision": 0.024999999999999994,
+      "MathVista": 0.0,
+      "POPE_adversarial": 0.0
+    },
+    "T2-1": {
+      "ChartQA": 0.0049999999999999975,
+      "HallusionBench": 0.025000000000000022,
+      "MathVerse": 0.0,
+      "MathVision": 0.010000000000000009,
+      "MathVista": 0.010000000000000009,
+      "POPE_adversarial": 0.0
+    }
+  },
+  "G_text": {
+    "T1-2": {
+      "ChartQA": 0.009999999999999995,
+      "HallusionBench": -0.014999999999999958,
+      "MathVerse": -0.03999999999999998,
+      "MathVision": 0.04500000000000001,
+      "MathVista": 0.05499999999999999,
+      "POPE_adversarial": 0.025000000000000022
+    },
+    "T2-1": {
+      "ChartQA": 0.0049999999999999906,
+      "HallusionBench": -0.0050000000000000044,
+      "MathVerse": -0.06,
+      "MathVision": 0.024999999999999994,
+      "MathVista": 0.09999999999999998,
+      "POPE_adversarial": 0.09999999999999998
+    }
+  },
+  "G_gap": {
+    "T1-2": {
+      "ChartQA": 0.10499999999999998,
+      "HallusionBench": -0.06500000000000006,
+      "MathVerse": 2.7755575615628914e-17,
+      "MathVision": -0.065,
+      "MathVista": 0.05500000000000005,
+      "POPE_adversarial": 0.025000000000000022
+    },
+    "T2-1": {
+      "ChartQA": 0.08999999999999997,
+      "HallusionBench": -0.09500000000000008,
+      "MathVerse": -0.010000000000000009,
+      "MathVision": -0.060000000000000026,
+      "MathVista": 0.040000000000000036,
+      "POPE_adversarial": -0.010000000000000009
+    }
+  },
+  "blank_leakage": {
+    "T1-2": {
+      "ChartQA": -0.04999999999999999,
+      "HallusionBench": 0.5000000000000004,
+      "MathVerse": 0.9999999999999989,
+      "MathVision": 2.4999999999999996,
+      "MathVista": 0.0,
+      "POPE_adversarial": 0.0
+    },
+    "T2-1": {
+      "ChartQA": 0.05263157894736841,
+      "HallusionBench": 2.500000000000002,
+      "MathVerse": 0.0,
+      "MathVision": 1.0000000000000009,
+      "MathVista": 0.2,
+      "POPE_adversarial": 0.0
+    }
+  },
+  "opd_target_recovery": {
+    "T1-2": {
+      "ChartQA": 0.7407407407407407,
+      "HallusionBench": 0.4,
+      "MathVerse": 0.44,
+      "MathVision": 0.22857142857142856,
+      "MathVista": 0.39285714285714285,
+      "POPE_adversarial": 0.6666666666666666
+    },
+    "T2-1": {
+      "ChartQA": 0.8148148148148148,
+      "HallusionBench": 0.5333333333333333,
+      "MathVerse": 0.28,
+      "MathVision": 0.17142857142857143,
+      "MathVista": 0.4642857142857143,
+      "POPE_adversarial": 0.0
+    }
+  },
+  "opd_target_acc": {
+    "T1-0": {
+      "ChartQA": 0.0,
+      "HallusionBench": 0.0,
+      "MathVerse": 0.0,
+      "MathVision": 0.0,
+      "MathVista": 0.0,
+      "POPE_adversarial": 0.0
+    },
+    "T1-2": {
+      "ChartQA": 0.7407407407407407,
+      "HallusionBench": 0.4,
+      "MathVerse": 0.44,
+      "MathVision": 0.22857142857142856,
+      "MathVista": 0.39285714285714285,
+      "POPE_adversarial": 0.6666666666666666
+    },
+    "T2-1": {
+      "ChartQA": 0.8148148148148148,
+      "HallusionBench": 0.5333333333333333,
+      "MathVerse": 0.28,
+      "MathVision": 0.17142857142857143,
+      "MathVista": 0.4642857142857143,
+      "POPE_adversarial": 0.0
+    }
+  },
+  "raw_acc": {
+    "T1-0": {
+      "ChartQA": {
+        "full_image": 0.685,
+        "blank_image": 0.055,
+        "text_only": 0.115
+      },
+      "HallusionBench": {
+        "full_image": 0.64,
+        "blank_image": 0.47,
+        "text_only": 0.42
+      },
+      "MathVerse": {
+        "full_image": 0.305,
+        "blank_image": 0.16,
+        "text_only": 0.21
+      },
+      "MathVision": {
+        "full_image": 0.23,
+        "blank_image": 0.155,
+        "text_only": 0.15
+      },
+      "MathVista": {
+        "full_image": 0.595,
+        "blank_image": 0.315,
+        "text_only": 0.32
+      },
+      "POPE_adversarial": {
+        "full_image": 0.865,
+        "blank_image": 0.51,
+        "text_only": 0.48
+      }
+    },
+    "T1-2": {
+      "ChartQA": {
+        "full_image": 0.785,
+        "blank_image": 0.05,
+        "text_only": 0.125
+      },
+      "HallusionBench": {
+        "full_image": 0.58,
+        "blank_image": 0.475,
+        "text_only": 0.405
+      },
+      "MathVerse": {
+        "full_image": 0.33,
+        "blank_image": 0.185,
+        "text_only": 0.17
+      },
+      "MathVision": {
+        "full_image": 0.19,
+        "blank_image": 0.18,
+        "text_only": 0.195
+      },
+      "MathVista": {
+        "full_image": 0.65,
+        "blank_image": 0.315,
+        "text_only": 0.375
+      },
+      "POPE_adversarial": {
+        "full_image": 0.89,
+        "blank_image": 0.51,
+        "text_only": 0.505
+      }
+    },
+    "T2-1": {
+      "ChartQA": {
+        "full_image": 0.78,
+        "blank_image": 0.06,
+        "text_only": 0.12
+      },
+      "HallusionBench": {
+        "full_image": 0.57,
+        "blank_image": 0.495,
+        "text_only": 0.415
+      },
+      "MathVerse": {
+        "full_image": 0.295,
+        "blank_image": 0.16,
+        "text_only": 0.15
+      },
+      "MathVision": {
+        "full_image": 0.18,
+        "blank_image": 0.165,
+        "text_only": 0.175
+      },
+      "MathVista": {
+        "full_image": 0.645,
+        "blank_image": 0.325,
+        "text_only": 0.42
+      },
+      "POPE_adversarial": {
+        "full_image": 0.855,
+        "blank_image": 0.51,
+        "text_only": 0.58
+      }
+    }
+  },
+  "mcnemar": {
+    "n": 133,
+    "p_value": 0.8641662404406816,
+    "backend": "scipy.binomtest",
+    "both_correct": 40,
+    "both_wrong": 59,
+    "b": 16,
+    "c": 18
+  },
+  "n_bootstrap": 1000,
+  "seed": 42,
+  "decision_tree_verdict": "T2-1 < T1-2 -> reweighting hurts (next: hard top-k mask VPPO-style)",
+  "config": {
+    "baseline_dir": "/home/web_server/antispam/project/houshihao/mllmopd/runs/audit/level1_v4_sysprompt_fixed",
+    "t2_1_run_dir": "/home/web_server/antispam/project/houshihao/mllmopd/runs/audit/t2_1_eval_20260523-003257",
+    "opd_target_ids": "/home/web_server/antispam/project/houshihao/mllmopd/runs/audit/level1_v4_sysprompt_fixed/opd_target_ids.json",
+    "treatment_arm": "T2-1",
+    "control_arm": "T1-2"
+  }
+}

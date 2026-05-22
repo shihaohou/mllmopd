@@ -1,0 +1,74 @@
+{
+  "ChartQA": [
+    "ChartQA/1436",
+    "ChartQA/1741",
+    "ChartQA/308",
+    "ChartQA/860"
+  ],
+  "HallusionBench": [
+    "HallusionBench/232",
+    "HallusionBench/302",
+    "HallusionBench/362",
+    "HallusionBench/437",
+    "HallusionBench/474",
+    "HallusionBench/589",
+    "HallusionBench/595",
+    "HallusionBench/665",
+    "HallusionBench/715",
+    "HallusionBench/722",
+    "HallusionBench/760",
+    "HallusionBench/803",
+    "HallusionBench/832",
+    "HallusionBench/945"
+  ],
+  "MathVerse": [
+    "MathVerse/1331",
+    "MathVerse/1561",
+    "MathVerse/1579",
+    "MathVerse/1615",
+    "MathVerse/1906",
+    "MathVerse/2348",
+    "MathVerse/2678",
+    "MathVerse/277",
+    "MathVerse/3845",
+    "MathVerse/3908",
+    "MathVerse/419",
+    "MathVerse/48",
+    "MathVerse/621"
+  ],
+  "MathVision": [
+    "MathVision/116",
+    "MathVision/119",
+    "MathVision/137",
+    "MathVision/161",
+    "MathVision/191",
+    "MathVision/220",
+    "MathVision/23",
+    "MathVision/234",
+    "MathVision/240",
+    "MathVision/243",
+    "MathVision/250",
+    "MathVision/258",
+    "MathVision/296",
+    "MathVision/31",
+    "MathVision/44",
+    "MathVision/71",
+    "MathVision/77",
+    "MathVision/90"
+  ],
+  "MathVista": [
+    "MathVista/173",
+    "MathVista/232",
+    "MathVista/335",
+    "MathVista/450",
+    "MathVista/466",
+    "MathVista/514",
+    "MathVista/750",
+    "MathVista/765",
+    "MathVista/9",
+    "MathVista/907"
+  ],
+  "POPE_adversarial": [
+    "POPE_adversarial/670"
+  ]
+}
