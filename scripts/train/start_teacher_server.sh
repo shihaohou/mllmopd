@@ -121,6 +121,12 @@ fi
 TEACHER_ADVERTISE_HOST="${TEACHER_ADVERTISE_HOST:-localhost}"
 TEACHER_URL="http://${TEACHER_ADVERTISE_HOST}:${TEACHER_PORT}/generate"
 
+# Set TEACHER_REGISTER=0 when launching a teacher purely for offline data
+# generation (e.g., scripts/data/gen_teacher_completions.py). The shared
+# teacher_server_list.json lives on ceph; clobbering it from a gen-only
+# box would silently redirect a concurrent student training run on
+# another box to the wrong endpoint.
+if [ "${TEACHER_REGISTER:-1}" = "1" ]; then
 python - <<PY
 import json, pathlib
 list_path = pathlib.Path("${LIST}")
@@ -136,6 +142,9 @@ print(f"Registered ${TEACHER_NAME} → ${TEACHER_URL}")
 print(f"  list: {list_path}")
 print(f"  map:  {map_path}")
 PY
+else
+  echo ">>> TEACHER_REGISTER=0: skipping teacher_server_list.json write."
+fi
 
 # Launch sglang. Reward path requests max_new_tokens=0 (logp-only).
 LOG_DIR="${MLLMOPD_RUNS:-runs}/teacher_server"
