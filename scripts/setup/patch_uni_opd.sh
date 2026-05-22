@@ -1271,6 +1271,96 @@ else
   echo ">>> ${UWFD_FILE}: skipped (file not found for P16)"
 fi
 
+# --- Patch P17: register external rollout engines with MilesRouter ------
+# After P15v4 unblocked weight broadcast, the first /generate request
+# crashed in MilesRouter._use_url with:
+#   ValueError: min() iterable argument is empty
+# because the router's worker_request_counts dict was empty.
+#
+# Root cause: _init_normal (colocate path) POSTs /add_worker to register
+# the local sglang URL with MilesRouter. _init_external (xbox path) does
+# NOT — it just probes the external server's /get_server_info. So
+# MilesRouter never learns about external engines on Box 1, and any
+# /generate dispatch finds zero workers → ValueError.
+#
+# Fix: at the end of _init_external, do the same POST /add_worker
+# registration that _init_normal does for the local case. Only when
+# router_ip/router_port are set AND use_miles_router is on (mirror the
+# existing _init_normal gate).
+EXT_ENG_FILE="${MILES_DIR}/miles/backends/sglang_utils/sglang_engine.py"
+EXT_ENG_SENTINEL="# === mllmopd P17 external engine MilesRouter registration ==="
+if [ -f "${EXT_ENG_FILE}" ]; then
+  if grep -q "${EXT_ENG_SENTINEL}" "${EXT_ENG_FILE}"; then
+    echo ">>> ${EXT_ENG_FILE}: already patched (P17 external-register sentinel present)"
+  else
+    echo ">>> patching ${EXT_ENG_FILE}: register external engines with MilesRouter"
+    export MLLMOPD_PATCH_EXT_ENG_PATH="${EXT_ENG_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_EXT_ENG_PATH"]
+with open(path) as f:
+    src = f.read()
+anchor = '''        _wait_server_healthy(
+            base_url=f"http://{self.server_host}:{self.server_port}",
+            api_key=None,
+            is_process_alive=lambda: True,
+        )
+        actual_server_args = _get_actual_server_args()
+        _sanity_check_server_args(actual_server_args, expect_server_args)
+
+    def _init_normal(self, server_args_dict):'''
+patch = '''        _wait_server_healthy(
+            base_url=f"http://{self.server_host}:{self.server_port}",
+            api_key=None,
+            is_process_alive=lambda: True,
+        )
+        actual_server_args = _get_actual_server_args()
+        _sanity_check_server_args(actual_server_args, expect_server_args)
+
+        # === mllmopd P17 external engine MilesRouter registration ===
+        # _init_normal POSTs /add_worker to teach MilesRouter about this
+        # engine's URL. Without this in external mode, MilesRouter's
+        # worker dict stays empty and /generate fails with
+        # `ValueError: min() iterable argument is empty`.
+        if self.node_rank == 0 and self.router_ip and self.router_port:
+            if parse(sglang_router.__version__) <= parse("0.2.1") or self.args.use_miles_router:
+                assert (
+                    self.worker_type == "regular"
+                ), "pd disaggregation is not supported in old router or miles router."
+                response = requests.post(
+                    f"http://{self.router_ip}:{self.router_port}/add_worker"
+                    f"?url=http://{self.server_host}:{self.server_port}"
+                )
+            else:
+                payload = {
+                    "url": f"http://{self.server_host}:{self.server_port}",
+                    "worker_type": self.worker_type,
+                }
+                response = requests.post(
+                    f"http://{self.router_ip}:{self.router_port}/workers",
+                    json=payload,
+                )
+            response.raise_for_status()
+            logger.info(
+                f"[P17] external engine {self.server_host}:{self.server_port} "
+                f"registered with MilesRouter at {self.router_ip}:{self.router_port}"
+            )
+        # === end mllmopd P17 ===
+
+    def _init_normal(self, server_args_dict):'''
+if anchor not in src:
+    sys.exit(f"ERROR: P17 anchor not found in {path!r} — _init_external/_init_normal boundary may have moved")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P17 sglang_engine.py applied")
+PY
+  fi
+else
+  echo ">>> ${EXT_ENG_FILE}: skipped (file not found for P17)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
