@@ -1019,14 +1019,25 @@ fi
 # Implementation: full-file rewrite, sentinel-gated. Safer than anchor
 # replace because the existing file is small and we touch most of it.
 QWEN3VL_FILE="${MILES_DIR}/miles/backends/megatron_utils/megatron_to_hf/qwen3vl.py"
-QWEN3VL_SENTINEL="# === mllmopd P15 qwen2.5-vl visual tower converter ==="
+# Sentinel bumped to v2 after first cross-box smoke revealed the LLM
+# branch also needs the `model.` prefix dropped (sglang's load_weights
+# expects `language_model.` not `model.language_model.`, mirroring how
+# visual expects `visual.` not `model.visual.`).
+QWEN3VL_SENTINEL="# === mllmopd P15v2 qwen2.5-vl converter (visual + LLM prefix fix) ==="
 if [ -f "${QWEN3VL_FILE}" ]; then
   if grep -q "${QWEN3VL_SENTINEL}" "${QWEN3VL_FILE}"; then
     echo ">>> ${QWEN3VL_FILE}: already patched (P15 visual converter sentinel present)"
   else
     echo ">>> patching ${QWEN3VL_FILE}: full visual-tower Qwen2.5-VL converter"
     cat > "${QWEN3VL_FILE}" <<'PYEOF'
-# === mllmopd P15 qwen2.5-vl visual tower converter ===
+# === mllmopd P15v2 qwen2.5-vl converter (visual + LLM prefix fix) ===
+# v2 bump: first Gate B smoke after P15 showed LLM branch ALSO crashed
+# at the same "partially updated" error on
+#   model.language_model.layers.0.self_attn.qkv_proj.weight
+# Same root cause as visual: sglang's load_weights internal root for the
+# LLM is `language_model.` (without leading `model.`), mirroring visual's
+# `visual.` root. Drop the `model.` prefix from the LLM branch as well.
+# === legacy P15 banner ===
 # Source: GPT analysis 2026-05-22 (chat log). Replaces the passthrough
 # visual branch with a complete Qwen2.5-VL visual-tower name converter
 # so UpdateWeightFromDistributed (NCCL) can broadcast weights to sglang
@@ -1151,10 +1162,14 @@ def convert_qwen3vl_to_hf(args, name: str, param):
         rest = name[len(_LM_PREFIX):]
         proxy_name = _PROXY_PREFIX + rest
         qwen2_results = convert_qwen2_to_hf(args, proxy_name, param)
+        # P15v2: rewrite `model.X` → `language_model.X` (drop leading `model.`).
+        # Sglang Qwen2_5_VL internal LLM root is `language_model.`; the
+        # `model.` prefix from qwen2 converter is what made the first LLM
+        # bucket flush fail with "qkv_proj partially updated".
         patched = []
         for hf_name, tensor in qwen2_results:
             if hf_name.startswith("model."):
-                hf_name = "model.language_model." + hf_name[len("model."):]
+                hf_name = "language_model." + hf_name[len("model."):]
             patched.append((hf_name, tensor))
         return patched
 
