@@ -78,7 +78,7 @@ import time
 from argparse import Namespace
 from typing import Any
 
-from miles.rollout.sglang_rollout import GenerateState
+from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.types import Sample
 
 # orjson is 2-3x faster than stdlib json on the JSONL parse — material on
@@ -100,6 +100,14 @@ logger = logging.getLogger("mllmopd.offline_kd_generate")
 _LOOKUP_LOCK = threading.Lock()
 _LOOKUP: dict[str, list[dict[str, Any]]] | None = None
 _LOOKUP_SOURCE: str | None = None  # cached path; error if env changes mid-run
+
+# Cached processor + tokenizer. Avoid `GenerateState` from sglang_rollout —
+# its __init__ touches ~10 args we'd otherwise have to fake in smoke tests,
+# and in production it would never have been pre-initialized anyway since
+# our custom generate function replaces (not wraps) the default `generate`.
+_PROC_LOCK = threading.Lock()
+_PROCESSOR: Any = None
+_TOKENIZER: Any = None
 
 
 def _build_lookup() -> None:
@@ -191,6 +199,33 @@ def _ensure_lookup() -> None:
             _build_lookup()
 
 
+def _ensure_processor(args: Namespace) -> None:
+    """Load tokenizer + processor for the teacher checkpoint once per process.
+
+    Matches what `sglang_rollout.GenerateState.__init__` does for these two
+    members, but without dragging in the other ~10 args GenerateState
+    needs (sglang_server_concurrency, rollout_num_gpus, rollout_temperature,
+    etc.) — none of which are relevant in offline-KD mode where we
+    aren't running an SGLang router."""
+    global _PROCESSOR, _TOKENIZER
+    if _PROCESSOR is not None or _TOKENIZER is not None:
+        return
+    with _PROC_LOCK:
+        if _PROCESSOR is not None or _TOKENIZER is not None:
+            return
+        chat_template_path = getattr(args, "chat_template_path", None)
+        logger.info(
+            "[offline-kd] loading tokenizer + processor from %s",
+            args.hf_checkpoint,
+        )
+        _TOKENIZER = load_tokenizer(
+            args.hf_checkpoint,
+            chat_template_path=chat_template_path,
+            trust_remote_code=True,
+        )
+        _PROCESSOR = load_processor(args.hf_checkpoint, trust_remote_code=True)
+
+
 def _build_reward_dict(rec: dict[str, Any], teacher_logps: list[float]) -> dict[str, Any]:
     """Construct a reward dict that satisfies the downstream consumers:
 
@@ -275,9 +310,9 @@ async def offline_teacher_generate_func(
     #    etc.) — without this field, miles/ray/rollout.py drops images
     #    from the train batch (feedback_multimodal_keys gotcha) and the
     #    student trains text-only against a multimodal teacher response.
-    state = GenerateState(args)  # singleton; reuses processor/tokenizer
-    if state.processor and sample.multimodal_inputs:
-        processor_output = state.processor(
+    _ensure_processor(args)
+    if _PROCESSOR is not None and sample.multimodal_inputs:
+        processor_output = _PROCESSOR(
             text=sample.prompt, **(sample.multimodal_inputs or {})
         )
         prompt_ids = processor_output["input_ids"][0]
@@ -289,7 +324,7 @@ async def offline_teacher_generate_func(
             if k not in ["input_ids", "attention_mask"]
         } or None
     else:
-        prompt_ids = state.tokenizer.encode(
+        prompt_ids = _TOKENIZER.encode(
             sample.prompt, add_special_tokens=False
         )
 
