@@ -74,11 +74,25 @@ import json
 import logging
 import os
 import threading
+import time
 from argparse import Namespace
 from typing import Any
 
 from miles.rollout.sglang_rollout import GenerateState
 from miles.utils.types import Sample
+
+# orjson is 2-3x faster than stdlib json on the JSONL parse — material on
+# the 6GB v0_2k_teacher_completions/*.jsonl cold-start. Optional dep;
+# falls back to json transparently.
+try:
+    import orjson as _fast_json
+    def _loads(s: str) -> Any:
+        return _fast_json.loads(s)
+    _LOADS_LIB = "orjson"
+except ImportError:
+    def _loads(s: str) -> Any:
+        return json.loads(s)
+    _LOADS_LIB = "json"
 
 logger = logging.getLogger("mllmopd.offline_kd_generate")
 
@@ -89,7 +103,15 @@ _LOOKUP_SOURCE: str | None = None  # cached path; error if env changes mid-run
 
 
 def _build_lookup() -> None:
-    """Read $OPD_OFFLINE_KD_JSONL once, build prompt_id → completions map."""
+    """Read $OPD_OFFLINE_KD_JSONL once, build prompt_id → completions map.
+
+    Cold-start cost: ~60-150s on ceph for the 6GB blank_n8.jsonl,
+    dominated by JSON parse + dict insertion. Per-row logs every
+    2000 entries so the operator can see progress (otherwise looks
+    indistinguishable from a hang). Drops `completion_top_logprobs`
+    after parse — the loss path uses only chosen-token logprobs;
+    keeping the top-K array in memory would balloon the resident set
+    by ~3 GB without buying anything for on_policy_distillation."""
     global _LOOKUP, _LOOKUP_SOURCE
     path = os.environ.get("OPD_OFFLINE_KD_JSONL")
     if not path:
@@ -101,23 +123,45 @@ def _build_lookup() -> None:
     if not os.path.exists(path):
         raise FileNotFoundError(f"OPD_OFFLINE_KD_JSONL not found: {path}")
 
-    logger.info("[offline-kd] building lookup from %s", path)
+    file_size = os.path.getsize(path)
+    logger.info(
+        "[offline-kd] building lookup from %s (%.1f GB, using %s) — "
+        "cold start typically 60-150s on ceph",
+        path, file_size / 1e9, _LOADS_LIB,
+    )
+    t0 = time.time()
     lookup: dict[str, list[dict[str, Any]]] = {}
     n_rows = 0
+    n_pruned_tlp = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            r = json.loads(line)
+            r = _loads(line)
             pid = r.get("prompt_id")
             if pid is None:
                 raise KeyError(
                     f"offline JSONL row missing 'prompt_id' field in {path}. "
                     f"Keys present: {list(r.keys())}"
                 )
+            # Drop the top-K logprob field — it's ~95% of disk size per
+            # row but unused by on_policy_distillation (which only needs
+            # the chosen-token logprob). Kept off-disk for future
+            # forward-KL experiments via a separate optional load.
+            if "completion_top_logprobs" in r:
+                del r["completion_top_logprobs"]
+                n_pruned_tlp += 1
             lookup.setdefault(str(pid), []).append(r)
             n_rows += 1
+            if n_rows % 2000 == 0:
+                elapsed = time.time() - t0
+                rate = n_rows / max(elapsed, 1e-3)
+                logger.info(
+                    "[offline-kd]   %5d rows / %d prompts so far  "
+                    "(%.0f rows/s, %.1fs elapsed)",
+                    n_rows, len(lookup), rate, elapsed,
+                )
 
     if not lookup:
         raise RuntimeError(f"offline-KD lookup is empty after reading {path}")
@@ -130,9 +174,11 @@ def _build_lookup() -> None:
 
     _LOOKUP = lookup
     _LOOKUP_SOURCE = path
+    elapsed = time.time() - t0
     logger.info(
-        "[offline-kd] lookup ready: %d completions across %d unique prompts",
-        n_rows, len(lookup),
+        "[offline-kd] lookup ready: %d completions across %d unique prompts "
+        "in %.1fs (top_logprobs dropped from %d rows to save ~3GB RAM)",
+        n_rows, len(lookup), elapsed, n_pruned_tlp,
     )
 
 
