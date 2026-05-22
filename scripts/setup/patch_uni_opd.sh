@@ -990,6 +990,187 @@ else
   echo ">>> ${RO_FILE}: skipped (file not found for P14 engine)"
 fi
 
+# --- Patch P15: qwen3vl.py visual-tower converter rewrite ----------------
+# Cross-host weight sync via UpdateWeightFromDistributed (NCCL TCP) crashes
+# on first visual-block param with sglang error:
+#   "Failed to update parameter online:
+#    'model.visual.blocks.0.mlp.gate_up_proj.weight'."
+#
+# Root cause: the visual branch in qwen3vl.py just passthroughs the
+# Megatron-side name with prefix swap. It does not split the fused
+# Qwen2.5-VL visual SwiGLU `gate_up_proj` into HF-loader's `gate_proj` +
+# `up_proj`, does not rename `attn.qkv_proj` → `attn.qkv`, and uses the
+# wrong target prefix `model.visual.` instead of sglang's internal `visual.`.
+#
+# Single-box T1 ran fine because UpdateWeightFromTensor (CUDA IPC) uses
+# a different sglang endpoint that internally normalizes names. The
+# distributed/NCCL endpoint requires exact HF-loader names.
+#
+# P15 replaces the visual branch with the full Qwen2.5-VL visual-tower
+# converter from GPT's analysis (chat 2026-05-22):
+#   - mlp.gate_up_proj.*  → mlp.gate_proj.* + mlp.up_proj.*  (chunk dim=0)
+#   - attn.qkv_proj.*     → attn.qkv.*                       (rename)
+#   - attn.proj.*, norm1/norm2, mlp.down_proj → passthrough
+#   - target prefix       → visual.  (not model.visual.)
+#   - raises on unknown   (no silent passthrough)
+# LLM branch (delegate to convert_qwen2_to_hf with model.language_model.
+# prefix swap) is unchanged.
+#
+# Implementation: full-file rewrite, sentinel-gated. Safer than anchor
+# replace because the existing file is small and we touch most of it.
+QWEN3VL_FILE="${MILES_DIR}/miles/backends/megatron_utils/megatron_to_hf/qwen3vl.py"
+QWEN3VL_SENTINEL="# === mllmopd P15 qwen2.5-vl visual tower converter ==="
+if [ -f "${QWEN3VL_FILE}" ]; then
+  if grep -q "${QWEN3VL_SENTINEL}" "${QWEN3VL_FILE}"; then
+    echo ">>> ${QWEN3VL_FILE}: already patched (P15 visual converter sentinel present)"
+  else
+    echo ">>> patching ${QWEN3VL_FILE}: full visual-tower Qwen2.5-VL converter"
+    cat > "${QWEN3VL_FILE}" <<'PYEOF'
+# === mllmopd P15 qwen2.5-vl visual tower converter ===
+# Source: GPT analysis 2026-05-22 (chat log). Replaces the passthrough
+# visual branch with a complete Qwen2.5-VL visual-tower name converter
+# so UpdateWeightFromDistributed (NCCL) can broadcast weights to sglang
+# rollout engines.
+#
+# Key points (verified against sglang pinned Qwen2_5_VL and HF/checkpoint index):
+#   - Visual MLP is SwiGLU; Megatron/sglang fused name is
+#     `mlp.gate_up_proj.{weight,bias}` with chunk order [gate, up].
+#     Loader expects separate `mlp.gate_proj.*` + `mlp.up_proj.*`.
+#   - Visual attention is fused QKV (NOT split q/k/v like LLM).
+#     Megatron/sglang internal = `attn.qkv_proj.*`; loader = `attn.qkv.*`.
+#   - Output projection is `attn.proj.*` (not `self_attn.o_proj`).
+#   - Norms are `norm1.weight` + `norm2.weight` (RMSNorm); no q_norm/k_norm.
+#   - Target prefix is `visual.` (sglang internal root), NOT `model.visual.`.
+#     If your sglang server registers `model.visual.*` keys before
+#     load_weights normalization, change _VISUAL_TARGET_PREFIX below.
+# === end mllmopd P15 banner ===
+
+import re
+
+from .qwen2 import convert_qwen2_to_hf
+
+
+# Qwen3VL / Qwen2.5-VL Megatron parameter prefixes.
+_LM_PREFIX = "module.module.language_model."
+_VISUAL_PREFIXES = (
+    "module.module.visual.",
+    "module.module.vision_model.",
+)
+_PROXY_PREFIX = "module.module."
+
+# Target prefix for sglang Qwen2_5_VL load_weights. Use plain `visual.`
+# (sglang internal root). Switch to `model.visual.` only if your server
+# rejects `visual.*` keys.
+_VISUAL_TARGET_PREFIX = "visual."
+
+_VISUAL_BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(.+)$")
+
+
+def _convert_qwen25vl_visual_to_loadable(rest: str, param):
+    """Convert Qwen2.5-VL visual-tower Megatron-side names to loader-ready names.
+
+    Expected Megatron/sglang fused names (after prefix strip):
+      blocks.{i}.attn.qkv_proj.{weight,bias}    # fused qkv
+      blocks.{i}.attn.proj.{weight,bias}        # output proj
+      blocks.{i}.mlp.gate_up_proj.{weight,bias} # SwiGLU fused
+      blocks.{i}.mlp.down_proj.{weight,bias}
+      blocks.{i}.norm1.weight
+      blocks.{i}.norm2.weight
+
+    Non-block visual params:
+      patch_embed.proj.weight
+      merger.ln_q.weight
+      merger.mlp.{0,2}.{weight,bias}
+      rotary_pos_emb.inv_freq
+
+    Raises ValueError on unknown names — silent passthrough is what
+    caused the original bug.
+    """
+    m = _VISUAL_BLOCK_RE.match(rest)
+    if m is not None:
+        layer_idx, leaf = m.groups()
+        base = f"{_VISUAL_TARGET_PREFIX}blocks.{layer_idx}."
+
+        if leaf in ("norm1.weight", "norm2.weight"):
+            return [(base + leaf, param)]
+
+        if leaf in ("attn.qkv_proj.weight", "attn.qkv_proj.bias"):
+            hf_leaf = leaf.replace("attn.qkv_proj.", "attn.qkv.", 1)
+            return [(base + hf_leaf, param)]
+
+        if leaf in ("attn.qkv.weight", "attn.qkv.bias"):
+            return [(base + leaf, param)]
+
+        if leaf in ("attn.proj.weight", "attn.proj.bias"):
+            return [(base + leaf, param)]
+
+        if leaf in ("attn.o_proj.weight", "attn.o_proj.bias"):
+            new_leaf = leaf.replace("attn.o_proj.", "attn.proj.", 1)
+            return [(base + new_leaf, param)]
+
+        if leaf in ("mlp.gate_up_proj.weight", "mlp.gate_up_proj.bias"):
+            suffix = "weight" if leaf.endswith(".weight") else "bias"
+            gate, up = param.chunk(2, dim=0)
+            return [
+                (base + f"mlp.gate_proj.{suffix}", gate.contiguous()),
+                (base + f"mlp.up_proj.{suffix}", up.contiguous()),
+            ]
+
+        if leaf in (
+            "mlp.gate_proj.weight", "mlp.gate_proj.bias",
+            "mlp.up_proj.weight", "mlp.up_proj.bias",
+            "mlp.down_proj.weight", "mlp.down_proj.bias",
+        ):
+            return [(base + leaf, param)]
+
+        raise ValueError(f"Unknown Qwen2.5-VL visual block parameter: {rest}")
+
+    if rest in (
+        "patch_embed.proj.weight",
+        "merger.ln_q.weight",
+        "merger.mlp.0.weight", "merger.mlp.0.bias",
+        "merger.mlp.2.weight", "merger.mlp.2.bias",
+    ):
+        return [(_VISUAL_TARGET_PREFIX + rest, param)]
+
+    if rest == "rotary_pos_emb.inv_freq":
+        return [(_VISUAL_TARGET_PREFIX + rest, param)]
+
+    raise ValueError(f"Unknown Qwen2.5-VL visual parameter: {rest}")
+
+
+def convert_qwen3vl_to_hf(args, name: str, param):
+    """Convert Qwen3VL / Qwen2.5-VL Megatron parameter names to HF-loader names.
+
+    Text branch: delegate to convert_qwen2_to_hf, then prepend
+    `model.language_model.` (preserves existing single-box behavior).
+
+    Visual branch: full Qwen2.5-VL visual-tower converter (see helper).
+    """
+    if name.startswith(_LM_PREFIX):
+        rest = name[len(_LM_PREFIX):]
+        proxy_name = _PROXY_PREFIX + rest
+        qwen2_results = convert_qwen2_to_hf(args, proxy_name, param)
+        patched = []
+        for hf_name, tensor in qwen2_results:
+            if hf_name.startswith("model."):
+                hf_name = "model.language_model." + hf_name[len("model."):]
+            patched.append((hf_name, tensor))
+        return patched
+
+    for prefix in _VISUAL_PREFIXES:
+        if name.startswith(prefix):
+            rest = name[len(prefix):]
+            return _convert_qwen25vl_visual_to_loadable(rest, param)
+
+    raise ValueError(f"Unknown Qwen3VL parameter name: {name}")
+PYEOF
+    echo "    P15 qwen3vl.py rewritten (full visual converter)"
+  fi
+else
+  echo ">>> ${QWEN3VL_FILE}: skipped (file not found for P15)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
