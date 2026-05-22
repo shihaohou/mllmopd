@@ -421,15 +421,35 @@ NUM_ROLLOUT="${NUM_ROLLOUT:-}"
 LR="${LR:-1e-6}"
 LR_WARMUP="${LR_WARMUP:-5}"
 # Megatron's OptimizerParamScheduler asserts lr_warmup_steps < lr_decay_steps,
-# and lr_decay_steps derives from total training steps. For tiny smokes
-# (NUM_ROLLOUT=2 for Gate B), the default warmup=5 fails the assert before
-# any step runs. Auto-clamp: max(0, NUM_ROLLOUT-1) when NUM_ROLLOUT is
-# explicitly small. Full-length runs (NUM_ROLLOUT unset, ~250 steps) keep
-# the original default.
-if [ -n "${NUM_ROLLOUT}" ] && [ "${NUM_ROLLOUT}" -lt $((LR_WARMUP + 1)) ]; then
-  _CLAMPED=$(( NUM_ROLLOUT > 0 ? NUM_ROLLOUT - 1 : 0 ))
-  echo ">>> LR_WARMUP auto-clamp: ${LR_WARMUP} -> ${_CLAMPED} (NUM_ROLLOUT=${NUM_ROLLOUT})"
-  LR_WARMUP="${_CLAMPED}"
+# where lr_decay_steps derives from EFFECTIVE OPT STEPS, not NUM_ROLLOUT.
+# 1 opt step needs (ROLLOUT_BATCH_SIZE * SAMPLE_N) >= GLOBAL_BATCH_SIZE
+# worth of samples. With defaults rb=8, sample_n=8, GBS=64 → 1 rollout =
+# 1 opt step. But with rb=1 (cheap smoke), 1 rollout = 8 samples, need
+# 8 rollouts for 1 opt step → if NUM_ROLLOUT < 8, decay_steps=0 and
+# even LR_WARMUP=0 fails the strict-less-than assert.
+#
+# Auto-clamp on effective_opt_steps, not raw NUM_ROLLOUT. If 0 effective
+# opt steps, abort early with a helpful message rather than letting
+# Megatron's assert fire after Ray actor init (saves ~30s of NCCL setup).
+if [ -n "${NUM_ROLLOUT}" ]; then
+  _EFFECTIVE_OPT_STEPS=$(( NUM_ROLLOUT * ROLLOUT_BATCH_SIZE * SAMPLE_N / GLOBAL_BATCH_SIZE ))
+  if [ "${_EFFECTIVE_OPT_STEPS}" -lt 1 ]; then
+    echo "ERROR: NUM_ROLLOUT=${NUM_ROLLOUT} too small for at least 1 opt step." >&2
+    echo "  effective_opt_steps = NUM_ROLLOUT * ROLLOUT_BATCH_SIZE * SAMPLE_N / GLOBAL_BATCH_SIZE" >&2
+    echo "                      = ${NUM_ROLLOUT} * ${ROLLOUT_BATCH_SIZE} * ${SAMPLE_N} / ${GLOBAL_BATCH_SIZE} = ${_EFFECTIVE_OPT_STEPS}" >&2
+    echo "  Fix one of:" >&2
+    echo "    - Increase NUM_ROLLOUT (need >= $(( GLOBAL_BATCH_SIZE / (ROLLOUT_BATCH_SIZE * SAMPLE_N) )))" >&2
+    echo "    - Don't override ROLLOUT_BATCH_SIZE=1 (use default 8)" >&2
+    echo "    - Lower GLOBAL_BATCH_SIZE (e.g., =8 for cheap smoke)" >&2
+    exit 1
+  fi
+  if [ "${_EFFECTIVE_OPT_STEPS}" -lt $((LR_WARMUP + 1)) ]; then
+    _CLAMPED=$(( _EFFECTIVE_OPT_STEPS - 1 ))
+    [ "${_CLAMPED}" -lt 0 ] && _CLAMPED=0
+    echo ">>> LR_WARMUP auto-clamp: ${LR_WARMUP} -> ${_CLAMPED}"
+    echo "    (effective_opt_steps=${_EFFECTIVE_OPT_STEPS} from NUM_ROLLOUT=${NUM_ROLLOUT})"
+    LR_WARMUP="${_CLAMPED}"
+  fi
 fi
 EPS_CLIP="${EPS_CLIP:-0.2}"
 EPS_CLIP_HIGH="${EPS_CLIP_HIGH:-0.28}"
