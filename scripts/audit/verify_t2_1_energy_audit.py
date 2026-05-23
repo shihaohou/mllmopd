@@ -32,11 +32,12 @@ def _approx(a: float, b: float, tol: float = 1e-3) -> bool:
     return abs(a - b) <= tol * max(1.0, abs(a), abs(b))
 
 
-def _make_row(lp_full, lp_blank, old_lp_student, step=0, sid="s0"):
+def _make_row(lp_full, lp_blank, old_lp_student, step=0, sid="s0", sample_index=None):
     R = len(lp_full)
     w = compute_vd_weights(lp_full, lp_blank, R).tolist()
     return {
         "id": sid,
+        "sample_index": sample_index,
         "step": step,
         "response_length": R,
         "image_mode": "full",
@@ -55,6 +56,15 @@ def _write_step_file(rows, path):
     with gzip.open(path, "wt") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+
+
+def _write_sidecar_file(rows, path, step, dp_rank=0):
+    """rows: list of (sample_index, old_log_probs)."""
+    with gzip.open(path, "wt") as f:
+        for sample_index, old_lp in rows:
+            row = {"sample_index": sample_index, "step": step,
+                   "dp_rank": dp_rank, "old_log_probs": list(old_lp)}
+            f.write(json.dumps(row) + "\n")
 
 
 def test_canonical_5token():
@@ -160,12 +170,93 @@ def test_skips_unit_weights():
     print(f"  unit-weights-skip: n_unit_w={p['n_samples_unit_w']}  OK")
 
 
+def test_sidecar_join_recovers_old_lp():
+    """Diag row has empty old_lp_student; sidecar with matching sample_index
+    provides it; audit should join and produce same numbers as if it were inline."""
+    lp_full = [1.0, 2.0, 3.0, 4.0, 5.0]
+    lp_blank = [3.0, 2.0, 1.0, 0.0, -1.0]
+    old_lp = [2.0, 1.0, 0.0, -1.0, -2.0]
+
+    # Reference: inline old_lp_student case (canonical test result).
+    with tempfile.TemporaryDirectory() as tmp1:
+        path1 = Path(tmp1) / "step_000001.jsonl.gz"
+        _write_step_file([_make_row(lp_full, lp_blank, old_lp, sample_index=42)], path1)
+        ref_out = scan(Path(tmp1), steps=None, limit_rows=0)
+    ref_rho = ref_out["pooled"]["rho_l2_pooled"]
+
+    # Now: diag row with EMPTY old_lp_student, sidecar provides it.
+    with tempfile.TemporaryDirectory() as tmp2:
+        diag_path = Path(tmp2) / "step_000001.jsonl.gz"
+        sidecar_path = Path(tmp2) / "step_000001.adv_dp0.jsonl.gz"
+        row = _make_row(lp_full, lp_blank, [], sample_index=42)  # empty old_lp
+        _write_step_file([row], diag_path)
+        _write_sidecar_file([(42, old_lp)], sidecar_path, step=1, dp_rank=0)
+        out = scan(Path(tmp2), steps=None, limit_rows=0)
+
+    p = out["pooled"]
+    assert p["n_samples_used"] == 1, p
+    assert p["n_samples_old_lp_from_sidecar"] == 1, p
+    assert out["n_steps_with_sidecar"] == 1, out
+    assert _approx(p["rho_l2_pooled"], ref_rho), (p["rho_l2_pooled"], ref_rho)
+    print(f"  sidecar-join: from_sidecar={p['n_samples_old_lp_from_sidecar']}, "
+          f"rho_l2={p['rho_l2_pooled']:.4f} matches inline {ref_rho:.4f}  OK")
+
+
+def test_sidecar_multi_dp_merge():
+    """Two dp ranks each contribute disjoint sample_indices for the same step;
+    audit merges them and processes all samples."""
+    lp_full = [1.0, 2.0, 3.0, 4.0, 5.0]
+    lp_blank = [3.0, 2.0, 1.0, 0.0, -1.0]
+    old_lp = [2.0, 1.0, 0.0, -1.0, -2.0]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        diag_path = Path(tmp) / "step_000001.jsonl.gz"
+        rows = [
+            _make_row(lp_full, lp_blank, [], sample_index=10),
+            _make_row(lp_full, lp_blank, [], sample_index=20),
+        ]
+        _write_step_file(rows, diag_path)
+        # Two dp ranks, each with one sample.
+        _write_sidecar_file([(10, old_lp)], Path(tmp) / "step_000001.adv_dp0.jsonl.gz",
+                            step=1, dp_rank=0)
+        _write_sidecar_file([(20, old_lp)], Path(tmp) / "step_000001.adv_dp1.jsonl.gz",
+                            step=1, dp_rank=1)
+        out = scan(Path(tmp), steps=None, limit_rows=0)
+
+    p = out["pooled"]
+    assert p["n_samples_used"] == 2, p
+    assert p["n_samples_old_lp_from_sidecar"] == 2, p
+    print(f"  sidecar-multi-dp: merged 2 dp ranks, "
+          f"n_used={p['n_samples_used']}  OK")
+
+
+def test_sidecar_missing_index_falls_through():
+    """Sidecar present but no matching sample_index → audit reports no_old_lp."""
+    lp_full = [1.0, 2.0, 3.0, 4.0, 5.0]
+    lp_blank = [3.0, 2.0, 1.0, 0.0, -1.0]
+    old_lp = [2.0, 1.0, 0.0, -1.0, -2.0]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        diag_path = Path(tmp) / "step_000001.jsonl.gz"
+        _write_step_file([_make_row(lp_full, lp_blank, [], sample_index=42)], diag_path)
+        # Sidecar has a DIFFERENT sample_index.
+        _write_sidecar_file([(99, old_lp)], Path(tmp) / "step_000001.adv_dp0.jsonl.gz",
+                            step=1, dp_rank=0)
+        out = scan(Path(tmp), steps=None, limit_rows=0)
+
+    p = out["pooled"]
+    assert p["n_samples_used"] == 0, p
+    assert p["n_samples_no_old_lp"] == 1, p
+    print(f"  sidecar-missing-index: no_old_lp={p['n_samples_no_old_lp']}  OK")
+
+
 def test_skips_missing_lp_full():
     """Sentinel-failed sample (lp_full=[]) should go to no_adv bucket."""
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "step_000001.jsonl.gz"
         row = {
             "id": "failed",
+            "sample_index": 0,
             "step": 0,
             "response_length": 5,
             "image_mode": "full",
@@ -234,6 +325,9 @@ def main():
         test_anti_correlated,
         test_visual_rejection_suppression,
         test_skips_unit_weights,
+        test_sidecar_join_recovers_old_lp,
+        test_sidecar_multi_dp_merge,
+        test_sidecar_missing_index_falls_through,
         test_skips_missing_lp_full,
         test_multi_step_aggregation,
         test_vd_bin_assignment,

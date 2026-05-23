@@ -594,6 +594,8 @@ print(json.dumps({
     "MLLMOPD_USE_VD_WEIGHTING": os.environ.get("MLLMOPD_USE_VD_WEIGHTING", ""),
     "MLLMOPD_VD_TAU": os.environ.get("MLLMOPD_VD_TAU", ""),
     "MLLMOPD_VD_BETA": os.environ.get("MLLMOPD_VD_BETA", ""),
+    # T2-1 A0c: P19 opd_adv_dump for energy-audit sidecar (fires in trainer).
+    "MLLMOPD_DUMP_OPD_ADV": os.environ.get("MLLMOPD_DUMP_OPD_ADV", ""),
     # xbox cross-host NCCL: trainer rank 0 broadcasts weights to rollout
     # engines on Box 1 over TCP (no IB between H800 and A800 clusters).
     # Without these, NCCL auto-selects a NIC that doesn't reach Box 1

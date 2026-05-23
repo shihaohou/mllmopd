@@ -35,9 +35,20 @@ adv_t = lp_full[t] - old_lp_student[t], matching the Uni-OPD OPD loss
 "adv_t = (lp_teacher_full - lp_student) · sentinel_mask · w_t" minus
 the multiplier we're auditing.
 
-Sentinel handling: skip samples where lp_full, old_lp_student, or vd
-is absent / length-mismatched. Also skip samples where vd_weights are
-all unit (no signal to audit). Counts are reported.
+old_lp_student source: the existing diag hook writes
+`old_lp_student` BEFORE the trainer forward pass, so it's empty on
+real production runs. To recover it, the patched runs (with
+MLLMOPD_DUMP_OPD_ADV=1, P19 patch in loss.py) also write a sidecar
+`step_NNNNNN.adv_dp{R}.jsonl.gz` carrying (sample_index, old_log_probs)
+per sample. This module AUTO-DISCOVERS those sidecars by scanning the
+same diag_dir for `step_NNNNNN.adv_dp*.jsonl.gz` and joining on
+sample_index. The diag-side `old_lp_student` is preferred if present
+and non-empty; falls back to the sidecar otherwise.
+
+Sentinel handling: skip samples where lp_full or vd is absent /
+length-mismatched. Also skip samples where vd_weights are all unit
+(no signal to audit) or where old_log_probs cannot be recovered.
+Counts are reported.
 
 Usage::
 
@@ -59,6 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 STEP_RE = re.compile(r"step_(\d+)\.jsonl\.gz$")
+SIDECAR_RE = re.compile(r"step_(\d+)\.adv_dp(\d+)\.jsonl\.gz$")
 
 _EPS = 1e-12
 
@@ -82,6 +94,8 @@ class Accumulator:
     n_samples_used: int = 0
     n_samples_unit_w: int = 0  # vd_weights all == 1 (degenerate or weighting-off)
     n_samples_no_adv: int = 0  # lp_full or old_lp_student missing / mismatched
+    n_samples_no_old_lp: int = 0  # old_lp_student missing from both diag row and sidecar
+    n_samples_old_lp_from_sidecar: int = 0  # successfully joined from .adv_dp*.jsonl.gz
     n_tokens_used: int = 0
 
     sum_adv2: float = 0.0            # Σ adv²
@@ -138,8 +152,19 @@ def _dist_summary(vals: list[float]) -> dict:
     }
 
 
-def _process_sample(row: dict, acc: Accumulator, pooled: Accumulator) -> None:
-    """Update streaming stats for one diagnostics row in both per-step and pooled accumulators."""
+def _process_sample(
+    row: dict,
+    acc: Accumulator,
+    pooled: Accumulator,
+    sidecar_lookup: dict[int, list[float]] | None = None,
+) -> None:
+    """Update streaming stats for one diagnostics row in both per-step and pooled accumulators.
+
+    sidecar_lookup: optional {sample_index → old_log_probs[float]} from the
+    P19 adv-dump sidecar. Used when row["old_lp_student"] is empty (which
+    is the normal production case — the existing diag hook fires before
+    trainer forward).
+    """
     R = int(row.get("response_length", 0))
     if R <= 1:
         return
@@ -151,13 +176,32 @@ def _process_sample(row: dict, acc: Accumulator, pooled: Accumulator) -> None:
     vd = row.get("vd") or []
     w = row.get("vd_weights") or []
 
-    if (not lp_full or len(lp_full) != R
-            or not old_lp_student or len(old_lp_student) != R
-            or not vd or len(vd) != R
-            or not w or len(w) != R):
+    # Try sidecar fallback for old_lp_student.
+    used_sidecar = False
+    if (not old_lp_student or len(old_lp_student) != R) and sidecar_lookup:
+        sample_index = row.get("sample_index")
+        if sample_index is not None:
+            alt = sidecar_lookup.get(sample_index)
+            if alt and len(alt) == R:
+                old_lp_student = alt
+                used_sidecar = True
+
+    if not lp_full or len(lp_full) != R:
         acc.n_samples_no_adv += 1
         pooled.n_samples_no_adv += 1
         return
+    if not old_lp_student or len(old_lp_student) != R:
+        acc.n_samples_no_old_lp += 1
+        pooled.n_samples_no_old_lp += 1
+        return
+    if not vd or len(vd) != R or not w or len(w) != R:
+        acc.n_samples_no_adv += 1
+        pooled.n_samples_no_adv += 1
+        return
+
+    if used_sidecar:
+        acc.n_samples_old_lp_from_sidecar += 1
+        pooled.n_samples_old_lp_from_sidecar += 1
 
     # Check unit-w (degenerate or weighting-off).
     if all(abs(x - 1.0) < 1e-6 for x in w):
@@ -333,6 +377,8 @@ def _summarize(acc: Accumulator) -> dict:
         "n_samples_used": acc.n_samples_used,
         "n_samples_unit_w": acc.n_samples_unit_w,
         "n_samples_no_adv": acc.n_samples_no_adv,
+        "n_samples_no_old_lp": acc.n_samples_no_old_lp,
+        "n_samples_old_lp_from_sidecar": acc.n_samples_old_lp_from_sidecar,
         "n_tokens_used": acc.n_tokens_used,
 
         "rho_l2_pooled": rho_l2_pooled,
@@ -348,13 +394,43 @@ def _summarize(acc: Accumulator) -> dict:
     }
 
 
+def _load_sidecar_for_step(diag_dir: Path, step: int) -> dict[int, list[float]]:
+    """Load (sample_index → old_log_probs) for one step by merging across dp ranks.
+
+    Reads all step_NNNNNN.adv_dp*.jsonl.gz matching the given step. Returns
+    empty dict if no sidecars exist (caller treats this as "no sidecar
+    available" and falls back to row["old_lp_student"]).
+    """
+    out: dict[int, list[float]] = {}
+    for f in sorted(diag_dir.glob(f"step_{step:06d}.adv_dp*.jsonl.gz")):
+        try:
+            with gzip.open(f, "rt") as fin:
+                for line in fin:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    idx = row.get("sample_index")
+                    olp = row.get("old_log_probs")
+                    if idx is None or not olp:
+                        continue
+                    out[idx] = olp
+        except Exception:
+            continue
+    return out
+
+
 def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
     files = sorted(diag_dir.glob("step_*.jsonl.gz"))
+    # The .adv_dp*.jsonl.gz sidecars also match step_*.jsonl.gz under the
+    # naive glob; filter them out so we only process main diag files.
+    files = [f for f in files if not SIDECAR_RE.search(f.name)]
     if not files:
         raise FileNotFoundError(f"no step_*.jsonl.gz in {diag_dir}")
 
     pooled = Accumulator()
     per_step: dict[int, Accumulator] = {}
+    sidecar_steps_found = 0
 
     for f in files:
         m = STEP_RE.search(f.name)
@@ -366,6 +442,10 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
         acc = Accumulator()
         per_step[s] = acc
 
+        sidecar_lookup = _load_sidecar_for_step(diag_dir, s)
+        if sidecar_lookup:
+            sidecar_steps_found += 1
+
         with gzip.open(f, "rt") as fin:
             n = 0
             for line in fin:
@@ -375,12 +455,13 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                _process_sample(row, acc, pooled)
+                _process_sample(row, acc, pooled, sidecar_lookup or None)
                 n += 1
 
     out = {
         "diag_dir": str(diag_dir),
         "n_step_files_scanned": len(per_step),
+        "n_steps_with_sidecar": sidecar_steps_found,
         "steps_scanned": sorted(per_step.keys()),
         "pooled": _summarize(pooled),
         "per_step": {str(s): _summarize(per_step[s]) for s in sorted(per_step.keys())},

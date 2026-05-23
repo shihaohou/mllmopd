@@ -272,12 +272,19 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
             if isinstance(md, dict):
                 sample_id = md.get("id") or md.get("uid")
 
+            # sample.index is the rollout-pipeline-internal globally unique
+            # sample identifier (matches rollout_data["sample_indices"] used
+            # in compute_advantages_and_returns). Required for joining this
+            # row with the opd_adv_dump sidecar (T2-1 A0c).
+            sample_index = getattr(sample, "index", None)
+
             old_lp_student = _safe_list(getattr(sample, "old_log_probs", None))
             if old_lp_student and response_length > 0:
                 old_lp_student = old_lp_student[-response_length:]
 
             row = {
                 "id": sample_id,
+                "sample_index": sample_index,
                 "step": step_i,
                 "response_length": response_length,
                 "image_mode": image_mode,

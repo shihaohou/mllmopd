@@ -1406,6 +1406,73 @@ else
   echo ">>> ${ROUTER_FILE}: skipped (file not found for P18)"
 fi
 
+# --- Patch P19: opd adv dump (T2-1 A0c energy audit data) -----------
+# Inserts a call to mllmopd.training.opd_adv_dump inside the OPD branch
+# of compute_advantages_and_returns, AFTER teacher_vd_weights are read
+# (P13's reader block) but BEFORE the per-sample loop that applies them
+# to advantage. The dump writes (sample_index, old_log_probs) per
+# sample to a sidecar step_NNNNNN.adv_dp{R}.jsonl.gz so the audit can
+# join with the existing diag file and compute true rho_l2 /
+# corr(w, |adv|) / suppressed-correction-mass.
+#
+# Guarded by env MLLMOPD_DUMP_OPD_ADV=1 in the launcher (no-op on
+# T1-2/T1-3 baselines and normal T2-1 runs).
+LOSS_ADV_DUMP_SENTINEL="# === mllmopd P19 dump adv ingredients ==="
+if [ -f "${LOSS}" ]; then
+  if grep -q "${LOSS_ADV_DUMP_SENTINEL}" "${LOSS}"; then
+    echo ">>> ${LOSS}: already patched (P19 adv-dump sentinel present)"
+  else
+    echo ">>> patching ${LOSS}: insert opd_adv_dump call after P13 reader"
+    export MLLMOPD_PATCH_LOSS_ADV_DUMP_PATH="${LOSS}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_ADV_DUMP_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor: end of P13 reader block + blank line + "Reverse KL" comment.
+# This is post-P13 state (P19 requires P13 to have already been applied;
+# patch script order enforces that since P19 comes after P13 above).
+anchor = '''        # === end mllmopd P13 vd weights apply (reader) ===
+
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+patch = '''        # === end mllmopd P13 vd weights apply (reader) ===
+
+        # === mllmopd P19 dump adv ingredients ===
+        # T2-1 A0c: dump (sample_index, old_log_probs) per sample so the
+        # energy audit can reconstruct adv_t = lp_full - old_log_probs
+        # offline. The existing diag hook (opd_diagnostics_hook) writes
+        # lp_full / lp_blank / vd / vd_weights BEFORE this trainer forward,
+        # so sample.old_log_probs is None there; this dump runs AFTER the
+        # forward and has the missing piece in student_log_probs.
+        # No-op when env MLLMOPD_DUMP_OPD_ADV != 1.
+        try:
+            from mllmopd.training.opd_adv_dump import dump_opd_adv as _mllmopd_dump_adv
+            _mllmopd_dump_adv(rollout_data, student_log_probs, parallel_state)
+        except Exception as _mllmopd_dump_e:
+            print(
+                f"[mllmopd P19] adv dump failed: "
+                f"{type(_mllmopd_dump_e).__name__}: {_mllmopd_dump_e}",
+                flush=True,
+            )
+        # === end mllmopd P19 ===
+
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+
+if anchor not in src:
+    sys.exit(f"ERROR: P19 anchor not found in {path!r} — requires P13 reader block "
+             "to have been applied first; check patch order")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P19 applied (opd_adv_dump call after P13 reader)")
+PY
+  fi
+else
+  echo ">>> ${LOSS}: skipped (file not found for P19)"
+fi
+
 echo
 echo ">>> patch_uni_opd done. Re-run after \`git submodule update\`."
 echo
