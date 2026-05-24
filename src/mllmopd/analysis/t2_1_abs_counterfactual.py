@@ -236,13 +236,25 @@ def _with_boost_only_weights(row: dict, alpha: float = 1.0,
     return out
 
 
+def _with_boost_only_weights_a07(row: dict) -> dict:
+    """T2-2 boost-only with α=0.7 (predicted rho_l2 ≈ 1.4-1.6)."""
+    return _with_boost_only_weights(row, alpha=0.7, max_w=2.0)
+
+
+def _with_boost_only_weights_a05(row: dict) -> dict:
+    """T2-2 boost-only with α=0.5 (predicted rho_l2 ≈ 1.3-1.5; safest)."""
+    return _with_boost_only_weights(row, alpha=0.5, max_w=2.0)
+
+
 # Ordered list of (name, transform_fn). Transform takes (row_with_old_lp)
 # and returns a row with vd_weights replaced. signed is the no-op baseline.
 # Order matters for the recommended-variant selection: first all-pass
-# wins. Boost-only (T2-2) listed first as it's GPT round-5's recommended
-# design.
+# wins. Boost-only variants listed first (GPT round-5's recommended
+# design family), conservative-α first so safer wins ties.
 VARIANTS: list[tuple[str, callable]] = [
-    ("boost_only", _with_boost_only_weights),  # T2-2 candidate
+    ("boost_only_a05", _with_boost_only_weights_a05),  # T2-2 candidate (safest)
+    ("boost_only_a07", _with_boost_only_weights_a07),  # T2-2 candidate (balanced)
+    ("boost_only", _with_boost_only_weights),          # T2-2 candidate (α=1.0, aggressive)
     ("signed", lambda row: row),
     ("abs", _with_abs_weights),
     ("abs_rms_preserve", _with_abs_rms_preserve_weights),
