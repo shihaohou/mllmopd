@@ -32,7 +32,10 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch  # noqa: E402
 
-from mllmopd.training.vd_weighting import compute_vd_weights  # noqa: E402
+from mllmopd.training.vd_weighting import (  # noqa: E402
+    compute_vd_weights,
+    compute_vd_weights_boost_only,
+)
 
 
 def _approx(a: float, b: float, tol: float = 1e-4) -> bool:
@@ -130,6 +133,111 @@ def test_env_var_override():
     finally:
         os.environ.pop("MLLMOPD_VD_TAU")
         os.environ.pop("MLLMOPD_VD_BETA")
+
+
+# ---------------------------------------------------------------------------
+# T2-2 boost-only tests
+# ---------------------------------------------------------------------------
+
+
+def test_boost_only_bounds():
+    """All weights in [1, max_w] by construction; mass not preserved."""
+    R = 16
+    lp_full = [float(i) for i in range(R)]
+    lp_blank = [0.0] * R   # vd = [0, 1, ..., 15]; |vd| same
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, R, alpha=1.0, max_w=2.0)
+    assert w.shape == (R,), w.shape
+    assert (w >= 1.0).all().item(), f"all weights must be >= 1; got {w.tolist()}"
+    assert (w <= 2.0).all().item(), f"all weights must be <= max_w=2; got {w.tolist()}"
+    # Σw > R (no mass-preserve), should be ~ 1.5 * R for uniform ranks
+    assert w.sum().item() > R, f"boost-only should INCREASE mass; got {w.sum().item()}"
+
+
+def test_boost_only_monotonic_with_abs_vd():
+    """|vd| ascending → percentile rank ascending → weight ascending."""
+    R = 10
+    lp_full = [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]
+    lp_blank = [0.0] * R   # vd = lp_full; |vd| = [5,4,3,2,1,0,1,2,3,4]
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, R, alpha=1.0, max_w=2.0)
+    # Token 5 has |vd|=0 → rank 0 → w=1.0
+    assert _approx(w[5].item(), 1.0), f"min-|vd| token should be at floor; got {w[5].item()}"
+    # Token 0 has |vd|=5 → rank R-1 → w=2.0 (or clamped to max_w)
+    assert _approx(w[0].item(), 2.0), f"max-|vd| token should be at max; got {w[0].item()}"
+
+
+def test_boost_only_sign_agnostic():
+    """vd<0 and vd>0 with same |vd| get same weight."""
+    # vd = [+3, -3, +1, -1]: |vd| = [3, 3, 1, 1]
+    # Ranks: token 0 and 1 tied for max, token 2 and 3 tied for min.
+    lp_full = [3.0, -3.0, 1.0, -1.0]
+    lp_blank = [0.0] * 4
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, 4, alpha=1.0, max_w=2.0)
+    # Tokens with |vd|=3 (indices 0, 1) should have equal high weight
+    # Tokens with |vd|=1 (indices 2, 3) should have equal low weight
+    # Note: argsort with ties is index-stable but ties produce adjacent ranks
+    # (not equal ranks). We just check sign-agnostic: same |vd| → same weight bucket.
+    high_w = sorted([w[0].item(), w[1].item()])
+    low_w = sorted([w[2].item(), w[3].item()])
+    assert high_w[0] > low_w[1], (
+        f"|vd|=3 weights {high_w} should be > |vd|=1 weights {low_w}"
+    )
+
+
+def test_boost_only_alpha_zero_unit_weights():
+    """alpha=0 → all weights = 1 (no boost)."""
+    R = 8
+    lp_full = list(range(R))
+    lp_blank = [0.0] * R
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, R, alpha=0.0, max_w=2.0)
+    assert torch.allclose(w, torch.ones(R)), f"alpha=0 should give unit; got {w.tolist()}"
+
+
+def test_boost_only_max_w_clamp():
+    """max_w=1.5 should clamp weights regardless of alpha."""
+    R = 4
+    lp_full = [0.0, 1.0, 2.0, 100.0]
+    lp_blank = [0.0] * R
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, R, alpha=10.0, max_w=1.5)
+    assert (w <= 1.5 + 1e-6).all().item(), f"max_w clamp violated: {w.tolist()}"
+    assert (w >= 1.0 - 1e-6).all().item(), f"floor violated: {w.tolist()}"
+
+
+def test_boost_only_response_length_one_and_zero():
+    """Degenerate-length edge cases return ones / empty."""
+    w = compute_vd_weights_boost_only([0.5], [0.1], 1)
+    assert w.shape == (1,) and w.item() == 1.0
+    w = compute_vd_weights_boost_only([], [], 0)
+    assert w.numel() == 0
+
+
+def test_boost_only_env_var_override():
+    os.environ["MLLMOPD_VD_ALPHA"] = "0.5"
+    os.environ["MLLMOPD_VD_MAX_W"] = "1.5"
+    try:
+        from mllmopd.training.vd_weighting import _resolve_boost_only_hyperparams
+        alpha, max_w = _resolve_boost_only_hyperparams()
+        assert alpha == 0.5 and max_w == 1.5
+    finally:
+        os.environ.pop("MLLMOPD_VD_ALPHA")
+        os.environ.pop("MLLMOPD_VD_MAX_W")
+
+
+def test_boost_only_hand_computed_R5():
+    """Hand-computed R=5 reference.
+
+    lp_full = [0, 0.25, 0.4, 0.7, 1.0]; lp_blank = 0; |vd| = lp_full (all >= 0)
+    argsort ascending → indices [0, 1, 2, 3, 4]
+    ranks = [0/4, 1/4, 2/4, 3/4, 4/4] = [0, 0.25, 0.5, 0.75, 1.0]
+    w = clamp(1 + 1.0 * ranks, 1, 2) = [1.0, 1.25, 1.5, 1.75, 2.0]
+    sum = 7.5 (≠ R=5, as expected — no mass preserve)
+    """
+    R = 5
+    lp_full = [0.0, 0.25, 0.4, 0.7, 1.0]
+    lp_blank = [0.0] * R
+    w = compute_vd_weights_boost_only(lp_full, lp_blank, R, alpha=1.0, max_w=2.0)
+    expected = torch.tensor([1.0, 1.25, 1.5, 1.75, 2.0])
+    assert torch.allclose(w, expected, atol=1e-4), f"got {w.tolist()}, want {expected.tolist()}"
+    assert _approx(w.sum().item(), 7.5)
 
 
 def _run_unit_tests():

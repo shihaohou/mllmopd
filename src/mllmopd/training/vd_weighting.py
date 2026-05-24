@@ -1,8 +1,22 @@
-"""T2-1: per-token VD (Vision Dependency) weighting for OPD advantages.
+"""T2-1 / T2-2: per-token VD (Vision Dependency) weighting for OPD advantages.
 
-Implements a PGPO-style threshold-gated reweighting transplanted to the
-On-Policy Distillation setting. See `docs/t2_1_design.md` for the full
-rationale and the PGPO/VPPO/PAPO comparison that motivated this choice.
+Two compute paths:
+
+  * `compute_vd_weights`           — T2-1 (PGPO Eq 6 + 7, signed vd,
+                                     threshold-gated piecewise +
+                                     per-sequence mass-preserving renorm).
+                                     CONFIRMED MIS-TARGETING in OPD by
+                                     A0 audit (cond_supp=0.997) — kept
+                                     for reproducibility and ablation.
+  * `compute_vd_weights_boost_only` — T2-2 (boost-only, |vd|, percentile-
+                                     rank score, no suppress, no renorm).
+                                     Designed per GPT round-5 to fix
+                                     the signed-proxy mis-target and
+                                     the structural frac_supp ~7% floor.
+                                     See `docs/t2_2_design.md`.
+
+The dispatch lives in `opd_diagnostics_hook.post_process_rewards_with_diagnostics`
+and is gated by env `MLLMOPD_VD_MODE` (signed | boost_only, default signed).
 
 Inputs: per-token teacher logprobs under full-image (`lp_full`) and
 blank-image (`lp_blank`) conditions, aligned to the response segment
@@ -132,4 +146,91 @@ def compute_vd_weights(
         return torch.ones(response_length, dtype=torch.float32)
 
     w = w_raw * (response_length / w_sum)
+    return w
+
+
+def _resolve_boost_only_hyperparams() -> tuple[float, float]:
+    """Read α, max_w from env (set by launcher). Defaults per GPT round-5."""
+    alpha = float(os.environ.get("MLLMOPD_VD_ALPHA", "1.0"))
+    max_w = float(os.environ.get("MLLMOPD_VD_MAX_W", "2.0"))
+    if alpha < 0.0:
+        raise ValueError(f"MLLMOPD_VD_ALPHA must be non-negative; got {alpha}")
+    if max_w < 1.0:
+        raise ValueError(f"MLLMOPD_VD_MAX_W must be >= 1.0 (boost-only floor); got {max_w}")
+    return alpha, max_w
+
+
+def compute_vd_weights_boost_only(
+    lp_full: Sequence[float] | torch.Tensor,
+    lp_blank: Sequence[float] | torch.Tensor,
+    response_length: int,
+    *,
+    alpha: float | None = None,
+    max_w: float | None = None,
+) -> torch.Tensor:
+    """T2-2: boost-only |vd| weights with per-sequence percentile rank.
+
+    Formula::
+
+        score_t = rank(|vd_t|) / (R - 1)        # per-sequence percentile rank ∈ [0, 1]
+        w_t     = clamp(1 + α · score_t, 1, max_w)
+
+    Key properties (vs T2-1 PGPO Eq 6+7):
+      * w_t ≥ 1 everywhere → NO suppression → frac_supp_neg_vd_neg_adv ≡ 0
+        BY CONSTRUCTION. The structural ~7% floor of T2-1 disappears.
+      * NO mass-preserving renormalization → Σw > N (total monotone
+        increase). This means more energy enters the gradient, but ALL
+        of it is base-OPD-correction-preserving boost rather than
+        redistribution. Effective LR rises by ~E[w]; control via
+        global LR or grad clipping if needed.
+      * Percentile rank (not min-max) is OUTLIER-ROBUST: one extreme
+        |vd| does not compress everyone else into a tiny region.
+      * Uses |vd| (non-negative magnitude) so visual-rejection tokens
+        (vd<0, |vd| large) get the same boost as visual-support tokens
+        (vd>0, |vd| large) — exactly what OPD needs (the sign is
+        already in adv_t = teacher_logp - student_logp).
+
+    Defaults: α=1.0 → w_t ∈ [1, 2] for max_w=2.0; mean ≈ 1.5 under
+    uniform percentile rank. Override per env vars MLLMOPD_VD_ALPHA
+    and MLLMOPD_VD_MAX_W.
+
+    Edge cases (return all-ones, no-op):
+      * Response length 0 or 1
+      * Length mismatch (logs warning)
+      * Tie-breaking in rank uses torch.argsort's stable behavior
+        (deterministic). All-equal |vd| → ranks 0/1/2/.../(R-1)/(R-1)
+        → after normalize all but max get a real score. Acceptable.
+    """
+    if alpha is None or max_w is None:
+        env_alpha, env_max_w = _resolve_boost_only_hyperparams()
+        alpha = alpha if alpha is not None else env_alpha
+        max_w = max_w if max_w is not None else env_max_w
+
+    if response_length <= 0:
+        return torch.zeros(0, dtype=torch.float32)
+    if response_length == 1:
+        return torch.ones(1, dtype=torch.float32)
+
+    lp_full_t = torch.as_tensor(lp_full, dtype=torch.float32)
+    lp_blank_t = torch.as_tensor(lp_blank, dtype=torch.float32)
+
+    if lp_full_t.numel() != response_length or lp_blank_t.numel() != response_length:
+        logger.warning(
+            "[vd_weighting/boost_only] length mismatch: lp_full=%d, lp_blank=%d, "
+            "expected=%d. Returning unit weights (no-op).",
+            lp_full_t.numel(), lp_blank_t.numel(), response_length,
+        )
+        return torch.ones(response_length, dtype=torch.float32)
+
+    abs_vd = (lp_full_t - lp_blank_t).abs()
+
+    # Per-sequence percentile rank via argsort (vectorized).
+    # sorted_idx[k] = position of the k-th smallest abs_vd in the original tensor.
+    # We want rank[i] = position of abs_vd[i] in the sorted order, normalized
+    # to [0, 1]. Use scatter via inverse permutation.
+    sorted_idx = torch.argsort(abs_vd)
+    ranks = torch.empty_like(abs_vd)
+    ranks[sorted_idx] = torch.arange(response_length, dtype=torch.float32) / (response_length - 1)
+
+    w = (1.0 + alpha * ranks).clamp(min=1.0, max=max_w)
     return w

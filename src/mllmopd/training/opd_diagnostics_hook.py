@@ -43,7 +43,10 @@ from pathlib import Path
 
 import torch
 
-from mllmopd.training.vd_weighting import compute_vd_weights
+from mllmopd.training.vd_weighting import (
+    compute_vd_weights,
+    compute_vd_weights_boost_only,
+)
 
 # We can't `from Uni_OPD_utils.OPD_reward.post_process_rewards import ...`
 # because that module's top-level pulls in `exps.OPD.utils.reward.get_reward`
@@ -256,7 +259,21 @@ def post_process_rewards_with_diagnostics(args, samples, **kwargs):
                 # Degenerate cases get unit-ones (no-op weight); the
                 # multiplier in loss.py P13 still runs but is identity.
                 if response_length > 0 and vd and len(vd) == response_length:
-                    w = compute_vd_weights(lp_full, lp_blank, response_length)
+                    # T2-1 / T2-2 dispatch by env var. Default "signed" keeps
+                    # T2-1 byte-identical when MLLMOPD_VD_MODE is unset.
+                    vd_mode = os.environ.get("MLLMOPD_VD_MODE", "signed").lower()
+                    if vd_mode == "boost_only":
+                        w = compute_vd_weights_boost_only(
+                            lp_full, lp_blank, response_length,
+                        )
+                    elif vd_mode == "signed":
+                        w = compute_vd_weights(lp_full, lp_blank, response_length)
+                    else:
+                        logger.warning(
+                            f"[opd_diag] unknown MLLMOPD_VD_MODE={vd_mode!r}; "
+                            f"falling back to signed (T2-1 PGPO)"
+                        )
+                        w = compute_vd_weights(lp_full, lp_blank, response_length)
                     sample.teacher_vd_weights = w
                     vd_weights = w.tolist()
                     n_vd_attached += 1

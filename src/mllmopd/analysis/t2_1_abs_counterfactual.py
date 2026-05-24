@@ -56,7 +56,10 @@ from mllmopd.analysis.t2_1_energy_audit import (
     _process_sample,
     _summarize,
 )
-from mllmopd.training.vd_weighting import compute_vd_weights
+from mllmopd.training.vd_weighting import (
+    compute_vd_weights,
+    compute_vd_weights_boost_only,
+)
 
 
 def _with_abs_weights(row: dict) -> dict:
@@ -209,11 +212,37 @@ def _with_abs_max_clip_renorm_weights(row: dict) -> dict:
     return _with_abs_max_clip_weights(row, max_cap=2.0, renorm=True)
 
 
+def _with_boost_only_weights(row: dict, alpha: float = 1.0,
+                              max_w: float = 2.0) -> dict:
+    """T2-2 boost-only |vd| with per-sequence percentile rank.
+
+    Uses the SAME compute_vd_weights_boost_only that the training-time
+    hook will use, so this counterfactual is a true preview of T2-2
+    behavior on the existing T2-1 pilot diagnostics.
+    """
+    vd = row.get("vd") or []
+    R = int(row.get("response_length", 0))
+    if not vd or R <= 1 or len(vd) != R:
+        return row
+
+    abs_vd = [abs(v) for v in vd]
+    # Trick (same as _with_abs_weights): pass lp_full'=|vd|, lp_blank'=0
+    # so the internal abs_vd computation matches.
+    w = compute_vd_weights_boost_only(
+        abs_vd, [0.0] * R, R, alpha=alpha, max_w=max_w,
+    )
+    out = dict(row)
+    out["vd_weights"] = w.tolist()
+    return out
+
+
 # Ordered list of (name, transform_fn). Transform takes (row_with_old_lp)
 # and returns a row with vd_weights replaced. signed is the no-op baseline.
 # Order matters for the recommended-variant selection: first all-pass
-# wins, so tighter / more principled variants are listed first.
+# wins. Boost-only (T2-2) listed first as it's GPT round-5's recommended
+# design.
 VARIANTS: list[tuple[str, callable]] = [
+    ("boost_only", _with_boost_only_weights),  # T2-2 candidate
     ("signed", lambda row: row),
     ("abs", _with_abs_weights),
     ("abs_rms_preserve", _with_abs_rms_preserve_weights),

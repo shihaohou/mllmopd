@@ -222,6 +222,7 @@ def test_scan_variants_has_all_paths():
         _write_step([_make_signed_row(lp_full, lp_blank, old_lp)], path)
         out = scan_variants(Path(tmp), steps=None, limit_rows=0)
     expected = {
+        "boost_only",  # T2-2 candidate (GPT round-5)
         "signed", "abs", "abs_rms_preserve", "abs_rms_preserve_wide",
         "abs_max_clip", "abs_max_clip_renorm",
     }

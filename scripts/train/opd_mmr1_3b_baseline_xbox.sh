@@ -594,6 +594,11 @@ print(json.dumps({
     "MLLMOPD_USE_VD_WEIGHTING": os.environ.get("MLLMOPD_USE_VD_WEIGHTING", ""),
     "MLLMOPD_VD_TAU": os.environ.get("MLLMOPD_VD_TAU", ""),
     "MLLMOPD_VD_BETA": os.environ.get("MLLMOPD_VD_BETA", ""),
+    # T2-2: vd_mode dispatch (signed | boost_only); boost-only also reads
+    # alpha + max_w. Unset → signed (T2-1 byte-identical).
+    "MLLMOPD_VD_MODE": os.environ.get("MLLMOPD_VD_MODE", ""),
+    "MLLMOPD_VD_ALPHA": os.environ.get("MLLMOPD_VD_ALPHA", ""),
+    "MLLMOPD_VD_MAX_W": os.environ.get("MLLMOPD_VD_MAX_W", ""),
     # T2-1 A0c: P19 opd_adv_dump for energy-audit sidecar (fires in trainer).
     "MLLMOPD_DUMP_OPD_ADV": os.environ.get("MLLMOPD_DUMP_OPD_ADV", ""),
     # xbox cross-host NCCL: trainer rank 0 broadcasts weights to rollout
