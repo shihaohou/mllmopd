@@ -1,0 +1,2216 @@
+{
+  "metadata": {
+    "produced_at": "2026-05-24",
+    "t1_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/t1_trajectory_20260522-105745",
+    "tier2a_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/tier2a_trajectory_20260524-132227",
+    "opd_target_ids_path": "/Users/houshihao/project/code/mllmopd/runs/audit/level1_v4_sysprompt_fixed/opd_target_ids.json",
+    "n_full_image_prompts": 1200,
+    "n_opd_target_prompts": 133,
+    "benchmarks": [
+      "ChartQA",
+      "HallusionBench",
+      "MathVerse",
+      "MathVision",
+      "MathVista",
+      "POPE_adversarial"
+    ],
+    "steps_evaluated": [
+      49,
+      99,
+      149,
+      199,
+      230
+    ]
+  },
+  "arms": {
+    "T1_2_on_full": {
+      "label": "T1-2  on-policy + FullTeacher",
+      "regime": "on_policy",
+      "teacher_image_mode": "full",
+      "source_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/t1_trajectory_20260522-105745",
+      "file_tag_prefix": "T1_2",
+      "full_image": {
+        "base": {
+          "acc": 0.43666666666666665,
+          "n": 1200
+        },
+        "step_49": {
+          "acc": 0.4266666666666667,
+          "n": 1200,
+          "delta_pp": -1.0
+        },
+        "step_99": {
+          "acc": 0.42833333333333334,
+          "n": 1200,
+          "delta_pp": -0.83
+        },
+        "step_149": {
+          "acc": 0.4558333333333333,
+          "n": 1200,
+          "delta_pp": 1.92
+        },
+        "step_199": {
+          "acc": 0.44083333333333335,
+          "n": 1200,
+          "delta_pp": 0.42
+        },
+        "step_230": {
+          "acc": 0.44416666666666665,
+          "n": 1200,
+          "delta_pp": 0.75
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": 2.75,
+          "d149_199_pp": -1.5,
+          "later_window_more_negative": true,
+          "verdict": "CLIFF"
+        }
+      },
+      "opd_target": {
+        "base": {
+          "acc": 0.13533834586466165,
+          "n": 133
+        },
+        "step_49": {
+          "acc": 0.2857142857142857,
+          "n": 133,
+          "delta_pp": 15.04
+        },
+        "step_99": {
+          "acc": 0.2631578947368421,
+          "n": 133,
+          "delta_pp": 12.78
+        },
+        "step_149": {
+          "acc": 0.3007518796992481,
+          "n": 133,
+          "delta_pp": 16.54
+        },
+        "step_199": {
+          "acc": 0.2781954887218045,
+          "n": 133,
+          "delta_pp": 14.29
+        },
+        "step_230": {
+          "acc": 0.2781954887218045,
+          "n": 133,
+          "delta_pp": 14.29
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": 3.76,
+          "d149_199_pp": -2.26,
+          "later_window_more_negative": true,
+          "verdict": "CLIFF"
+        }
+      },
+      "by_benchmark": {
+        "ChartQA": {
+          "all": {
+            "base": {
+              "acc": 0.0,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 27
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "HallusionBench": {
+          "all": {
+            "base": {
+              "acc": 0.615,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.57,
+              "n": 200,
+              "delta_pp": -4.5
+            },
+            "step_99": {
+              "acc": 0.585,
+              "n": 200,
+              "delta_pp": -3.0
+            },
+            "step_149": {
+              "acc": 0.62,
+              "n": 200,
+              "delta_pp": 0.5
+            },
+            "step_199": {
+              "acc": 0.61,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_230": {
+              "acc": 0.6,
+              "n": 200,
+              "delta_pp": -1.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 3.5,
+              "d149_199_pp": -1.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.4,
+              "n": 15
+            },
+            "step_49": {
+              "acc": 0.3333333333333333,
+              "n": 15,
+              "delta_pp": -6.67
+            },
+            "step_99": {
+              "acc": 0.6,
+              "n": 15,
+              "delta_pp": 20.0
+            },
+            "step_149": {
+              "acc": 0.6,
+              "n": 15,
+              "delta_pp": 20.0
+            },
+            "step_199": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_230": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": -13.33,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        },
+        "MathVerse": {
+          "all": {
+            "base": {
+              "acc": 0.31,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.36,
+              "n": 200,
+              "delta_pp": 5.0
+            },
+            "step_99": {
+              "acc": 0.33,
+              "n": 200,
+              "delta_pp": 2.0
+            },
+            "step_149": {
+              "acc": 0.365,
+              "n": 200,
+              "delta_pp": 5.5
+            },
+            "step_199": {
+              "acc": 0.3,
+              "n": 200,
+              "delta_pp": -1.0
+            },
+            "step_230": {
+              "acc": 0.34,
+              "n": 200,
+              "delta_pp": 3.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 3.5,
+              "d149_199_pp": -6.5,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.16,
+              "n": 25
+            },
+            "step_49": {
+              "acc": 0.44,
+              "n": 25,
+              "delta_pp": 28.0
+            },
+            "step_99": {
+              "acc": 0.36,
+              "n": 25,
+              "delta_pp": 20.0
+            },
+            "step_149": {
+              "acc": 0.48,
+              "n": 25,
+              "delta_pp": 32.0
+            },
+            "step_199": {
+              "acc": 0.4,
+              "n": 25,
+              "delta_pp": 24.0
+            },
+            "step_230": {
+              "acc": 0.44,
+              "n": 25,
+              "delta_pp": 28.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 12.0,
+              "d149_199_pp": -8.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        },
+        "MathVision": {
+          "all": {
+            "base": {
+              "acc": 0.195,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.195,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.145,
+              "n": 200,
+              "delta_pp": -5.0
+            },
+            "step_149": {
+              "acc": 0.2,
+              "n": 200,
+              "delta_pp": 0.5
+            },
+            "step_199": {
+              "acc": 0.21,
+              "n": 200,
+              "delta_pp": 1.5
+            },
+            "step_230": {
+              "acc": 0.185,
+              "n": 200,
+              "delta_pp": -1.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 5.5,
+              "d149_199_pp": 1.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.02857142857142857,
+              "n": 35
+            },
+            "step_49": {
+              "acc": 0.34285714285714286,
+              "n": 35,
+              "delta_pp": 31.43
+            },
+            "step_99": {
+              "acc": 0.14285714285714285,
+              "n": 35,
+              "delta_pp": 11.43
+            },
+            "step_149": {
+              "acc": 0.14285714285714285,
+              "n": 35,
+              "delta_pp": 11.43
+            },
+            "step_199": {
+              "acc": 0.17142857142857143,
+              "n": 35,
+              "delta_pp": 14.29
+            },
+            "step_230": {
+              "acc": 0.2,
+              "n": 35,
+              "delta_pp": 17.14
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 2.86,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVista": {
+          "all": {
+            "base": {
+              "acc": 0.625,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.59,
+              "n": 200,
+              "delta_pp": -3.5
+            },
+            "step_99": {
+              "acc": 0.64,
+              "n": 200,
+              "delta_pp": 1.5
+            },
+            "step_149": {
+              "acc": 0.655,
+              "n": 200,
+              "delta_pp": 3.0
+            },
+            "step_199": {
+              "acc": 0.64,
+              "n": 200,
+              "delta_pp": 1.5
+            },
+            "step_230": {
+              "acc": 0.655,
+              "n": 200,
+              "delta_pp": 3.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 1.5,
+              "d149_199_pp": -1.5,
+              "later_window_more_negative": true,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.25,
+              "n": 28
+            },
+            "step_49": {
+              "acc": 0.35714285714285715,
+              "n": 28,
+              "delta_pp": 10.71
+            },
+            "step_99": {
+              "acc": 0.39285714285714285,
+              "n": 28,
+              "delta_pp": 14.29
+            },
+            "step_149": {
+              "acc": 0.42857142857142855,
+              "n": 28,
+              "delta_pp": 17.86
+            },
+            "step_199": {
+              "acc": 0.42857142857142855,
+              "n": 28,
+              "delta_pp": 17.86
+            },
+            "step_230": {
+              "acc": 0.39285714285714285,
+              "n": 28,
+              "delta_pp": 14.29
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 3.57,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        },
+        "POPE_adversarial": {
+          "all": {
+            "base": {
+              "acc": 0.875,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.845,
+              "n": 200,
+              "delta_pp": -3.0
+            },
+            "step_99": {
+              "acc": 0.87,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_149": {
+              "acc": 0.895,
+              "n": 200,
+              "delta_pp": 2.0
+            },
+            "step_199": {
+              "acc": 0.885,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "step_230": {
+              "acc": 0.885,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 2.5,
+              "d149_199_pp": -1.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 3
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_149": {
+              "acc": 0.6666666666666666,
+              "n": 3,
+              "delta_pp": 66.67
+            },
+            "step_199": {
+              "acc": 0.6666666666666666,
+              "n": 3,
+              "delta_pp": 66.67
+            },
+            "step_230": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 33.33,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        }
+      }
+    },
+    "T1_3_on_blank": {
+      "label": "T1-3  on-policy + BlankTeacher",
+      "regime": "on_policy",
+      "teacher_image_mode": "blank",
+      "source_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/t1_trajectory_20260522-105745",
+      "file_tag_prefix": "T1_3",
+      "full_image": {
+        "base": {
+          "acc": 0.43666666666666665,
+          "n": 1200
+        },
+        "step_49": {
+          "acc": 0.4375,
+          "n": 1200,
+          "delta_pp": 0.08
+        },
+        "step_99": {
+          "acc": 0.43583333333333335,
+          "n": 1200,
+          "delta_pp": -0.08
+        },
+        "step_149": {
+          "acc": 0.3825,
+          "n": 1200,
+          "delta_pp": -5.42
+        },
+        "step_199": {
+          "acc": 0.3175,
+          "n": 1200,
+          "delta_pp": -11.92
+        },
+        "step_230": {
+          "acc": 0.305,
+          "n": 1200,
+          "delta_pp": -13.17
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": -5.33,
+          "d149_199_pp": -6.5,
+          "later_window_more_negative": true,
+          "verdict": "smooth"
+        }
+      },
+      "opd_target": {
+        "base": {
+          "acc": 0.13533834586466165,
+          "n": 133
+        },
+        "step_49": {
+          "acc": 0.2857142857142857,
+          "n": 133,
+          "delta_pp": 15.04
+        },
+        "step_99": {
+          "acc": 0.2706766917293233,
+          "n": 133,
+          "delta_pp": 13.53
+        },
+        "step_149": {
+          "acc": 0.19548872180451127,
+          "n": 133,
+          "delta_pp": 6.02
+        },
+        "step_199": {
+          "acc": 0.07518796992481203,
+          "n": 133,
+          "delta_pp": -6.02
+        },
+        "step_230": {
+          "acc": 0.09774436090225563,
+          "n": 133,
+          "delta_pp": -3.76
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": -7.52,
+          "d149_199_pp": -12.03,
+          "later_window_more_negative": true,
+          "verdict": "CLIFF"
+        }
+      },
+      "by_benchmark": {
+        "ChartQA": {
+          "all": {
+            "base": {
+              "acc": 0.0,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 27
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "HallusionBench": {
+          "all": {
+            "base": {
+              "acc": 0.615,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.59,
+              "n": 200,
+              "delta_pp": -2.5
+            },
+            "step_99": {
+              "acc": 0.6,
+              "n": 200,
+              "delta_pp": -1.5
+            },
+            "step_149": {
+              "acc": 0.575,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_199": {
+              "acc": 0.54,
+              "n": 200,
+              "delta_pp": -7.5
+            },
+            "step_230": {
+              "acc": 0.49,
+              "n": 200,
+              "delta_pp": -12.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -2.5,
+              "d149_199_pp": -3.5,
+              "later_window_more_negative": true,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.4,
+              "n": 15
+            },
+            "step_49": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_99": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_149": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_199": {
+              "acc": 0.13333333333333333,
+              "n": 15,
+              "delta_pp": -26.67
+            },
+            "step_230": {
+              "acc": 0.2,
+              "n": 15,
+              "delta_pp": -20.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": -33.33,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        },
+        "MathVerse": {
+          "all": {
+            "base": {
+              "acc": 0.31,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.29,
+              "n": 200,
+              "delta_pp": -2.0
+            },
+            "step_99": {
+              "acc": 0.32,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "step_149": {
+              "acc": 0.185,
+              "n": 200,
+              "delta_pp": -12.5
+            },
+            "step_199": {
+              "acc": 0.125,
+              "n": 200,
+              "delta_pp": -18.5
+            },
+            "step_230": {
+              "acc": 0.115,
+              "n": 200,
+              "delta_pp": -19.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -13.5,
+              "d149_199_pp": -6.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.16,
+              "n": 25
+            },
+            "step_49": {
+              "acc": 0.32,
+              "n": 25,
+              "delta_pp": 16.0
+            },
+            "step_99": {
+              "acc": 0.4,
+              "n": 25,
+              "delta_pp": 24.0
+            },
+            "step_149": {
+              "acc": 0.2,
+              "n": 25,
+              "delta_pp": 4.0
+            },
+            "step_199": {
+              "acc": 0.08,
+              "n": 25,
+              "delta_pp": -8.0
+            },
+            "step_230": {
+              "acc": 0.08,
+              "n": 25,
+              "delta_pp": -8.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -20.0,
+              "d149_199_pp": -12.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVision": {
+          "all": {
+            "base": {
+              "acc": 0.195,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.2,
+              "n": 200,
+              "delta_pp": 0.5
+            },
+            "step_99": {
+              "acc": 0.185,
+              "n": 200,
+              "delta_pp": -1.0
+            },
+            "step_149": {
+              "acc": 0.195,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.155,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_230": {
+              "acc": 0.16,
+              "n": 200,
+              "delta_pp": -3.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 1.0,
+              "d149_199_pp": -4.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.02857142857142857,
+              "n": 35
+            },
+            "step_49": {
+              "acc": 0.2,
+              "n": 35,
+              "delta_pp": 17.14
+            },
+            "step_99": {
+              "acc": 0.22857142857142856,
+              "n": 35,
+              "delta_pp": 20.0
+            },
+            "step_149": {
+              "acc": 0.14285714285714285,
+              "n": 35,
+              "delta_pp": 11.43
+            },
+            "step_199": {
+              "acc": 0.08571428571428572,
+              "n": 35,
+              "delta_pp": 5.71
+            },
+            "step_230": {
+              "acc": 0.14285714285714285,
+              "n": 35,
+              "delta_pp": 11.43
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -8.57,
+              "d149_199_pp": -5.71,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVista": {
+          "all": {
+            "base": {
+              "acc": 0.625,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.675,
+              "n": 200,
+              "delta_pp": 5.0
+            },
+            "step_99": {
+              "acc": 0.64,
+              "n": 200,
+              "delta_pp": 1.5
+            },
+            "step_149": {
+              "acc": 0.515,
+              "n": 200,
+              "delta_pp": -11.0
+            },
+            "step_199": {
+              "acc": 0.365,
+              "n": 200,
+              "delta_pp": -26.0
+            },
+            "step_230": {
+              "acc": 0.315,
+              "n": 200,
+              "delta_pp": -31.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -12.5,
+              "d149_199_pp": -15.0,
+              "later_window_more_negative": true,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.25,
+              "n": 28
+            },
+            "step_49": {
+              "acc": 0.5,
+              "n": 28,
+              "delta_pp": 25.0
+            },
+            "step_99": {
+              "acc": 0.32142857142857145,
+              "n": 28,
+              "delta_pp": 7.14
+            },
+            "step_149": {
+              "acc": 0.32142857142857145,
+              "n": 28,
+              "delta_pp": 7.14
+            },
+            "step_199": {
+              "acc": 0.10714285714285714,
+              "n": 28,
+              "delta_pp": -14.29
+            },
+            "step_230": {
+              "acc": 0.03571428571428571,
+              "n": 28,
+              "delta_pp": -21.43
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": -21.43,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          }
+        },
+        "POPE_adversarial": {
+          "all": {
+            "base": {
+              "acc": 0.875,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.87,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_99": {
+              "acc": 0.87,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_149": {
+              "acc": 0.825,
+              "n": 200,
+              "delta_pp": -5.0
+            },
+            "step_199": {
+              "acc": 0.72,
+              "n": 200,
+              "delta_pp": -15.5
+            },
+            "step_230": {
+              "acc": 0.75,
+              "n": 200,
+              "delta_pp": -12.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -4.5,
+              "d149_199_pp": -10.5,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 3
+            },
+            "step_49": {
+              "acc": 0.6666666666666666,
+              "n": 3,
+              "delta_pp": 66.67
+            },
+            "step_99": {
+              "acc": 0.6666666666666666,
+              "n": 3,
+              "delta_pp": 66.67
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.6666666666666666,
+              "n": 3,
+              "delta_pp": 66.67
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -66.67,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        }
+      }
+    },
+    "T2A_full_off_full": {
+      "label": "T2A   off-policy + FullTeacher",
+      "regime": "off_policy",
+      "teacher_image_mode": "full",
+      "source_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/tier2a_trajectory_20260524-132227",
+      "file_tag_prefix": "T1_2",
+      "full_image": {
+        "base": {
+          "acc": 0.43666666666666665,
+          "n": 1200
+        },
+        "step_49": {
+          "acc": 0.4375,
+          "n": 1200,
+          "delta_pp": 0.08
+        },
+        "step_99": {
+          "acc": 0.42916666666666664,
+          "n": 1200,
+          "delta_pp": -0.75
+        },
+        "step_149": {
+          "acc": 0.4375,
+          "n": 1200,
+          "delta_pp": 0.08
+        },
+        "step_199": {
+          "acc": 0.43583333333333335,
+          "n": 1200,
+          "delta_pp": -0.08
+        },
+        "step_230": {
+          "acc": 0.44416666666666665,
+          "n": 1200,
+          "delta_pp": 0.75
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": 0.83,
+          "d149_199_pp": -0.17,
+          "later_window_more_negative": true,
+          "verdict": "smooth"
+        }
+      },
+      "opd_target": {
+        "base": {
+          "acc": 0.13533834586466165,
+          "n": 133
+        },
+        "step_49": {
+          "acc": 0.2556390977443609,
+          "n": 133,
+          "delta_pp": 12.03
+        },
+        "step_99": {
+          "acc": 0.2631578947368421,
+          "n": 133,
+          "delta_pp": 12.78
+        },
+        "step_149": {
+          "acc": 0.2631578947368421,
+          "n": 133,
+          "delta_pp": 12.78
+        },
+        "step_199": {
+          "acc": 0.2932330827067669,
+          "n": 133,
+          "delta_pp": 15.79
+        },
+        "step_230": {
+          "acc": 0.3007518796992481,
+          "n": 133,
+          "delta_pp": 16.54
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": 0.0,
+          "d149_199_pp": 3.01,
+          "later_window_more_negative": false,
+          "verdict": "smooth"
+        }
+      },
+      "by_benchmark": {
+        "ChartQA": {
+          "all": {
+            "base": {
+              "acc": 0.0,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 27
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "HallusionBench": {
+          "all": {
+            "base": {
+              "acc": 0.615,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.6,
+              "n": 200,
+              "delta_pp": -1.5
+            },
+            "step_99": {
+              "acc": 0.56,
+              "n": 200,
+              "delta_pp": -5.5
+            },
+            "step_149": {
+              "acc": 0.625,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "step_199": {
+              "acc": 0.63,
+              "n": 200,
+              "delta_pp": 1.5
+            },
+            "step_230": {
+              "acc": 0.65,
+              "n": 200,
+              "delta_pp": 3.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 6.5,
+              "d149_199_pp": 0.5,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.4,
+              "n": 15
+            },
+            "step_49": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_99": {
+              "acc": 0.4,
+              "n": 15,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.4666666666666667,
+              "n": 15,
+              "delta_pp": 6.67
+            },
+            "step_199": {
+              "acc": 0.5333333333333333,
+              "n": 15,
+              "delta_pp": 13.33
+            },
+            "step_230": {
+              "acc": 0.5333333333333333,
+              "n": 15,
+              "delta_pp": 13.33
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 6.67,
+              "d149_199_pp": 6.67,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVerse": {
+          "all": {
+            "base": {
+              "acc": 0.31,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.34,
+              "n": 200,
+              "delta_pp": 3.0
+            },
+            "step_99": {
+              "acc": 0.315,
+              "n": 200,
+              "delta_pp": 0.5
+            },
+            "step_149": {
+              "acc": 0.36,
+              "n": 200,
+              "delta_pp": 5.0
+            },
+            "step_199": {
+              "acc": 0.33,
+              "n": 200,
+              "delta_pp": 2.0
+            },
+            "step_230": {
+              "acc": 0.34,
+              "n": 200,
+              "delta_pp": 3.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 4.5,
+              "d149_199_pp": -3.0,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.16,
+              "n": 25
+            },
+            "step_49": {
+              "acc": 0.52,
+              "n": 25,
+              "delta_pp": 36.0
+            },
+            "step_99": {
+              "acc": 0.44,
+              "n": 25,
+              "delta_pp": 28.0
+            },
+            "step_149": {
+              "acc": 0.44,
+              "n": 25,
+              "delta_pp": 28.0
+            },
+            "step_199": {
+              "acc": 0.48,
+              "n": 25,
+              "delta_pp": 32.0
+            },
+            "step_230": {
+              "acc": 0.6,
+              "n": 25,
+              "delta_pp": 44.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 4.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVision": {
+          "all": {
+            "base": {
+              "acc": 0.195,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.19,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_99": {
+              "acc": 0.18,
+              "n": 200,
+              "delta_pp": -1.5
+            },
+            "step_149": {
+              "acc": 0.155,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_199": {
+              "acc": 0.185,
+              "n": 200,
+              "delta_pp": -1.0
+            },
+            "step_230": {
+              "acc": 0.16,
+              "n": 200,
+              "delta_pp": -3.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -2.5,
+              "d149_199_pp": 3.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.02857142857142857,
+              "n": 35
+            },
+            "step_49": {
+              "acc": 0.08571428571428572,
+              "n": 35,
+              "delta_pp": 5.71
+            },
+            "step_99": {
+              "acc": 0.17142857142857143,
+              "n": 35,
+              "delta_pp": 14.29
+            },
+            "step_149": {
+              "acc": 0.08571428571428572,
+              "n": 35,
+              "delta_pp": 5.71
+            },
+            "step_199": {
+              "acc": 0.05714285714285714,
+              "n": 35,
+              "delta_pp": 2.86
+            },
+            "step_230": {
+              "acc": 0.05714285714285714,
+              "n": 35,
+              "delta_pp": 2.86
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -8.57,
+              "d149_199_pp": -2.86,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVista": {
+          "all": {
+            "base": {
+              "acc": 0.625,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.62,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_99": {
+              "acc": 0.65,
+              "n": 200,
+              "delta_pp": 2.5
+            },
+            "step_149": {
+              "acc": 0.63,
+              "n": 200,
+              "delta_pp": 0.5
+            },
+            "step_199": {
+              "acc": 0.635,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "step_230": {
+              "acc": 0.645,
+              "n": 200,
+              "delta_pp": 2.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -2.0,
+              "d149_199_pp": 0.5,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.25,
+              "n": 28
+            },
+            "step_49": {
+              "acc": 0.39285714285714285,
+              "n": 28,
+              "delta_pp": 14.29
+            },
+            "step_99": {
+              "acc": 0.39285714285714285,
+              "n": 28,
+              "delta_pp": 14.29
+            },
+            "step_149": {
+              "acc": 0.4642857142857143,
+              "n": 28,
+              "delta_pp": 21.43
+            },
+            "step_199": {
+              "acc": 0.5714285714285714,
+              "n": 28,
+              "delta_pp": 32.14
+            },
+            "step_230": {
+              "acc": 0.5,
+              "n": 28,
+              "delta_pp": 25.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 7.14,
+              "d149_199_pp": 10.71,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "POPE_adversarial": {
+          "all": {
+            "base": {
+              "acc": 0.875,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.875,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.87,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "step_149": {
+              "acc": 0.855,
+              "n": 200,
+              "delta_pp": -2.0
+            },
+            "step_199": {
+              "acc": 0.835,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_230": {
+              "acc": 0.87,
+              "n": 200,
+              "delta_pp": -0.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -1.5,
+              "d149_199_pp": -2.0,
+              "later_window_more_negative": true,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 3
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_149": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_199": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_230": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        }
+      }
+    },
+    "T2A_blank_off_blank": {
+      "label": "T2A   off-policy + BlankTeacher",
+      "regime": "off_policy",
+      "teacher_image_mode": "blank",
+      "source_trajectory_dir": "/Users/houshihao/project/code/mllmopd/runs/audit/tier2a_trajectory_20260524-132227",
+      "file_tag_prefix": "T1_3",
+      "full_image": {
+        "base": {
+          "acc": 0.43666666666666665,
+          "n": 1200
+        },
+        "step_49": {
+          "acc": 0.4058333333333333,
+          "n": 1200,
+          "delta_pp": -3.08
+        },
+        "step_99": {
+          "acc": 0.37416666666666665,
+          "n": 1200,
+          "delta_pp": -6.25
+        },
+        "step_149": {
+          "acc": 0.3233333333333333,
+          "n": 1200,
+          "delta_pp": -11.33
+        },
+        "step_199": {
+          "acc": 0.3,
+          "n": 1200,
+          "delta_pp": -13.67
+        },
+        "step_230": {
+          "acc": 0.28833333333333333,
+          "n": 1200,
+          "delta_pp": -14.83
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": -5.08,
+          "d149_199_pp": -2.33,
+          "later_window_more_negative": false,
+          "verdict": "smooth"
+        }
+      },
+      "opd_target": {
+        "base": {
+          "acc": 0.13533834586466165,
+          "n": 133
+        },
+        "step_49": {
+          "acc": 0.2556390977443609,
+          "n": 133,
+          "delta_pp": 12.03
+        },
+        "step_99": {
+          "acc": 0.19548872180451127,
+          "n": 133,
+          "delta_pp": 6.02
+        },
+        "step_149": {
+          "acc": 0.09774436090225563,
+          "n": 133,
+          "delta_pp": -3.76
+        },
+        "step_199": {
+          "acc": 0.13533834586466165,
+          "n": 133,
+          "delta_pp": 0.0
+        },
+        "step_230": {
+          "acc": 0.11278195488721804,
+          "n": 133,
+          "delta_pp": -2.26
+        },
+        "cliff_diagnostic": {
+          "d99_149_pp": -9.77,
+          "d149_199_pp": 3.76,
+          "later_window_more_negative": false,
+          "verdict": "smooth"
+        }
+      },
+      "by_benchmark": {
+        "ChartQA": {
+          "all": {
+            "base": {
+              "acc": 0.0,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 200,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 27
+            },
+            "step_49": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_99": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 27,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": 0.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "HallusionBench": {
+          "all": {
+            "base": {
+              "acc": 0.615,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.575,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_99": {
+              "acc": 0.575,
+              "n": 200,
+              "delta_pp": -4.0
+            },
+            "step_149": {
+              "acc": 0.505,
+              "n": 200,
+              "delta_pp": -11.0
+            },
+            "step_199": {
+              "acc": 0.525,
+              "n": 200,
+              "delta_pp": -9.0
+            },
+            "step_230": {
+              "acc": 0.515,
+              "n": 200,
+              "delta_pp": -10.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -7.0,
+              "d149_199_pp": 2.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.4,
+              "n": 15
+            },
+            "step_49": {
+              "acc": 0.3333333333333333,
+              "n": 15,
+              "delta_pp": -6.67
+            },
+            "step_99": {
+              "acc": 0.3333333333333333,
+              "n": 15,
+              "delta_pp": -6.67
+            },
+            "step_149": {
+              "acc": 0.06666666666666667,
+              "n": 15,
+              "delta_pp": -33.33
+            },
+            "step_199": {
+              "acc": 0.2,
+              "n": 15,
+              "delta_pp": -20.0
+            },
+            "step_230": {
+              "acc": 0.3333333333333333,
+              "n": 15,
+              "delta_pp": -6.67
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -26.67,
+              "d149_199_pp": 13.33,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVerse": {
+          "all": {
+            "base": {
+              "acc": 0.31,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.255,
+              "n": 200,
+              "delta_pp": -5.5
+            },
+            "step_99": {
+              "acc": 0.235,
+              "n": 200,
+              "delta_pp": -7.5
+            },
+            "step_149": {
+              "acc": 0.17,
+              "n": 200,
+              "delta_pp": -14.0
+            },
+            "step_199": {
+              "acc": 0.13,
+              "n": 200,
+              "delta_pp": -18.0
+            },
+            "step_230": {
+              "acc": 0.19,
+              "n": 200,
+              "delta_pp": -12.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -6.5,
+              "d149_199_pp": -4.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.16,
+              "n": 25
+            },
+            "step_49": {
+              "acc": 0.32,
+              "n": 25,
+              "delta_pp": 16.0
+            },
+            "step_99": {
+              "acc": 0.24,
+              "n": 25,
+              "delta_pp": 8.0
+            },
+            "step_149": {
+              "acc": 0.16,
+              "n": 25,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.16,
+              "n": 25,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.12,
+              "n": 25,
+              "delta_pp": -4.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -8.0,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVision": {
+          "all": {
+            "base": {
+              "acc": 0.195,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.205,
+              "n": 200,
+              "delta_pp": 1.0
+            },
+            "step_99": {
+              "acc": 0.165,
+              "n": 200,
+              "delta_pp": -3.0
+            },
+            "step_149": {
+              "acc": 0.11,
+              "n": 200,
+              "delta_pp": -8.5
+            },
+            "step_199": {
+              "acc": 0.15,
+              "n": 200,
+              "delta_pp": -4.5
+            },
+            "step_230": {
+              "acc": 0.12,
+              "n": 200,
+              "delta_pp": -7.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -5.5,
+              "d149_199_pp": 4.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.02857142857142857,
+              "n": 35
+            },
+            "step_49": {
+              "acc": 0.17142857142857143,
+              "n": 35,
+              "delta_pp": 14.29
+            },
+            "step_99": {
+              "acc": 0.2,
+              "n": 35,
+              "delta_pp": 17.14
+            },
+            "step_149": {
+              "acc": 0.05714285714285714,
+              "n": 35,
+              "delta_pp": 2.86
+            },
+            "step_199": {
+              "acc": 0.17142857142857143,
+              "n": 35,
+              "delta_pp": 14.29
+            },
+            "step_230": {
+              "acc": 0.14285714285714285,
+              "n": 35,
+              "delta_pp": 11.43
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -14.29,
+              "d149_199_pp": 11.43,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "MathVista": {
+          "all": {
+            "base": {
+              "acc": 0.625,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.555,
+              "n": 200,
+              "delta_pp": -7.0
+            },
+            "step_99": {
+              "acc": 0.425,
+              "n": 200,
+              "delta_pp": -20.0
+            },
+            "step_149": {
+              "acc": 0.365,
+              "n": 200,
+              "delta_pp": -26.0
+            },
+            "step_199": {
+              "acc": 0.36,
+              "n": 200,
+              "delta_pp": -26.5
+            },
+            "step_230": {
+              "acc": 0.285,
+              "n": 200,
+              "delta_pp": -34.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -6.0,
+              "d149_199_pp": -0.5,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.25,
+              "n": 28
+            },
+            "step_49": {
+              "acc": 0.5,
+              "n": 28,
+              "delta_pp": 25.0
+            },
+            "step_99": {
+              "acc": 0.25,
+              "n": 28,
+              "delta_pp": 0.0
+            },
+            "step_149": {
+              "acc": 0.21428571428571427,
+              "n": 28,
+              "delta_pp": -3.57
+            },
+            "step_199": {
+              "acc": 0.17857142857142858,
+              "n": 28,
+              "delta_pp": -7.14
+            },
+            "step_230": {
+              "acc": 0.07142857142857142,
+              "n": 28,
+              "delta_pp": -17.86
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -3.57,
+              "d149_199_pp": -3.57,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        },
+        "POPE_adversarial": {
+          "all": {
+            "base": {
+              "acc": 0.875,
+              "n": 200
+            },
+            "step_49": {
+              "acc": 0.845,
+              "n": 200,
+              "delta_pp": -3.0
+            },
+            "step_99": {
+              "acc": 0.845,
+              "n": 200,
+              "delta_pp": -3.0
+            },
+            "step_149": {
+              "acc": 0.79,
+              "n": 200,
+              "delta_pp": -8.5
+            },
+            "step_199": {
+              "acc": 0.635,
+              "n": 200,
+              "delta_pp": -24.0
+            },
+            "step_230": {
+              "acc": 0.62,
+              "n": 200,
+              "delta_pp": -25.5
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -5.5,
+              "d149_199_pp": -15.5,
+              "later_window_more_negative": true,
+              "verdict": "CLIFF"
+            }
+          },
+          "opd_target_intersect": {
+            "base": {
+              "acc": 0.0,
+              "n": 3
+            },
+            "step_49": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_99": {
+              "acc": 0.3333333333333333,
+              "n": 3,
+              "delta_pp": 33.33
+            },
+            "step_149": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_199": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "step_230": {
+              "acc": 0.0,
+              "n": 3,
+              "delta_pp": 0.0
+            },
+            "cliff_diagnostic": {
+              "d99_149_pp": -33.33,
+              "d149_199_pp": 0.0,
+              "later_window_more_negative": false,
+              "verdict": "smooth"
+            }
+          }
+        }
+      }
+    }
+  },
+  "token_budget_confounder": {
+    "note": "Stats from scripts/data/gen_teacher_completions.py output, analyzed during 2026-05-23 smoke. The off-policy training arms consume teacher tokens directly (no student rollout), so these directly determine per-step gradient signal. The on-policy arms (T1-2/T1-3) instead use student rollouts whose lengths depend on the student model, which evolves over training — not directly comparable. Still useful to flag the on-arm-type imbalance between T2A-full and T2A-blank.",
+    "blank_dataset": {
+      "median_completion_tokens": 582,
+      "mean_completion_tokens": 752,
+      "length_truncated_pct": 1.3,
+      "n_completions": 16000
+    },
+    "full_dataset": {
+      "median_completion_tokens": 885,
+      "mean_completion_tokens": 964,
+      "length_truncated_pct": 1.6,
+      "n_completions": 16000
+    },
+    "training_steps_each_arm": 230,
+    "samples_per_step": 64,
+    "estimated_total_response_tokens": {
+      "T2A_blank_off_blank": 11069440,
+      "T2A_full_off_full": 14190080
+    },
+    "T2A_blank_to_T2A_full_token_ratio": 0.78,
+    "interpretation": "T2A-blank sees ~78% as many response tokens per step as T2A-full because BlankTeacher's 'I can't see this image' completions are shorter than FullTeacher's multi-step CoTs. This is a real confounder for cross-arm T2A comparison: some of T2A-blank's larger degradation could be 'less data' rather than 'biased data'. Mitigations to discuss in brief: (a) the 78% gap is too small to explain the ~17pp differential between T2A-full (+0.8pp) and T2A-blank (-14.8pp) at step 230; (b) the cliff-shape difference (smooth vs sharp) between T2A-blank and T1-3 is qualitative and unaffected by token count; (c) a future control should match teacher completions to a target token budget."
+  },
+  "summary": {
+    "headline_findings": [
+      "4-arm × 5-step trajectory complete on level1_subset_v0 (n=1200) and opd_target slice (n=133).",
+      "T2A-full is BENIGN on both slices (matches T1-2 pattern).",
+      "T2A-blank DEGRADES on both slices. On full_image, T2A-blank ends WORSE than T1-3 (-14.8pp vs -13.2pp at step 230).",
+      "On opd_target slice, cliff IS on-policy specific: T1-3 step 99→149→199 ACCELERATES (-7.5pp then -12.0pp); T2A-blank DECELERATES and recovers (-9.8pp then +3.8pp).",
+      "PureV reverse-engineer: T2A-blank ~-16.5pp on PureV vs T1-3 ~-14.4pp. Off-policy KD damages general capability MORE; on-policy targets opd_target."
+    ],
+    "falsification_verdict": "REFINED. Brief v2 sub-claim 'on-policy prefix self-conditioning produces the SHARP CLIFF on vision-critical opd_target slice' is VALIDATED. Brief v2 sub-claim 'off-policy KD does not fail' is FALSIFIED. Two separable failure modes: (i) general-capability degradation from dense KL to misspecified teacher (universal, worse under off-policy); (ii) sharp phase-transition cliff on vision-critical slice (on-policy specific)."
+  }
+}
