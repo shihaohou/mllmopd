@@ -162,35 +162,64 @@ def _with_abs_rms_preserve_weights(
     return out
 
 
-def _with_abs_max_clip_weights(row: dict, max_cap: float = 2.0) -> dict:
-    """Abs weights then clip max to max_cap (no re-renormalize — Σw drops slightly).
+def _with_abs_rms_preserve_wide_weights(row: dict) -> dict:
+    """abs_rms_preserve with wider clip [0.1, 10.0].
 
-    Trade-off: clipping then re-renormalizing pushes some weights back
-    above the cap (iterative fixed-point needed for strict). Single-pass
-    clip without re-renormalize loses ~5-15% of total mass on sequences
-    where many weights hit the cap, but strictly bounds rho_l2 ≤ max_cap.
-    The mass loss is a uniform-ish per-sequence rescaling that the
-    optimizer absorbs as a slightly lower effective LR per sequence —
-    fine for testing the "does bounded max weight stabilize energy"
-    question.
+    Counterfactual run showed that abs gives per-sequence rho_l2 up to
+    ~12, but the default clip [0.5, 2.0] only allowed the scalar to
+    shrink weights by 2× → rho_l2 only halved to 6. With clip widened
+    to [0.1, 10.0], the scalar can fully compensate (1/sqrt(12) ≈ 0.29
+    is within range).
+    """
+    return _with_abs_rms_preserve_weights(row, clip=(0.1, 10.0))
+
+
+def _with_abs_max_clip_weights(row: dict, max_cap: float = 2.0,
+                                renorm: bool = False) -> dict:
+    """Abs weights then clip max to max_cap.
+
+    When renorm=False (default): single-pass clip without re-normalize.
+    Σw < N for sequences where any weight hit the cap. Strictly bounds
+    rho_l2 ≤ max_cap. Lower mean_w because total mass dropped.
+
+    When renorm=True: clip + mass-preserve renormalize. Pushes some
+    weights back above the cap (since renorm scales ALL weights up to
+    restore Σw=N). Keeps mean_w near 1.0 but doesn't strictly bound
+    max weight. In practice max weight stays close to the cap with
+    small overflow — good enough for stability if cap chosen
+    conservatively.
     """
     row_abs = _with_abs_weights(row)
     w = row_abs["vd_weights"]
     if not w:
         return row_abs
     w_clip = [min(x, max_cap) for x in w]
+    if renorm:
+        R = len(w_clip)
+        s = sum(w_clip)
+        if s > 1e-12:
+            w_clip = [x * R / s for x in w_clip]
     out = dict(row_abs)
     out["vd_weights"] = w_clip
     return out
 
 
+def _with_abs_max_clip_renorm_weights(row: dict) -> dict:
+    """abs_max_clip with post-clip mass-preserve renormalization."""
+    return _with_abs_max_clip_weights(row, max_cap=2.0, renorm=True)
+
+
 # Ordered list of (name, transform_fn). Transform takes (row_with_old_lp)
 # and returns a row with vd_weights replaced. signed is the no-op baseline.
+# Order matters for the recommended-variant selection: first all-pass
+# wins, so tighter / more principled variants are listed first.
 VARIANTS: list[tuple[str, callable]] = [
     ("signed", lambda row: row),
     ("abs", _with_abs_weights),
     ("abs_rms_preserve", _with_abs_rms_preserve_weights),
+    ("abs_rms_preserve_wide", _with_abs_rms_preserve_wide_weights),
     ("abs_max_clip", _with_abs_max_clip_weights),
+    ("abs_max_clip_renorm", _with_abs_max_clip_renorm_weights),
 ]
 
 

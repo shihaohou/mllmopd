@@ -212,8 +212,8 @@ def test_abs_max_clip_bounds_max_weight():
     print(f"  abs_max_clip: rho_l2 abs={rho_abs:.3f} → clip={rho_clip:.3f}  OK")
 
 
-def test_scan_variants_has_all_4_paths():
-    """scan_variants returns variants dict with signed/abs/abs_rms_preserve/abs_max_clip."""
+def test_scan_variants_has_all_paths():
+    """scan_variants returns all 6 variant paths."""
     lp_full = [1.0, 5.0, 2.0, 3.5]
     lp_blank = [5.0, 1.0, 5.0, 3.0]
     old_lp = [3.0, 2.0, 3.0, 3.0]
@@ -221,12 +221,14 @@ def test_scan_variants_has_all_4_paths():
         path = Path(tmp) / "step_000000.jsonl.gz"
         _write_step([_make_signed_row(lp_full, lp_blank, old_lp)], path)
         out = scan_variants(Path(tmp), steps=None, limit_rows=0)
-    assert set(out["variants"].keys()) == {
-        "signed", "abs", "abs_rms_preserve", "abs_max_clip"
-    }, list(out["variants"].keys())
+    expected = {
+        "signed", "abs", "abs_rms_preserve", "abs_rms_preserve_wide",
+        "abs_max_clip", "abs_max_clip_renorm",
+    }
+    assert set(out["variants"].keys()) == expected, list(out["variants"].keys())
     assert "verdicts" in out
     assert all(v in out["verdicts"] for v in out["variants"]), out["verdicts"]
-    print(f"  scan_variants: 4 variants present, verdicts populated  OK")
+    print(f"  scan_variants: {len(expected)} variants present, verdicts populated  OK")
 
 
 def main():
@@ -236,7 +238,7 @@ def main():
         test_diff_block_populated,
         test_abs_rms_preserve_clamps_rho_l2_toward_1,
         test_abs_max_clip_bounds_max_weight,
-        test_scan_variants_has_all_4_paths,
+        test_scan_variants_has_all_paths,
     ]
     print(f"Running {len(tests)} smoke tests for t2_1_abs_counterfactual:")
     failed = []
