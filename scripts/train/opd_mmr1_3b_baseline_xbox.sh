@@ -292,13 +292,20 @@ echo "    addrs: ${ROLLOUT_ENGINE_ADDRS}"
 if [ -z "${NCCL_SOCKET_IFNAME:-}" ]; then
   # Use the first addr to figure out the NIC reaching Box 1.
   _BOX1_HOST=$(echo "${ROLLOUT_ENGINE_ADDRS}" | awk '{print $1}' | cut -d: -f1)
-  _AUTO_IFNAME=$(ip route get "${_BOX1_HOST}" 2>/dev/null \
-    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  # The train container has no iproute2 on some H800 box images
+  # ([[h800-network-gotchas]]). Without `|| true` here, `ip route get`
+  # failing inside command substitution + `set -euo pipefail` makes
+  # the assignment exit the whole script silently (the WARNING branch
+  # below never runs). The `|| true` lets the fallback fire.
+  _AUTO_IFNAME=$( { ip route get "${_BOX1_HOST}" 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; } || true )
   if [ -n "${_AUTO_IFNAME}" ]; then
     export NCCL_SOCKET_IFNAME="${_AUTO_IFNAME}"
     echo ">>> NCCL_SOCKET_IFNAME auto-resolved: ${NCCL_SOCKET_IFNAME} (reaches ${_BOX1_HOST})"
   else
-    echo ">>> WARNING: could not auto-resolve NCCL_SOCKET_IFNAME; NCCL may pick wrong NIC"
+    echo ">>> WARNING: could not auto-resolve NCCL_SOCKET_IFNAME (ip command missing or no route);"
+    echo "    NCCL will pick a NIC on its own. If cross-box NCCL hangs after rendezvous, set"
+    echo "    NCCL_SOCKET_IFNAME explicitly (one of: $(ls /sys/class/net/ 2>/dev/null | grep -v '^lo$' | tr '\n' ' '))"
   fi
 else
   echo ">>> NCCL_SOCKET_IFNAME (explicit): ${NCCL_SOCKET_IFNAME}"
