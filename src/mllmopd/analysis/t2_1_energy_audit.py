@@ -85,6 +85,30 @@ VD_NORM_BINS: list[tuple[float, float, str]] = [
     (0.80, 1.00, "vd_norm_p80_p100"),
 ]
 
+# 4-quadrant partition of (sign(vd), sign(adv)) per GPT round-4. Tokens
+# with vd==0 or adv==0 are assigned by sign(...) >= 0 convention to keep
+# the table exhaustive.
+QUADRANTS: list[tuple[str, str]] = [
+    # (key, human-readable description)
+    ("vis_support_agree",
+     "vd>=0 ∧ adv>=0: image supports current token AND teacher reinforces"),
+    ("vis_support_teacher_pushes_away",
+     "vd>=0 ∧ adv<0: image supports current token BUT teacher pushes student away"),
+    ("vis_reject_teacher_pushes_toward",
+     "vd<0 ∧ adv>=0: image rejects current token but teacher pushes student toward it"),
+    ("vis_reject_correction",
+     "vd<0 ∧ adv<0: image rejects current token AND teacher correctly pushes student away "
+     "(the KEY OPD signal; signed proxy puts these in suppress branch)"),
+]
+
+
+def _quadrant_index(vd: float, adv: float) -> int:
+    """Return 0..3 matching QUADRANTS order."""
+    if vd >= 0.0:
+        return 0 if adv >= 0.0 else 1
+    else:
+        return 2 if adv >= 0.0 else 3
+
 
 @dataclass
 class Accumulator:
@@ -115,6 +139,13 @@ class Accumulator:
     # |adv| per VD-norm bin: (sum, n) per bin
     bin_sum_abs_adv: list[float] = field(default_factory=lambda: [0.0] * len(VD_NORM_BINS))
     bin_n: list[int] = field(default_factory=lambda: [0] * len(VD_NORM_BINS))
+
+    # 4-quadrant per (sign(vd), sign(adv)) (GPT round-4 ask). Index matches QUADRANTS.
+    quad_n: list[int] = field(default_factory=lambda: [0] * 4)
+    quad_sum_abs_adv: list[float] = field(default_factory=lambda: [0.0] * 4)
+    quad_sum_w: list[float] = field(default_factory=lambda: [0.0] * 4)
+    quad_n_w_below_1: list[int] = field(default_factory=lambda: [0] * 4)
+    quad_sum_abs_vd: list[float] = field(default_factory=lambda: [0.0] * 4)
 
     # Per-sample distribution of rho_l2 / corr / frac_supp (so we can
     # report mean/median/p5/p95 in addition to pooled).
@@ -273,6 +304,21 @@ def _process_sample(
                 pooled.bin_n[i] += 1
                 break
 
+        # 4-quadrant by (sign(vd), sign(adv)).
+        qi = _quadrant_index(vt, a)
+        acc.quad_n[qi] += 1
+        acc.quad_sum_abs_adv[qi] += aa
+        acc.quad_sum_w[qi] += wt
+        if wt < 1.0:
+            acc.quad_n_w_below_1[qi] += 1
+        acc.quad_sum_abs_vd[qi] += abs(vt)
+        pooled.quad_n[qi] += 1
+        pooled.quad_sum_abs_adv[qi] += aa
+        pooled.quad_sum_w[qi] += wt
+        if wt < 1.0:
+            pooled.quad_n_w_below_1[qi] += 1
+        pooled.quad_sum_abs_vd[qi] += abs(vt)
+
     if s_adv2 < _EPS:
         # All-zero advantage — uninformative, skip.
         return
@@ -356,6 +402,45 @@ def _summarize(acc: Accumulator) -> dict:
         acc.sum_neg_vd_neg_adv / acc.sum_abs_adv
         if acc.sum_abs_adv > _EPS else float("nan")
     )
+    # GPT round-4: report the conditional ratio explicitly. This is
+    # "what fraction of visual-rejection correction mass is being
+    # routed into the suppress branch (w<1)" — sharper framing than
+    # the unconditional frac_supp.
+    conditional_supp_visual_rejection = (
+        acc.sum_supp_neg_vd_neg_adv / acc.sum_neg_vd_neg_adv
+        if acc.sum_neg_vd_neg_adv > _EPS else float("nan")
+    )
+
+    quadrants = {}
+    total_n = sum(acc.quad_n)
+    total_abs_adv = sum(acc.quad_sum_abs_adv)
+    for qi, (key, desc) in enumerate(QUADRANTS):
+        n = acc.quad_n[qi]
+        if n > 0:
+            quadrants[key] = {
+                "description": desc,
+                "n_tokens": n,
+                "frac_tokens": n / total_n if total_n > 0 else 0.0,
+                "frac_abs_adv_mass": (
+                    acc.quad_sum_abs_adv[qi] / total_abs_adv
+                    if total_abs_adv > _EPS else 0.0
+                ),
+                "mean_weight": acc.quad_sum_w[qi] / n,
+                "frac_w_below_1": acc.quad_n_w_below_1[qi] / n,
+                "mean_abs_vd": acc.quad_sum_abs_vd[qi] / n,
+                "mean_abs_adv": acc.quad_sum_abs_adv[qi] / n,
+            }
+        else:
+            quadrants[key] = {
+                "description": desc,
+                "n_tokens": 0,
+                "frac_tokens": 0.0,
+                "frac_abs_adv_mass": 0.0,
+                "mean_weight": float("nan"),
+                "frac_w_below_1": float("nan"),
+                "mean_abs_vd": float("nan"),
+                "mean_abs_adv": float("nan"),
+            }
 
     vd_bin_means = {}
     for i, (lo, hi, name) in enumerate(VD_NORM_BINS):
@@ -385,24 +470,31 @@ def _summarize(acc: Accumulator) -> dict:
         "corr_w_abs_adv_pooled": corr_pooled,
         "frac_supp_neg_vd_neg_adv_mass": frac_supp,
         "frac_neg_vd_neg_adv_mass_total": frac_neg_vd_neg_adv_total,
+        "conditional_supp_visual_rejection": conditional_supp_visual_rejection,
 
         "rho_l2_per_sample": _dist_summary(acc.per_sample_rho_l2),
         "corr_w_abs_adv_per_sample": _dist_summary(acc.per_sample_corr),
         "frac_supp_per_sample": _dist_summary(acc.per_sample_frac_supp),
 
         "abs_adv_by_vd_norm_bin": vd_bin_means,
+        "quadrants": quadrants,
     }
 
 
-def _load_sidecar_for_step(diag_dir: Path, step: int) -> dict[int, list[float]]:
+def _load_sidecar_for_step(diag_dir: Path, step: int) -> tuple[dict[int, list[float]], dict]:
     """Load (sample_index → old_log_probs) for one step by merging across dp ranks.
 
     Reads all step_NNNNNN.adv_dp*.jsonl.gz matching the given step. Returns
-    empty dict if no sidecars exist (caller treats this as "no sidecar
-    available" and falls back to row["old_lp_student"]).
+    (lookup, stats) where stats has join-sanity counters:
+      n_sidecar_files, n_sidecar_rows, n_duplicate_sample_index.
+    Empty dict on the lookup side means no sidecar available (caller
+    falls back to row["old_lp_student"]).
     """
     out: dict[int, list[float]] = {}
-    for f in sorted(diag_dir.glob(f"step_{step:06d}.adv_dp*.jsonl.gz")):
+    files = sorted(diag_dir.glob(f"step_{step:06d}.adv_dp*.jsonl.gz"))
+    n_dups = 0
+    n_rows = 0
+    for f in files:
         try:
             with gzip.open(f, "rt") as fin:
                 for line in fin:
@@ -414,10 +506,17 @@ def _load_sidecar_for_step(diag_dir: Path, step: int) -> dict[int, list[float]]:
                     olp = row.get("old_log_probs")
                     if idx is None or not olp:
                         continue
+                    if idx in out:
+                        n_dups += 1
                     out[idx] = olp
+                    n_rows += 1
         except Exception:
             continue
-    return out
+    return out, {
+        "n_sidecar_files": len(files),
+        "n_sidecar_rows": n_rows,
+        "n_duplicate_sample_index": n_dups,
+    }
 
 
 def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
@@ -431,6 +530,9 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
     pooled = Accumulator()
     per_step: dict[int, Accumulator] = {}
     sidecar_steps_found = 0
+    total_sidecar_files = 0
+    total_sidecar_rows = 0
+    total_sidecar_duplicates = 0
 
     for f in files:
         m = STEP_RE.search(f.name)
@@ -442,9 +544,12 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
         acc = Accumulator()
         per_step[s] = acc
 
-        sidecar_lookup = _load_sidecar_for_step(diag_dir, s)
+        sidecar_lookup, sidecar_stats = _load_sidecar_for_step(diag_dir, s)
         if sidecar_lookup:
             sidecar_steps_found += 1
+        total_sidecar_files += sidecar_stats["n_sidecar_files"]
+        total_sidecar_rows += sidecar_stats["n_sidecar_rows"]
+        total_sidecar_duplicates += sidecar_stats["n_duplicate_sample_index"]
 
         with gzip.open(f, "rt") as fin:
             n = 0
@@ -462,6 +567,13 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
         "diag_dir": str(diag_dir),
         "n_step_files_scanned": len(per_step),
         "n_steps_with_sidecar": sidecar_steps_found,
+        "sidecar_join_stats": {
+            "total_sidecar_files": total_sidecar_files,
+            "total_sidecar_rows": total_sidecar_rows,
+            "total_duplicate_sample_index": total_sidecar_duplicates,
+            "n_samples_old_lp_from_sidecar_pooled": pooled.n_samples_old_lp_from_sidecar,
+            "n_samples_no_old_lp_pooled": pooled.n_samples_no_old_lp,
+        },
         "steps_scanned": sorted(per_step.keys()),
         "pooled": _summarize(pooled),
         "per_step": {str(s): _summarize(per_step[s]) for s in sorted(per_step.keys())},
@@ -494,6 +606,23 @@ def scan(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
             interp.append(f"frac_supp_neg_vd_neg_adv={frac:.3f} ⇒ modest visual-rejection suppression")
         else:
             interp.append(f"frac_supp_neg_vd_neg_adv={frac:.3f} ⇒ visual-rejection suppression small")
+    cond = p.get("conditional_supp_visual_rejection", float("nan"))
+    if not math.isnan(cond):
+        interp.append(
+            f"conditional_supp_visual_rejection={cond:.3f} "
+            f"⇒ {cond*100:.0f}% of (vd<0 ∧ adv<0) correction mass is routed into suppress branch"
+        )
+    # Per-quadrant snapshot to drive headline.
+    q = p.get("quadrants", {})
+    if "vis_reject_correction" in q and q["vis_reject_correction"]["n_tokens"] > 0:
+        vc = q["vis_reject_correction"]
+        interp.append(
+            f"visual-rejection-correction quadrant: "
+            f"{vc['frac_tokens']*100:.1f}% of tokens, "
+            f"{vc['frac_abs_adv_mass']*100:.1f}% of |adv| mass, "
+            f"mean_weight={vc['mean_weight']:.3f} "
+            f"(<1 means PGPO suppressing this quadrant)"
+        )
     out["headline_interpretation"] = interp
     return out
 
