@@ -5,6 +5,8 @@
 **Predecessor**: `docs/gpt-brief-2026-05-22-t1-v1p5b-positive-result.md` (brief v2; the T1 positive-result paper draft v1).
 **Reviewer ask**: validate the refined §Mechanism claim and the falsification verdict; flag confounders we haven't addressed; advise on what to add before paper submission (Tier-2c / multi-seed / blankness analysis).
 
+**Parallel project thread (not referenced below)**: T2-1 method-tier experiment (PGPO-style signed VD reweighting on top of T1-2 vanilla OPD) was developed independently. A0 energy audit on T2-1's pilot diagnostics found `conditional_supp_visual_rejection = 0.997` — the signed `lp_full − lp_blank` VD proxy routes essentially ALL visual-rejection correction mass into PGPO's suppress branch. 6-variant counterfactual sweep revealed an inherent energy/targeting trade-off in the {abs, RMS-preserve, max-clip} family; per GPT round-5 reframing, T2-2 boost-only `|VD|` (α=0.5, max_w=2.0) is currently training. T2 is independent of this Tier-2a mechanism-tier brief, but the underlying pattern — *the distillation gradient mis-handles visual-rejection signal* — may be the same phenomenon on different axes (token-weighting vs aggregate trajectory). See §7 Q7 and `docs/gpt-review-2026-05-24-counterfactual-6variants.md` for the T2 thread.
+
 ## TL;DR
 
 Tier-2a (off-policy KD on the same teacher-completion distributions T1 trained on, no student rollout) was run as the brief v2 mechanism falsifier. Both arms (Tier-2a-blank, Tier-2a-full) trained 230 optimizer steps with GBS=64 on the 2k T1 training prompts, on 8× H800. The eval used the canonical T1 trajectory pipeline (`scripts/audit/run_t1_trajectory.sh`) at the same 5 checkpoints (step 49, 99, 149, 199, 230) on level1_subset_v0 (1200 prompts) with the opd_target slice (133 vision-critical prompts).
@@ -203,6 +205,8 @@ For each, please give: verdict (agree/disagree/needs more data) + the specific e
 **Q5**: The token-budget confounder (§3.1) — is the qualitative argument (differential too large, shape unaffected) enough, or do we need the T2A-blank-padded control experiment before submission?
 
 **Q6**: Anything in §3 you'd want addressed differently? Anything in §4 attacks I missed?
+
+**Q7** (cross-thread): The parallel T2-1 method-tier experiment (see TL;DR's *Parallel project thread* note) found that PGPO's signed `lp_full − lp_blank` VD proxy routes 99.7% of visual-rejection correction mass into the suppress branch — i.e., the token-level reweighting systematically under-weights teacher correction at exactly the positions where the image rejects the student's current token. Tier-2a finds two failure modes of dense KL distillation from a misspecified teacher: Mode A (universal degradation from imitating blank-template completions) and Mode B (on-policy phase-transition cliff). Question: is T2-1's token-level mis-target and Tier-2a's Mode A the **same underlying phenomenon** — the distillation gradient is systematically biased *away* from visually-driven teacher correction — manifested on two different observation axes (per-token weighting vs aggregate accuracy trajectory)? Or are they independent failure modes that happen to both involve visual conditioning? If the former, that's a unifying mechanism worth featuring in the paper; if the latter, they should remain separate sections. The evidence either way would also inform whether T2-2 boost-only (which gives `w ≥ 1` to every token, no suppression) should be expected to mitigate just Mode B, just Mode A, or both.
 
 ## Artifact locations
 
