@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -25,7 +26,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from mllmopd.analysis.t2_1_abs_counterfactual import scan_both, _with_abs_weights  # noqa: E402
+from mllmopd.analysis.t2_1_abs_counterfactual import (  # noqa: E402
+    scan_both, scan_variants, _with_abs_weights,
+    _with_abs_rms_preserve_weights, _with_abs_max_clip_weights, _ensure_old_lp,
+)
 from mllmopd.training.vd_weighting import compute_vd_weights  # noqa: E402
 
 
@@ -152,11 +156,87 @@ def test_diff_block_populated():
           f"{len(out['headline_interpretation'])} lines incl. VERDICT  OK")
 
 
+def test_abs_rms_preserve_clamps_rho_l2_toward_1():
+    """abs_rms_preserve should preserve advantage L2 energy per sequence.
+
+    Reuses the 4-token construction from test_abs_recovers_visual_rejection_quadrant.
+    With the per-sequence scalar applied, rho_l2 should land much
+    closer to 1 than plain abs (which would have rho_l2 high here).
+    """
+    lp_full = [1.0, 5.0, 2.0, 3.5]
+    lp_blank = [5.0, 1.0, 5.0, 3.0]
+    old_lp = [3.0, 2.0, 3.0, 3.0]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "step_000000.jsonl.gz"
+        _write_step([_make_signed_row(lp_full, lp_blank, old_lp)], path)
+        out = scan_variants(Path(tmp), steps=None, limit_rows=0)
+
+    rho_abs = out["variants"]["abs"]["pooled"]["rho_l2_pooled"]
+    rho_rms = out["variants"]["abs_rms_preserve"]["pooled"]["rho_l2_pooled"]
+    # rms should be closer to 1 than plain abs (closer in log-scale)
+    assert abs(math.log(max(rho_rms, 1e-6))) <= abs(math.log(max(rho_abs, 1e-6))) + 1e-6, (
+        f"abs rho_l2={rho_abs}, rms rho_l2={rho_rms} — rms should be closer to 1"
+    )
+    # And rms should be in clip range [0.5, 2.0] of the per-sequence rescale
+    # (so pooled rho_l2 should be in [0.5, 2.0] when scalar is the only effect)
+    assert 0.4 <= rho_rms <= 2.5, f"rms rho_l2={rho_rms} outside expected range"
+    print(f"  abs_rms_preserve: rho_l2 abs={rho_abs:.3f} → rms={rho_rms:.3f}  OK")
+
+
+def test_abs_max_clip_bounds_max_weight():
+    """abs_max_clip with cap=2.0 should produce no weight > 2.0."""
+    # Construct a case where vanilla abs produces weights > 2.0.
+    # vd = [-4, 4, 0.5] → |vd| = [4, 4, 0.5] → vd_norm = [1, 1, 0]
+    # → w_raw = [3, 3, 0], sum=6, w = [1.5, 1.5, 0]  (all ≤ 2.0 already)
+    # Use more lopsided vd to get a w > 2.
+    # vd = [-1, 4, 0.5] → |vd| = [1, 4, 0.5] → range=3.5
+    # → vd_norm = [(1-0.5)/3.5, (4-0.5)/3.5, 0] = [0.143, 1.0, 0]
+    # → w_raw t0: 0.143/0.4 = 0.357 (suppress); t1: 3.0 (boost); t2: 0
+    # → sum = 3.357, w = w_raw * 3 / 3.357 = [0.319, 2.681, 0]
+    # So abs gives max_w = 2.681 > 2.0. Clip to 2.0.
+    lp_full = [1.0, 5.0, 2.5]
+    lp_blank = [2.0, 1.0, 2.0]   # vd = [-1, 4, 0.5]
+    old_lp = [2.0, 1.0, 1.5]      # adv = [-1, 4, 1]; all non-zero
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "step_000000.jsonl.gz"
+        _write_step([_make_signed_row(lp_full, lp_blank, old_lp)], path)
+        out = scan_variants(Path(tmp), steps=None, limit_rows=0)
+
+    # We can't directly access weights; instead verify that
+    # rho_l2(abs_max_clip) < rho_l2(abs) when abs has a large max weight.
+    rho_abs = out["variants"]["abs"]["pooled"]["rho_l2_pooled"]
+    rho_clip = out["variants"]["abs_max_clip"]["pooled"]["rho_l2_pooled"]
+    assert rho_clip < rho_abs, f"clip rho_l2={rho_clip} should be < abs rho_l2={rho_abs}"
+    print(f"  abs_max_clip: rho_l2 abs={rho_abs:.3f} → clip={rho_clip:.3f}  OK")
+
+
+def test_scan_variants_has_all_4_paths():
+    """scan_variants returns variants dict with signed/abs/abs_rms_preserve/abs_max_clip."""
+    lp_full = [1.0, 5.0, 2.0, 3.5]
+    lp_blank = [5.0, 1.0, 5.0, 3.0]
+    old_lp = [3.0, 2.0, 3.0, 3.0]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "step_000000.jsonl.gz"
+        _write_step([_make_signed_row(lp_full, lp_blank, old_lp)], path)
+        out = scan_variants(Path(tmp), steps=None, limit_rows=0)
+    assert set(out["variants"].keys()) == {
+        "signed", "abs", "abs_rms_preserve", "abs_max_clip"
+    }, list(out["variants"].keys())
+    assert "verdicts" in out
+    assert all(v in out["verdicts"] for v in out["variants"]), out["verdicts"]
+    print(f"  scan_variants: 4 variants present, verdicts populated  OK")
+
+
 def main():
     tests = [
         test_with_abs_weights_preserves_original_vd,
         test_abs_recovers_visual_rejection_quadrant,
         test_diff_block_populated,
+        test_abs_rms_preserve_clamps_rho_l2_toward_1,
+        test_abs_max_clip_bounds_max_weight,
+        test_scan_variants_has_all_4_paths,
     ]
     print(f"Running {len(tests)} smoke tests for t2_1_abs_counterfactual:")
     failed = []

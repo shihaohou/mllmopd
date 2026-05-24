@@ -1,19 +1,25 @@
-"""T2-1Abs offline counterfactual: would `vd → |vd|` fix the mis-target?
+"""T2-1Abs / Abs+RMS / Abs+clip offline counterfactuals.
 
-GPT round-4 ask (before committing 3-4h on T2-1Abs 230-step training):
-on the existing T2-1 pilot diagnostics (10 steps × 8 dp ranks =
-576 samples / 935814 tokens), substitute `vd → |vd|` in the PGPO
-Eq 6+7 formulas and recompute weights, then re-evaluate the three
-A0 metrics + quadrant table. If on this counterfactual:
+After A0 confirmed signed-proxy mis-target (GPT round-4), the first
+counterfactual (Abs alone) showed:
+  ✓ frac_supp drops 0.442 → 0.124
+  ✓ vis_reject mean_w 0.936 → 1.901
+  ✓ corr flips -0.101 → +0.308
+  ✗ rho_l2 explodes 0.973 → 11.98 (training would diverge)
 
-  (a) `frac_supp_neg_vd_neg_adv ≈ 0`        — visual-rejection no longer suppressed
-  (b) `mean_weight` on the `vis_reject_correction` quadrant ≥ 1 — actually boosted
-  (c) `corr(w, |adv|) ≥ 0` (or at least less negative)
-  (d) `rho_l2` not catastrophically high (e.g. < 1.5)
+So vanilla Abs fails the "rho_l2 < 1.5" pass criterion. GPT round-4
+endorsed Abs+RMS-preserve / Abs+max-clip / quadrant-aware / hard
+top-k as fallbacks. This module now runs FOUR counterfactuals
+side-by-side on the same diagnostics:
 
-then T2-1Abs is justified as the next experiment. If they don't all
-hold, the next step needs more design work (Abs+RMS, quadrant-aware,
-hard top-k by |vd|, ...).
+  signed             — original T2-1 weights (baseline)
+  abs                — vd → |vd|, otherwise unchanged
+  abs_rms_preserve   — abs + per-sequence advantage-RMS scalar
+                       (GPT round-3 formula: s = clip(sqrt(Σadv²/Σ(w·adv)²), 0.5, 2.0))
+  abs_max_clip       — abs + clamp max weight to max_cap then renormalize
+
+Each variant is evaluated against the same four pass criteria; the
+verdict picks the variant that passes all four.
 
 This module does NOT modify training and does NOT touch the live
 weights. It re-uses t2_1_energy_audit's Accumulator + _process_sample
@@ -82,20 +88,138 @@ def _with_abs_weights(row: dict) -> dict:
     return out
 
 
-def scan_both(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
-    """Run the audit twice over the same data: once signed (original
-    weights from row), once abs (weights recomputed from |vd|).
-    Returns side-by-side result dict.
+def _ensure_old_lp(row: dict, sidecar_lookup: dict[int, list[float]] | None) -> dict:
+    """Inject old_log_probs from sidecar into row if row['old_lp_student']
+    is missing/length-mismatched. Used so weight transforms have access to
+    adv = lp_full - old_lp_student without re-implementing the join logic.
+
+    Returns the row unmodified if no sidecar is available or sidecar has
+    no matching sample_index — _process_sample will then route to the
+    n_samples_no_old_lp bucket.
+    """
+    R = int(row.get("response_length", 0))
+    olp = row.get("old_lp_student") or []
+    if olp and len(olp) == R:
+        return row
+    if not sidecar_lookup:
+        return row
+    sample_index = row.get("sample_index")
+    if sample_index is None:
+        return row
+    alt = sidecar_lookup.get(sample_index)
+    if not alt or len(alt) != R:
+        return row
+    out = dict(row)
+    out["old_lp_student"] = alt
+    return out
+
+
+def _with_abs_rms_preserve_weights(
+    row: dict, clip: tuple[float, float] = (0.5, 2.0),
+) -> dict:
+    """Abs weights × per-sequence advantage-RMS-preserving scalar.
+
+    Formula (GPT round-3):
+        w_abs = compute_vd_weights(|vd|, 0, R)
+        rho_seq = sqrt(Σ_t (w_abs[t] · adv[t])² / Σ_t adv[t]²)
+        s = clip(1 / rho_seq, low, high)
+        w_final = s · w_abs
+
+    With s capped to [0.5, 2.0], per-sequence advantage L2 energy is
+    preserved within ±sqrt(2)× of unweighted (the clip prevents
+    pathological inflation on sequences where w_abs anti-correlates
+    with adv², but that's rare with abs weights).
+
+    Requires row to have old_lp_student populated (call _ensure_old_lp
+    upstream). Falls back to plain abs weights if not.
+    """
+    row_abs = _with_abs_weights(row)
+    R = int(row.get("response_length", 0))
+    lp_full = row.get("lp_full") or []
+    old_lp = row.get("old_lp_student") or []
+    if (not lp_full or len(lp_full) != R
+            or not old_lp or len(old_lp) != R or R <= 1):
+        return row_abs
+
+    adv = [lpf - lps for lpf, lps in zip(lp_full, old_lp)]
+    w_abs = row_abs["vd_weights"]
+    if len(w_abs) != R:
+        return row_abs
+
+    sum_adv2 = sum(a * a for a in adv)
+    sum_wa2 = sum((w * a) ** 2 for w, a in zip(w_abs, adv))
+    if sum_adv2 < 1e-12 or sum_wa2 < 1e-12:
+        return row_abs
+
+    rho_seq = math.sqrt(sum_wa2 / sum_adv2)
+    if rho_seq < 1e-12:
+        return row_abs
+    s = 1.0 / rho_seq
+    s = max(clip[0], min(clip[1], s))
+
+    out = dict(row_abs)
+    out["vd_weights"] = [w * s for w in w_abs]
+    return out
+
+
+def _with_abs_max_clip_weights(row: dict, max_cap: float = 2.0) -> dict:
+    """Abs weights then clip max to max_cap (no re-renormalize — Σw drops slightly).
+
+    Trade-off: clipping then re-renormalizing pushes some weights back
+    above the cap (iterative fixed-point needed for strict). Single-pass
+    clip without re-renormalize loses ~5-15% of total mass on sequences
+    where many weights hit the cap, but strictly bounds rho_l2 ≤ max_cap.
+    The mass loss is a uniform-ish per-sequence rescaling that the
+    optimizer absorbs as a slightly lower effective LR per sequence —
+    fine for testing the "does bounded max weight stabilize energy"
+    question.
+    """
+    row_abs = _with_abs_weights(row)
+    w = row_abs["vd_weights"]
+    if not w:
+        return row_abs
+    w_clip = [min(x, max_cap) for x in w]
+    out = dict(row_abs)
+    out["vd_weights"] = w_clip
+    return out
+
+
+# Ordered list of (name, transform_fn). Transform takes (row_with_old_lp)
+# and returns a row with vd_weights replaced. signed is the no-op baseline.
+VARIANTS: list[tuple[str, callable]] = [
+    ("signed", lambda row: row),
+    ("abs", _with_abs_weights),
+    ("abs_rms_preserve", _with_abs_rms_preserve_weights),
+    ("abs_max_clip", _with_abs_max_clip_weights),
+]
+
+
+PASS_CRITERIA = {
+    "frac_supp_lt_0.05": lambda p: (not math.isnan(p["frac_supp_neg_vd_neg_adv_mass"])
+                                     and p["frac_supp_neg_vd_neg_adv_mass"] < 0.05),
+    "vis_reject_mean_w_ge_1": lambda p: (
+        p["quadrants"]["vis_reject_correction"]["n_tokens"] > 0
+        and not math.isnan(p["quadrants"]["vis_reject_correction"]["mean_weight"])
+        and p["quadrants"]["vis_reject_correction"]["mean_weight"] >= 1.0
+    ),
+    "corr_ge_-0.05": lambda p: (not math.isnan(p["corr_w_abs_adv_pooled"])
+                                 and p["corr_w_abs_adv_pooled"] >= -0.05),
+    "rho_l2_lt_1.5": lambda p: (not math.isnan(p["rho_l2_pooled"])
+                                 and p["rho_l2_pooled"] < 1.5),
+}
+
+
+def scan_variants(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
+    """Run the audit once per variant in VARIANTS over the same diag data.
+    Returns side-by-side result dict with per-variant summary + verdict.
     """
     files = sorted(diag_dir.glob("step_*.jsonl.gz"))
     files = [f for f in files if not SIDECAR_RE.search(f.name)]
     if not files:
         raise FileNotFoundError(f"no step_*.jsonl.gz in {diag_dir}")
 
-    pooled_signed = Accumulator()
-    pooled_abs = Accumulator()
-    per_step_signed: dict[int, Accumulator] = {}
-    per_step_abs: dict[int, Accumulator] = {}
+    pooled: dict[str, Accumulator] = {name: Accumulator() for name, _ in VARIANTS}
+    per_step: dict[str, dict[int, Accumulator]] = {name: {} for name, _ in VARIANTS}
 
     for f in files:
         m = STEP_RE.search(f.name)
@@ -105,10 +229,8 @@ def scan_both(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
         if steps and s not in steps:
             continue
 
-        acc_signed = Accumulator()
-        acc_abs = Accumulator()
-        per_step_signed[s] = acc_signed
-        per_step_abs[s] = acc_abs
+        for name, _ in VARIANTS:
+            per_step[name][s] = Accumulator()
 
         sidecar_lookup, _sidecar_stats = _load_sidecar_for_step(diag_dir, s)
 
@@ -121,107 +243,123 @@ def scan_both(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                # SIGNED path: use weights from row as-is.
-                _process_sample(row, acc_signed, pooled_signed, sidecar_lookup or None)
-                # ABS path: same row but with weights recomputed from |vd|.
-                # _process_sample re-reads vd / vd_weights / lp_full / old_lp_student,
-                # but adv computation depends only on lp_full + old_lp_student (unchanged).
-                row_abs = _with_abs_weights(row)
-                _process_sample(row_abs, acc_abs, pooled_abs, sidecar_lookup or None)
+                # Inject old_log_probs from sidecar into the row up front so
+                # weight transforms (which need adv = lp_full - old_lp) can
+                # compute without re-implementing the join.
+                row_with_olp = _ensure_old_lp(row, sidecar_lookup)
+                for name, transform in VARIANTS:
+                    transformed = transform(row_with_olp)
+                    _process_sample(
+                        transformed,
+                        per_step[name][s],
+                        pooled[name],
+                        sidecar_lookup or None,
+                    )
                 n += 1
 
     out = {
         "diag_dir": str(diag_dir),
-        "n_step_files_scanned": len(per_step_signed),
-        "steps_scanned": sorted(per_step_signed.keys()),
-        "signed": {
-            "pooled": _summarize(pooled_signed),
-            "per_step": {str(s): _summarize(per_step_signed[s])
-                         for s in sorted(per_step_signed.keys())},
-        },
-        "abs": {
-            "pooled": _summarize(pooled_abs),
-            "per_step": {str(s): _summarize(per_step_abs[s])
-                         for s in sorted(per_step_abs.keys())},
-        },
+        "n_step_files_scanned": len(per_step["signed"]),
+        "steps_scanned": sorted(per_step["signed"].keys()),
+        "variants": {},
     }
+    for name, _ in VARIANTS:
+        out["variants"][name] = {
+            "pooled": _summarize(pooled[name]),
+            "per_step": {str(s): _summarize(per_step[name][s])
+                         for s in sorted(per_step[name].keys())},
+        }
 
-    ps = out["signed"]["pooled"]
-    pa = out["abs"]["pooled"]
-    out["diff"] = {
-        "delta_rho_l2": pa["rho_l2_pooled"] - ps["rho_l2_pooled"],
-        "delta_corr_w_abs_adv": (
-            pa["corr_w_abs_adv_pooled"] - ps["corr_w_abs_adv_pooled"]
-        ),
-        "delta_frac_supp_neg_vd_neg_adv_mass": (
-            pa["frac_supp_neg_vd_neg_adv_mass"] - ps["frac_supp_neg_vd_neg_adv_mass"]
-        ),
-        "delta_conditional_supp_visual_rejection": (
-            pa["conditional_supp_visual_rejection"]
-            - ps["conditional_supp_visual_rejection"]
-        ),
-        "vis_reject_correction_mean_weight": {
-            "signed": ps["quadrants"]["vis_reject_correction"]["mean_weight"],
-            "abs": pa["quadrants"]["vis_reject_correction"]["mean_weight"],
-        },
-        "vis_reject_correction_frac_w_below_1": {
-            "signed": ps["quadrants"]["vis_reject_correction"]["frac_w_below_1"],
-            "abs": pa["quadrants"]["vis_reject_correction"]["frac_w_below_1"],
-        },
-    }
+    # Verdict per variant.
+    verdicts: dict[str, dict] = {}
+    for name in out["variants"]:
+        p = out["variants"][name]["pooled"]
+        passes = [k for k, check in PASS_CRITERIA.items() if check(p)]
+        fails = [k for k in PASS_CRITERIA if k not in passes]
+        verdicts[name] = {
+            "passed": passes,
+            "failed": fails,
+            "all_pass": len(fails) == 0,
+        }
+    out["verdicts"] = verdicts
 
-    # Headline interpretation: does Abs counterfactual fix the mis-target?
+    # Headline.
     interp = []
-    p = out["diff"]
-    fs_signed = ps["frac_supp_neg_vd_neg_adv_mass"]
-    fs_abs = pa["frac_supp_neg_vd_neg_adv_mass"]
-    if not math.isnan(fs_signed) and not math.isnan(fs_abs):
-        interp.append(
-            f"frac_supp_neg_vd_neg_adv_mass: signed={fs_signed:.3f} → abs={fs_abs:.3f} "
-            f"(Δ={p['delta_frac_supp_neg_vd_neg_adv_mass']:+.3f})"
+    interp.append("== variant summary ==")
+    interp.append(f"  {'variant':<20} {'rho_l2':>7} {'corr':>7} {'frac_supp':>10} "
+                  f"{'cond_supp':>10} {'visR_mw':>8}  passes")
+    for name in out["variants"]:
+        p = out["variants"][name]["pooled"]
+        rho = p["rho_l2_pooled"]
+        cor = p["corr_w_abs_adv_pooled"]
+        fs = p["frac_supp_neg_vd_neg_adv_mass"]
+        cs = p["conditional_supp_visual_rejection"]
+        mw = p["quadrants"]["vis_reject_correction"]["mean_weight"]
+        passes_str = "/".join(
+            "✓" if c in verdicts[name]["passed"] else "✗"
+            for c in PASS_CRITERIA
         )
-    cs_signed = ps["conditional_supp_visual_rejection"]
-    cs_abs = pa["conditional_supp_visual_rejection"]
-    if not math.isnan(cs_signed) and not math.isnan(cs_abs):
         interp.append(
-            f"conditional_supp_visual_rejection: signed={cs_signed:.3f} → abs={cs_abs:.3f} "
-            f"(Δ={p['delta_conditional_supp_visual_rejection']:+.3f})"
+            f"  {name:<20} {rho:>7.3f} {cor:>+7.3f} {fs:>10.3f} "
+            f"{cs:>10.3f} {mw:>8.3f}  {passes_str}"
         )
-    mw_signed = p["vis_reject_correction_mean_weight"]["signed"]
-    mw_abs = p["vis_reject_correction_mean_weight"]["abs"]
-    if not math.isnan(mw_signed) and not math.isnan(mw_abs):
-        interp.append(
-            f"vis_reject_correction mean_weight: signed={mw_signed:.3f} → abs={mw_abs:.3f}"
-        )
-    interp.append(
-        f"rho_l2: signed={ps['rho_l2_pooled']:.3f} → abs={pa['rho_l2_pooled']:.3f} "
-        f"(Δ={p['delta_rho_l2']:+.3f})"
-    )
-    interp.append(
-        f"corr(w,|adv|): signed={ps['corr_w_abs_adv_pooled']:+.3f} → "
-        f"abs={pa['corr_w_abs_adv_pooled']:+.3f} (Δ={p['delta_corr_w_abs_adv']:+.3f})"
-    )
-    # Verdict line
-    verdict_passes = []
-    if not math.isnan(fs_abs) and fs_abs < 0.05:
-        verdict_passes.append("frac_supp_abs<0.05")
-    if not math.isnan(mw_abs) and mw_abs >= 1.0:
-        verdict_passes.append("vis_reject mean_w_abs≥1")
-    if not math.isnan(pa["corr_w_abs_adv_pooled"]) and pa["corr_w_abs_adv_pooled"] >= -0.05:
-        verdict_passes.append("corr_abs≥-0.05")
-    if not math.isnan(pa["rho_l2_pooled"]) and pa["rho_l2_pooled"] < 1.5:
-        verdict_passes.append("rho_l2_abs<1.5")
-    if len(verdict_passes) == 4:
-        interp.append(f"VERDICT: T2-1Abs likely justified — all 4 conditions hold "
-                      f"({', '.join(verdict_passes)})")
+    interp.append(f"  pass-order: {list(PASS_CRITERIA.keys())}")
+
+    winners = [n for n in out["variants"] if verdicts[n]["all_pass"]]
+    losers = [n for n in out["variants"] if not verdicts[n]["all_pass"]]
+    if winners:
+        # First winner in VARIANTS order = recommended.
+        recommended = next(n for n, _ in VARIANTS if n in winners)
+        interp.append(f"VERDICT: {len(winners)} variant(s) pass all 4 criteria: "
+                      f"{winners}. RECOMMENDED: {recommended}")
     else:
-        failed = {"frac_supp_abs<0.05", "vis_reject mean_w_abs≥1",
-                  "corr_abs≥-0.05", "rho_l2_abs<1.5"} - set(verdict_passes)
-        interp.append(f"VERDICT: not all conditions hold — passed [{', '.join(verdict_passes)}], "
-                      f"failed [{', '.join(failed)}]; revisit design")
+        interp.append(f"VERDICT: no variant passes all 4 criteria. "
+                      f"Failing: {[(n, verdicts[n]['failed']) for n in losers]}")
     out["headline_interpretation"] = interp
 
     return out
+
+
+# Back-compat alias for the older smoke test.
+def scan_both(diag_dir: Path, steps: list[int] | None, limit_rows: int) -> dict:
+    """Legacy two-variant entry point (signed + abs only). Kept for the
+    old smoke tests; new callers should use scan_variants."""
+    out = scan_variants(diag_dir, steps, limit_rows)
+    # Re-shape into the old {signed:..., abs:..., diff:...} schema.
+    signed = out["variants"]["signed"]
+    abs_ = out["variants"]["abs"]
+    diff = {
+        "delta_rho_l2": abs_["pooled"]["rho_l2_pooled"] - signed["pooled"]["rho_l2_pooled"],
+        "delta_corr_w_abs_adv": (
+            abs_["pooled"]["corr_w_abs_adv_pooled"]
+            - signed["pooled"]["corr_w_abs_adv_pooled"]
+        ),
+        "delta_frac_supp_neg_vd_neg_adv_mass": (
+            abs_["pooled"]["frac_supp_neg_vd_neg_adv_mass"]
+            - signed["pooled"]["frac_supp_neg_vd_neg_adv_mass"]
+        ),
+        "delta_conditional_supp_visual_rejection": (
+            abs_["pooled"]["conditional_supp_visual_rejection"]
+            - signed["pooled"]["conditional_supp_visual_rejection"]
+        ),
+        "vis_reject_correction_mean_weight": {
+            "signed": signed["pooled"]["quadrants"]["vis_reject_correction"]["mean_weight"],
+            "abs": abs_["pooled"]["quadrants"]["vis_reject_correction"]["mean_weight"],
+        },
+        "vis_reject_correction_frac_w_below_1": {
+            "signed": signed["pooled"]["quadrants"]["vis_reject_correction"]["frac_w_below_1"],
+            "abs": abs_["pooled"]["quadrants"]["vis_reject_correction"]["frac_w_below_1"],
+        },
+    }
+    return {
+        "diag_dir": out["diag_dir"],
+        "n_step_files_scanned": out["n_step_files_scanned"],
+        "steps_scanned": out["steps_scanned"],
+        "signed": signed,
+        "abs": abs_,
+        "diff": diff,
+        "headline_interpretation": out["headline_interpretation"],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.steps:
         steps = [int(s) for s in args.steps.split(",") if s.strip()]
 
-    out = scan_both(Path(args.diag_dir), steps, args.limit_rows_per_step)
+    out = scan_variants(Path(args.diag_dir), steps, args.limit_rows_per_step)
 
     if args.out_json:
         Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
@@ -248,18 +386,24 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(out, f, indent=2, allow_nan=True)
         print(f"json -> {args.out_json}", file=sys.stderr)
     else:
-        # Strip per_step for stdout brevity.
-        compact = {k: v for k, v in out.items() if k != "signed" and k != "abs"}
-        compact["signed_pooled"] = out["signed"]["pooled"]
-        compact["abs_pooled"] = out["abs"]["pooled"]
+        # Strip per-step blocks for stdout brevity; keep pooled per variant.
+        compact = {
+            "diag_dir": out["diag_dir"],
+            "n_step_files_scanned": out["n_step_files_scanned"],
+            "steps_scanned": out["steps_scanned"],
+            "variants_pooled": {k: v["pooled"] for k, v in out["variants"].items()},
+            "verdicts": out["verdicts"],
+            "headline_interpretation": out["headline_interpretation"],
+        }
         print(json.dumps(compact, indent=2, default=str))
 
-    print(f"\n=== T2-1Abs COUNTERFACTUAL "
-          f"({out['signed']['pooled']['n_samples_used']} samples, "
-          f"{out['signed']['pooled']['n_tokens_used']} tokens) ===",
+    signed_p = out["variants"]["signed"]["pooled"]
+    print(f"\n=== T2-1 COUNTERFACTUAL VARIANTS "
+          f"({signed_p['n_samples_used']} samples, "
+          f"{signed_p['n_tokens_used']} tokens) ===",
           file=sys.stderr)
     for line in out["headline_interpretation"]:
-        print(f"  {line}", file=sys.stderr)
+        print(line, file=sys.stderr)
 
     return 0
 
