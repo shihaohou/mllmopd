@@ -117,6 +117,18 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     """Returns the teacher-side block to be merged into the final row(s)."""
     import torch
 
+    # OOM debug: reset peak-memory tracking and print at each phase.
+    _DBG = os.environ.get("MLLMOPD_DEBUG_MEM", "0") == "1"
+    def _mem(tag: str) -> None:
+        if not _DBG or not torch.cuda.is_available():
+            return
+        peak_gb = torch.cuda.max_memory_allocated() / 1024**3
+        cur_gb  = torch.cuda.memory_allocated() / 1024**3
+        print(f"    [mem:{tag}] cur={cur_gb:.2f}GB  peak={peak_gb:.2f}GB",
+              file=sys.stderr)
+    if _DBG and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     messages = _build_messages(rec["question"], image, args.system_prompt)
     chat = processor.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False,
@@ -126,6 +138,12 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     ).to(model.device)
     input_len = inputs["input_ids"].shape[1]
     input_ids_full = inputs["input_ids"][0].tolist()
+    if _DBG:
+        gt = inputs.get("image_grid_thw")
+        gt_str = gt[0].tolist() if gt is not None else "n/a"
+        print(f"    [mem:shape] prompt_len={input_len}  image_grid_thw={gt_str}",
+              file=sys.stderr)
+    _mem("after_prepare")
 
     # --- Full-image generation ---
     t0 = time.time()
@@ -141,6 +159,24 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
             return_dict_in_generate=True,
         )
     dt_gen_full = time.time() - t0
+    _mem("after_generate")
+    if _DBG:
+        try:
+            n_steps = len(outputs.hidden_states)
+            l0_shape = outputs.hidden_states[0][-1].shape   # last-layer prefill
+            l_last_shape = outputs.hidden_states[-1][-1].shape  # last step
+            n_layers = len(outputs.hidden_states[0])
+            print(f"    [mem:shape] hs steps={n_steps} layers={n_layers}  "
+                  f"hs[0][-1]={tuple(l0_shape)}  hs[-1][-1]={tuple(l_last_shape)}",
+                  file=sys.stderr)
+            attn0 = outputs.attentions[0] if outputs.attentions is not None else None
+            if attn0 is not None and attn0[-1] is not None:
+                print(f"    [mem:shape] attn[0][-1]={tuple(attn0[-1].shape)}",
+                      file=sys.stderr)
+            else:
+                print(f"    [mem:shape] attn = None (SDPA)", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"    [mem:shape] introspect failed: {e!r}", file=sys.stderr)
 
     sequences = outputs.sequences[0]
     response_ids = sequences[input_len:].cpu().tolist()
@@ -163,6 +199,11 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
         with torch.inference_mode():
             logit_list.append(model.lm_head(last_h))
     dt_logit = time.time() - t1
+    _mem("after_lm_head")
+    if _DBG and logit_list:
+        print(f"    [mem:shape] logit_list[0]={tuple(logit_list[0].shape)}  "
+              f"logit_list[-1]={tuple(logit_list[-1].shape)}  "
+              f"n={len(logit_list)}", file=sys.stderr)
 
     grid_thw = inputs["image_grid_thw"][0].tolist()
     vision_shape = (grid_thw[1] // 2, grid_thw[2] // 2)
@@ -210,6 +251,7 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
         attn_failure = "vision_span_or_attentions_missing"
     dt_attn = time.time() - t3
     attn_baseline_valid = (attn_failure is None)
+    _mem("after_tam_attn")
 
     # --- Blank-image scoring on the SAME response_ids ---
     # Build a blank-image chat with same prompt; teacher-forced forward.
@@ -250,6 +292,7 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
         print(f"!! blank-image scoring failed: {type(e).__name__}: {e!s:.120}",
               file=sys.stderr)
     dt_blank = time.time() - t4
+    _mem("after_blank")
 
     # v0.1.2 OOM fix: eager attention + long CoT (ChartQA / MathVerse) blows
     # GPU memory across samples because outputs.hidden_states +
