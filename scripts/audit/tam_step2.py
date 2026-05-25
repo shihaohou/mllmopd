@@ -167,8 +167,18 @@ def _apply_patch_mask_to_image(image, patch_mask, image_grid_thw,
 # ============================================================================
 def teacher_pass_with_tam(processor, model, image, question, system_prompt,
                           args) -> dict:
-    """Generate + compute per-token TAM maps + lp_full per token.
-    Reuses tam_step1a's pattern but only the bits Step 2 needs."""
+    """v0.1.3 pattern (per tam_step1a:148-260) — bare generate + single
+    teacher-forced forward. Qwen2.5-VL's `generate(output_hidden_states=True)`
+    returns FULL-sequence hidden states at each step (1, P+r, hidden) — for
+    high-res prompts (HallusionBench/ChartQA, P>1000) this quadratically
+    blows past 100 GB peak. v0.1.3 fix: bare generate gives KV-cached cheap
+    response_ids, then ONE teacher-forced forward gives all hidden_states /
+    logits in a single ~16 GB pass.
+
+    Also matches `_tam_core.TAM`'s expected `logit_list` shape:
+      logit_list[0]   = (1, prompt_len, V)    — all prompt positions
+      logit_list[r>0] = (1, 1, V)              — single new token logit
+    """
     import torch
 
     messages = _build_messages(question, image, system_prompt)
@@ -181,43 +191,74 @@ def teacher_pass_with_tam(processor, model, image, question, system_prompt,
     input_len = inputs["input_ids"].shape[1]
     input_ids_full = inputs["input_ids"][0].tolist()
 
+    # --- Phase 1: BARE generate (no hidden / scores / attentions) ---
     with torch.inference_mode():
-        outputs = model.generate(
+        gen_out = model.generate(
             **inputs,
             max_new_tokens=args.max_new_tokens,
             do_sample=False,
             pad_token_id=processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id,
-            output_hidden_states=True,
-            output_scores=True,
             return_dict_in_generate=True,
         )
-
-    sequences = outputs.sequences[0]
+    sequences = gen_out.sequences[0]
     response_ids = sequences[input_len:].cpu().tolist()
     eos_id = processor.tokenizer.eos_token_id
     response_length = len(response_ids)
     if eos_id is not None and eos_id in response_ids:
         response_length = response_ids.index(eos_id) + 1
     response_ids = response_ids[:response_length]
+    del gen_out
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    # lp_full
-    scores_trimmed = tuple(outputs.scores[:response_length])
-    lp_full = []
-    teacher_entropy = []
-    for t, score_t in enumerate(scores_trimmed):
-        log_probs = torch.log_softmax(score_t, dim=-1)[0]
-        lp_full.append(float(log_probs[response_ids[t]]))
-        probs = torch.softmax(score_t.float(), dim=-1)[0]
-        teacher_entropy.append(
-            float(-(probs * torch.log(probs + 1e-12)).sum())
+    if response_length == 0:
+        # Edge case: empty response. Bail with minimal block.
+        grid_thw = inputs["image_grid_thw"][0].tolist()
+        return {
+            "response_ids": [], "response_length": 0,
+            "lp_full": [], "teacher_entropy_full": [],
+            "tam_maps": [], "vision_shape": (grid_thw[1] // 2, grid_thw[2] // 2),
+            "image_grid_thw": grid_thw, "prompt_len": input_len,
+            "input_ids_full": input_ids_full, "chat_template": chat,
+        }
+
+    # --- Phase 2: single teacher-forced forward WITH hidden_states ---
+    response_tensor = torch.tensor(response_ids, device=model.device).unsqueeze(0)
+    full_ids = torch.cat([inputs["input_ids"], response_tensor], dim=1)
+    full_mask = torch.cat([
+        inputs["attention_mask"],
+        torch.ones_like(response_tensor),
+    ], dim=1)
+    fwd_kwargs = dict(inputs)
+    fwd_kwargs["input_ids"] = full_ids
+    fwd_kwargs["attention_mask"] = full_mask
+    with torch.inference_mode():
+        out_full = model(
+            **fwd_kwargs,
+            output_hidden_states=False,   # Step 2 doesn't need hidden_states
+            output_attentions=False,
         )
 
-    # logit_list for TAM
+    # lp_full per response token (predictor index = input_len + t - 1)
+    full_logits_2d = out_full.logits[0]   # (T_full, V)
+    lp_full: list[float] = []
+    teacher_entropy: list[float] = []
+    for t in range(response_length):
+        pred_idx = input_len + t - 1
+        row = full_logits_2d[pred_idx]
+        log_probs = torch.log_softmax(row, dim=-1)
+        probs = torch.softmax(row.float(), dim=-1)
+        lp_full.append(float(log_probs[response_ids[t]]))
+        teacher_entropy.append(float(-(probs * torch.log(probs + 1e-12)).sum()))
+
+    # logit_list as VIEWS into full_logits with the shape _tam_core.TAM expects
+    full_logits_3d = full_logits_2d.unsqueeze(0)   # (1, T_full, V)
     logit_list = []
-    for r, feats in enumerate(outputs.hidden_states[:response_length]):
-        last_h = feats[-1]
-        with torch.inference_mode():
-            logit_list.append(model.lm_head(last_h))
+    for r in range(response_length):
+        if r == 0:
+            logit_list.append(full_logits_3d[:, :input_len, :])
+        else:
+            logit_list.append(full_logits_3d[:, input_len + r - 1: input_len + r, :])
 
     grid_thw = inputs["image_grid_thw"][0].tolist()
     vision_shape = (grid_thw[1] // 2, grid_thw[2] // 2)
@@ -235,16 +276,14 @@ def teacher_pass_with_tam(processor, model, image, question, system_prompt,
         )
         response_maps.append(m)
 
-    # Cleanup
+    # Aggressive cleanup so each mask-strategy forward starts from baseline
+    del logit_list, full_logits_3d, full_logits_2d
     try:
-        outputs.hidden_states = None  # type: ignore[attr-defined]
-        outputs.attentions    = None  # type: ignore[attr-defined]
-        outputs.scores        = None  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
+        del out_full
+    except NameError:
         pass
-    del logit_list, scores_trimmed
     try:
-        del outputs
+        del response_tensor, full_ids, full_mask, fwd_kwargs
     except NameError:
         pass
     if torch.cuda.is_available():
