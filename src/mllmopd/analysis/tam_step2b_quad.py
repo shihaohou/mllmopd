@@ -215,9 +215,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--step1a-jsonl", type=Path, required=True)
     ap.add_argument("--out-json",     type=Path, required=True)
     ap.add_argument("--out-txt",      type=Path, default=None)
+    ap.add_argument(
+        "--fail-on-duplicates", action="store_true",
+        help="Raise if Step 1a JSONL has duplicate (id, ckpt) rows. "
+             "Per GPT static-review on 3b290eb: paper-critical runs should "
+             "enable this; default warns + last-wins for ad-hoc analysis.",
+    )
     args = ap.parse_args(argv)
 
-    step1a_lookup = _load_step1a_lookup(args.step1a_jsonl)
+    step1a_lookup = _load_step1a_lookup(
+        args.step1a_jsonl, fail_on_duplicates=args.fail_on_duplicates,
+    )
     step2_rows    = _load_step2_rows(args.step2_jsonl)
     step2_by_uid  = _organize_step2(step2_rows)
     print(f">>> {len(step2_by_uid)} unique step2 token_uids", file=sys.stderr)

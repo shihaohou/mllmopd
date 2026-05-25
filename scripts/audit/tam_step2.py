@@ -126,9 +126,37 @@ MASK_STRATEGIES = [
 ]
 
 
+def _stable_seed(base_seed: int, sample_id: str | None, token_idx: int | None,
+                 H: int, W: int) -> int:
+    """Deterministic per-(sample, token, shape) seed for random / scrambled
+    strategies. Per GPT static-review on 3b290eb (Issue 5):
+
+      Old behavior: `seed = int(strategy.split("_")[-1])` — same patch index
+      pattern is reused for every (sample, token) at a given vision shape.
+      Three seeds (42/43/44) gives only three fixed patterns across all data,
+      so random_20pct can have systematic spatial bias.
+
+      New behavior: salt base_seed with (sample_id, token_idx, H, W) so each
+      (sample, token) gets its own random / scrambled pattern. Marginally
+      uniform over the K choose n_mask combinations across the corpus."""
+    if sample_id is None or token_idx is None:
+        return base_seed
+    h = hashlib.sha256(
+        f"{base_seed}:{sample_id}:{token_idx}:{H}:{W}".encode("utf-8")
+    ).hexdigest()
+    return int(h[:8], 16)
+
+
 def _build_patch_mask(tam_map: np.ndarray, strategy: str,
-                      target_frac: float = 0.2) -> np.ndarray:
-    """Return boolean array of shape vision_shape; True = MASKED (gray out)."""
+                      target_frac: float = 0.2,
+                      *, sample_id: str | None = None,
+                      token_idx: int | None = None) -> np.ndarray:
+    """Return boolean array of shape vision_shape; True = MASKED (gray out).
+
+    `sample_id` + `token_idx` are used to salt the seed for random / scrambled
+    strategies (Issue 5 fix); when omitted, falls back to the legacy
+    strategy-name-only seed (kept only for sanity comparisons against
+    v0.1.3-step2 JSONLs)."""
     H, W = tam_map.shape
     flat = tam_map.flatten()
     n_total = flat.size
@@ -147,15 +175,21 @@ def _build_patch_mask(tam_map: np.ndarray, strategy: str,
             if i not in keep:
                 mask_flat[i] = True
     elif strategy.startswith("random_20pct_seed_"):
-        seed = int(strategy.split("_")[-1])
+        base = int(strategy.split("_")[-1])
+        seed = _stable_seed(base, sample_id, token_idx, H, W)
         rng = np.random.default_rng(seed)
         chosen = rng.choice(n_total, size=n_mask, replace=False)
         mask_flat[chosen] = True
     elif strategy.startswith("scrambled_tam_seed_"):
-        # Shuffle TAM values across positions, then take top-K of the
-        # SHUFFLED map. Mathematically equivalent to random_20pct (uniform
-        # random patch selection) — but explicit as a transparency control.
-        seed = int(strategy.split("_")[-1])
+        # Per GPT static-review on 3b290eb (Issue 6): randomizes the SPATIAL
+        # ASSIGNMENT of TAM values while PRESERVING the value distribution.
+        # Marginally, the selected top-K positions of a permuted map are
+        # uniform-random — but this is a value-distribution-preserving
+        # control, NOT mathematical equivalence to a vanilla random mask.
+        # The paper claim is "random ≈ scrambled supports that TAM's spatial
+        # assignment matters", not "scrambled == random".
+        base = int(strategy.split("_")[-1])
+        seed = _stable_seed(base, sample_id, token_idx, H, W)
         rng = np.random.default_rng(seed)
         shuffled = flat.copy()
         rng.shuffle(shuffled)
@@ -170,7 +204,13 @@ def _build_patch_mask(tam_map: np.ndarray, strategy: str,
 def _apply_patch_mask_to_image(image, patch_mask, image_grid_thw,
                                 gray_value: int = 128):
     """Resize image to processor target size, gray out 2×2 super-patches per
-    vision_shape mask entry. Returns PIL.Image."""
+    vision_shape mask entry. Returns PIL.Image.
+
+    Per GPT static-review on 3b290eb (Issue 9):
+      - assert pre/post grid consistency (Qwen2.5-VL merge_size=2 → pre = 2×post)
+      - explicit `image.convert("RGB")` so RGBA / grayscale inputs don't have
+        their alpha / single channel touched by `arr[...] = 128`.
+    """
     from PIL import Image
 
     # image_grid_thw = [1, h_pre_merge, w_pre_merge] (pre-2x2-merge patch count)
@@ -178,13 +218,17 @@ def _apply_patch_mask_to_image(image, patch_mask, image_grid_thw,
     # cover 28x28 pixels each.
     H_pre = image_grid_thw[1]
     W_pre = image_grid_thw[2]
+    Hp, Wp = patch_mask.shape  # vision_shape (post 2x2 merge)
+    assert H_pre == Hp * 2 and W_pre == Wp * 2, (
+        f"grid mismatch: pre=({H_pre},{W_pre}), post=({Hp},{Wp}) — "
+        f"Qwen2.5-VL merge_size=2 requires pre = 2 × post on both dims"
+    )
     H_pix = H_pre * 14
     W_pix = W_pre * 14
 
-    img_resized = image.resize((W_pix, H_pix))
+    img_resized = image.convert("RGB").resize((W_pix, H_pix))
     arr = np.array(img_resized).copy()
 
-    Hp, Wp = patch_mask.shape  # vision_shape (post 2x2 merge)
     patch_pixel = 28           # 2 * 14
     for r in range(Hp):
         for c in range(Wp):
@@ -495,7 +539,10 @@ def process_one_sample(rec, image, processor, model, args, image_root) -> list[d
         per_target_lp: list = []
         for t in target_idxs:
             tam_map = tblock["tam_maps"][t]
-            patch_mask = _build_patch_mask(tam_map, strategy, target_frac=0.2)
+            patch_mask = _build_patch_mask(
+                tam_map, strategy, target_frac=0.2,
+                sample_id=rec["id"], token_idx=t,
+            )
             masked_image = _apply_patch_mask_to_image(
                 image, patch_mask, image_grid_thw, gray_value=128,
             )
@@ -543,7 +590,7 @@ def process_one_sample(rec, image, processor, model, args, image_root) -> list[d
 
                 "response_source": "teacher_greedy",
                 "teacher_ckpt": args.teacher,
-                "tam_preproc_version": "v0.1.3-step2",
+                "tam_preproc_version": "v0.1.4-step2",
                 "code_commit_run": os.environ.get("MLLMOPD_CODE_COMMIT", "unknown"),
 
                 "response_hash": response_hash,
