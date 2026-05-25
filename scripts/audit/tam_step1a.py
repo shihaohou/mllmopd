@@ -251,6 +251,24 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
               file=sys.stderr)
     dt_blank = time.time() - t4
 
+    # v0.1.2 OOM fix: eager attention + long CoT (ChartQA / MathVerse) blows
+    # GPU memory across samples because outputs.hidden_states +
+    # outputs.attentions hold large tensor refs. Drop those AFTER extraction;
+    # outer loop also calls empty_cache between samples.
+    try:
+        outputs.hidden_states = None    # type: ignore[attr-defined]
+        outputs.attentions    = None    # type: ignore[attr-defined]
+        outputs.scores        = None    # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    del logit_list, scores_trimmed
+    try:
+        del blank_outputs, blank_inputs, blank_kwargs, blank_input_ids, blank_attn_mask
+    except NameError:
+        pass
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     vd = [(lf - lb) if (lf is not None and lb is not None) else None
           for lf, lb in zip(lp_full, lp_blank)]
 
@@ -623,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f">>> loading teacher: {args.teacher}", file=sys.stderr)
         t_proc, t_model = _build_model(args.teacher)
         teacher_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        import gc
+        import torch
         with teacher_cache_path.open("w") as tcf:
             for k, rec in enumerate(subset):
                 print(f"--- [{k+1}/{len(subset)}] teacher pass on {rec['id']} "
@@ -637,6 +657,16 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as e:  # noqa: BLE001
                     print(f"!! teacher pass failed on {rec['id']}: {e!r}",
                           file=sys.stderr)
+                finally:
+                    # v0.1.2 OOM fix: eager attn + long CoT leaks otherwise.
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        mb_alloc = torch.cuda.memory_allocated() / 1024**2
+                        mb_resv  = torch.cuda.memory_reserved() / 1024**2
+                        print(f"    [cuda] alloc={mb_alloc:.0f} MB  "
+                              f"reserved={mb_resv:.0f} MB", file=sys.stderr)
         # Free teacher GPU memory before student loads
         try:
             import torch
@@ -653,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     # --- Pass 2: student per-ckpt ---
     out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     total_rows = 0
+    import gc as _gc
+    import torch as _torch
     with out_jsonl.open("w") as fout:
         for student_name, student_path in students:
             print(f"\n>>> loading student {student_name} ← {student_path}",
@@ -668,7 +700,6 @@ def main(argv: list[str] | None = None) -> int:
                         s_proc, s_model, rec, image,
                         tcache["response_ids"], args,
                     )
-                    # Re-load image_path (full version) to record image_sha256
                     image_path_local = Path(rec["image"])
                     if not image_path_local.is_absolute():
                         image_path_local = (image_root / image_path_local).resolve()
@@ -683,10 +714,14 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as e:  # noqa: BLE001
                     print(f"!! row failed on {student_name}/{rec['id']}: {e!r}",
                           file=sys.stderr)
+                finally:
+                    if _torch.cuda.is_available():
+                        _torch.cuda.empty_cache()
+                    _gc.collect()
             try:
-                import torch
                 del s_model
-                torch.cuda.empty_cache()
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
             except Exception:  # noqa: BLE001
                 pass
 
