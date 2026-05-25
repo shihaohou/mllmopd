@@ -170,7 +170,11 @@ def _build_model(model_id: str):
 
     common = dict(
         torch_dtype=torch.bfloat16,
-        device_map="auto",
+        # v0.1.2 fix: force single-GPU. device_map="auto" was spreading
+        # layers across all visible H800s unevenly, OOM'ing one card while
+        # the other 7 sat idle. 7B + 3B easily fit on one H800 (140 GB).
+        # Honors CUDA_VISIBLE_DEVICES (device 0 == first visible GPU).
+        device_map={"": 0},
         trust_remote_code=True,
     )
     attn_impl = os.environ.get("MLLMOPD_ATTN_IMPL", "eager")
