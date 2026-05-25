@@ -98,6 +98,12 @@ def _gate_one_row(row: dict, K: float, rho: float, tau: float) -> dict:
         return {"records": [], "skip_reason": "missing_categories"}
 
     # Decode subset maps + look up categories at the subset positions.
+    tokens_all = row.get("tokens") or []
+    tam_mass20_all = row.get("tam_mass_top20") or []
+    tam_entropy_all = row.get("tam_entropy_norm") or []
+    vd_all = row.get("vd") or []
+    adv_all = row.get("adv") or []
+
     maps = []
     cats = []
     quads = []
@@ -117,6 +123,7 @@ def _gate_one_row(row: dict, K: float, rho: float, tau: float) -> dict:
         return {"records": [], "skip_reason": "all_subset_decode_failed"}
 
     sample_id = row["id"]
+    benchmark = row.get("benchmark")
     student_ckpt = row.get("student_ckpt") or "unknown"
 
     cfg = GateConfig(K=K, rho=rho, tau=tau, mode="main")
@@ -128,13 +135,20 @@ def _gate_one_row(row: dict, K: float, rho: float, tau: float) -> dict:
     )):
         records.append({
             "sample_id":   sample_id,
+            "benchmark":   benchmark,
             "student_ckpt": student_ckpt,
             "token_idx":   ti,
+            "token":       tokens_all[ti] if ti < len(tokens_all) else None,
             "category":    c,
             "quad":        q if isinstance(q, int) else None,
+            "vd":          vd_all[ti] if ti < len(vd_all) else None,
+            "adv":         adv_all[ti] if ti < len(adv_all) else None,
+            "tam_mass_top20":   tam_mass20_all[ti] if ti < len(tam_mass20_all) else None,
+            "tam_entropy_norm": tam_entropy_all[ti] if ti < len(tam_entropy_all) else None,
             "weight":      float(w_t),
             "gate_fire":   int(g),
             "coverage":    None if math.isnan(cov) else float(cov),
+            "tau":         tau,
         })
     return {"records": records,
             "E_x_size": info["E_x_size"],
@@ -194,21 +208,36 @@ def _suggest_alpha(gate_fire_rate: float, target_mean_w: float) -> float | None:
 
 
 def _tau_sweep(rows: list[dict], K: float, rho: float,
-               tau_values: list[float], cfg_alpha: float) -> dict:
-    """Run gate across multiple τ, report gate-fire rate at each."""
+               tau_values: list[float], cfg_alpha: float,
+               dump_records_path: Path | None = None) -> dict:
+    """Run gate across multiple τ, report gate-fire rate at each.
+
+    If `dump_records_path` is given, emit per-token records JSONL (one row per
+    (sample, token, τ)) for downstream cell audits."""
     out: dict[float, dict] = {}
-    for tau in tau_values:
-        records: list[dict] = []
-        n_skip = Counter()
-        for row in rows:
-            res = _gate_one_row(row, K=K, rho=rho, tau=tau)
-            if res.get("skip_reason"):
-                n_skip[res["skip_reason"]] += 1
-                continue
-            records.extend(res["records"])
-        agg = _aggregate(records, GateConfig(K=K, rho=rho, tau=tau, alpha=cfg_alpha))
-        agg["n_skipped"] = dict(n_skip)
-        out[tau] = agg
+    fdump = None
+    if dump_records_path is not None:
+        dump_records_path.parent.mkdir(parents=True, exist_ok=True)
+        fdump = dump_records_path.open("w")
+    try:
+        for tau in tau_values:
+            records: list[dict] = []
+            n_skip = Counter()
+            for row in rows:
+                res = _gate_one_row(row, K=K, rho=rho, tau=tau)
+                if res.get("skip_reason"):
+                    n_skip[res["skip_reason"]] += 1
+                    continue
+                records.extend(res["records"])
+            if fdump is not None:
+                for r in records:
+                    fdump.write(json.dumps(r, ensure_ascii=False) + "\n")
+            agg = _aggregate(records, GateConfig(K=K, rho=rho, tau=tau, alpha=cfg_alpha))
+            agg["n_skipped"] = dict(n_skip)
+            out[tau] = agg
+    finally:
+        if fdump is not None:
+            fdump.close()
     return out
 
 
@@ -228,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="α calibration target — pick α s.t. mean(w_t)≈this")
     ap.add_argument("--target-gate-fire-rate", type=float, default=0.15,
                     help="τ recommendation target")
+    ap.add_argument("--dump-records", type=Path, default=None,
+                    help="If set, emit per-(sample,token,τ) records JSONL "
+                         "for downstream cell audits (proper_noun|q3 etc.). "
+                         "Includes token text + benchmark + vd/adv + tam scalars.")
     args = ap.parse_args(argv)
 
     tau_values = sorted(float(x) for x in args.tau_sweep.split(","))
@@ -238,7 +271,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f">>> τ sweep over {tau_values}, K={args.K}, ρ={args.rho}",
           file=sys.stderr)
     sweep = _tau_sweep(rows, K=args.K, rho=args.rho,
-                        tau_values=tau_values, cfg_alpha=args.alpha)
+                        tau_values=tau_values, cfg_alpha=args.alpha,
+                        dump_records_path=args.dump_records)
 
     # Build recommendation
     rec_tau = None
