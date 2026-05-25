@@ -167,22 +167,37 @@ def flatten_tokens(rows: list[dict]) -> list[dict]:
 # Statistics helpers (stdlib-only — no scipy / numpy required)
 # ============================================================================
 def _pearson(xs: list, ys: list) -> float | None:
-    """Pearson r over paired non-None values; None if < 3 pairs or zero variance."""
-    pairs = [(x, y) for x, y in zip(xs, ys)
-             if x is not None and y is not None
-             and not (isinstance(x, float) and math.isnan(x))
-             and not (isinstance(y, float) and math.isnan(y))]
-    if len(pairs) < 3:
+    """Pearson r over paired non-None values; None if < 3 pairs or zero variance.
+    Single-pass via sufficient statistics — bootstrap_n × this is the hot path."""
+    n = 0
+    sx = 0.0
+    sy = 0.0
+    sxx = 0.0
+    syy = 0.0
+    sxy = 0.0
+    for x, y in zip(xs, ys):
+        if x is None or y is None:
+            continue
+        if isinstance(x, float) and math.isnan(x):
+            continue
+        if isinstance(y, float) and math.isnan(y):
+            continue
+        n += 1
+        sx += x
+        sy += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    if n < 3:
         return None
-    n = len(pairs)
-    mx = sum(p[0] for p in pairs) / n
-    my = sum(p[1] for p in pairs) / n
-    num = sum((p[0] - mx) * (p[1] - my) for p in pairs)
-    dx = sum((p[0] - mx) ** 2 for p in pairs)
-    dy = sum((p[1] - my) ** 2 for p in pairs)
-    if dx <= 0 or dy <= 0:
+    mx = sx / n
+    my = sy / n
+    cov = sxy / n - mx * my
+    vx = sxx / n - mx * mx
+    vy = syy / n - my * my
+    if vx <= 0 or vy <= 0:
         return None
-    return num / (math.sqrt(dx) * math.sqrt(dy))
+    return cov / (math.sqrt(vx) * math.sqrt(vy))
 
 
 def _roc_auc(scores: list, labels: list) -> float | None:
