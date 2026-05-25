@@ -86,9 +86,9 @@ from tam_sanity import (  # noqa: E402
 from tam_step1a import (  # noqa: E402
     _load_image_for_sample, _quad_int, _load_subset,
 )
-from _tam_core import TAM, tam_scalars, _tam_peak_meta  # noqa: E402
-# _tam_peak_meta lives in tam_sanity, not _tam_core — re-import
-from tam_sanity import _tam_peak_meta as _tam_peak  # noqa: E402,F811
+from _tam_core import TAM, tam_scalars  # noqa: E402
+# _tam_peak_meta is defined in tam_sanity, NOT in _tam_core.
+from tam_sanity import _tam_peak_meta as _tam_peak  # noqa: E402
 
 
 # ============================================================================
