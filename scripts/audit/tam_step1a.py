@@ -145,7 +145,21 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
               file=sys.stderr)
     _mem("after_prepare")
 
-    # --- Full-image generation ---
+    # --- Full-image generation (BARE: no output_hidden_states / scores / attentions) ---
+    # v0.1.3 fix: Qwen2.5-VL's generate returns FULL-sequence hidden states at
+    # each step (not incremental — `outputs.hidden_states[r][-1]` has shape
+    # `(1, prompt_len + r, 3584)`, not `(1, 1, 3584)`). For high-res images
+    # (HallusionBench/MathVista grid 40+×80+ → prompt_len ~1500), this
+    # quadratically accumulates to 80+ GB just for hidden_states, then
+    # `lm_head` doubles it via logit_list → OOM at 130+ GB.
+    #
+    # Also fixes a latent TAM bug: `_tam_core.TAM` line 306 assumes
+    # logit_list[r>0] is single-token (1, 1, V); with Qwen2.5-VL the cat
+    # across rounds was redundantly stacking prompt scores R+1 times.
+    #
+    # Recovery: a single teacher-forced forward on (prompt + response) gives
+    # all hidden_states / logits in one ~200 MB pass. Numerically identical
+    # to the generate-side scores (same greedy path, same teacher forcing).
     t0 = time.time()
     with torch.inference_mode():
         outputs = model.generate(
@@ -153,30 +167,10 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
             max_new_tokens=args.max_new_tokens,
             do_sample=False,
             pad_token_id=processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id,
-            output_hidden_states=True,
-            output_scores=True,
-            output_attentions=True,
             return_dict_in_generate=True,
         )
     dt_gen_full = time.time() - t0
     _mem("after_generate")
-    if _DBG:
-        try:
-            n_steps = len(outputs.hidden_states)
-            l0_shape = outputs.hidden_states[0][-1].shape   # last-layer prefill
-            l_last_shape = outputs.hidden_states[-1][-1].shape  # last step
-            n_layers = len(outputs.hidden_states[0])
-            print(f"    [mem:shape] hs steps={n_steps} layers={n_layers}  "
-                  f"hs[0][-1]={tuple(l0_shape)}  hs[-1][-1]={tuple(l_last_shape)}",
-                  file=sys.stderr)
-            attn0 = outputs.attentions[0] if outputs.attentions is not None else None
-            if attn0 is not None and attn0[-1] is not None:
-                print(f"    [mem:shape] attn[0][-1]={tuple(attn0[-1].shape)}",
-                      file=sys.stderr)
-            else:
-                print(f"    [mem:shape] attn = None (SDPA)", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"    [mem:shape] introspect failed: {e!r}", file=sys.stderr)
 
     sequences = outputs.sequences[0]
     response_ids = sequences[input_len:].cpu().tolist()
@@ -185,20 +179,72 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     if eos_id is not None and eos_id in response_ids:
         response_length = response_ids.index(eos_id) + 1
     response_ids = response_ids[:response_length]
+    # Drop generate's output dataclass (small here, but keeps allocator clean)
+    del outputs
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    scores_trimmed = tuple(outputs.scores[:response_length])
-    lp_full, teacher_entropy_full, teacher_top1_margin_full = _per_token_teacher_stats(
-        scores_trimmed, sequences, input_len,
-    )
-
-    # logit_list for TAM
+    # --- Phase 2: single teacher-forced forward for hidden_states + logits ---
+    response_tensor_dev = torch.tensor(response_ids, device=model.device).unsqueeze(0)
+    full_ids = torch.cat([inputs["input_ids"], response_tensor_dev], dim=1)
+    full_mask = torch.cat([
+        inputs["attention_mask"],
+        torch.ones_like(response_tensor_dev),
+    ], dim=1)
+    fwd_kwargs = dict(inputs)
+    fwd_kwargs["input_ids"] = full_ids
+    fwd_kwargs["attention_mask"] = full_mask
+    # pixel_values + image_grid_thw stay
     t1 = time.time()
-    logit_list = []
-    for r, feats in enumerate(outputs.hidden_states[:response_length]):
-        last_h = feats[-1]
-        with torch.inference_mode():
-            logit_list.append(model.lm_head(last_h))
+    with torch.inference_mode():
+        out_full = model(
+            **fwd_kwargs,
+            output_hidden_states=True,
+            output_attentions=True,
+        )
     dt_logit = time.time() - t1
+    _mem("after_forward")
+    if _DBG:
+        n_layers = len(out_full.hidden_states)
+        hs_last = out_full.hidden_states[-1]
+        print(f"    [mem:shape] fwd hs layers={n_layers}  hs[-1]={tuple(hs_last.shape)}",
+              file=sys.stderr)
+        attn0 = out_full.attentions[0] if out_full.attentions is not None else None
+        if attn0 is not None:
+            print(f"    [mem:shape] fwd attn[0]={tuple(attn0.shape)}", file=sys.stderr)
+        else:
+            print(f"    [mem:shape] fwd attn = None (SDPA)", file=sys.stderr)
+
+    # Per-token teacher stats from teacher-forced logits.
+    # Predictor for response_ids[t] sits at index input_len + t - 1.
+    full_logits_2d = out_full.logits[0]  # (T_full, V)
+    T_full = full_logits_2d.shape[0]
+    lp_full: list[float] = []
+    teacher_entropy_full: list[float] = []
+    teacher_top1_margin_full: list[float] = []
+    for t in range(response_length):
+        pred_idx = input_len + t - 1
+        row = full_logits_2d[pred_idx]
+        log_probs = torch.log_softmax(row, dim=-1)
+        probs = torch.softmax(row.float(), dim=-1)
+        top2 = torch.topk(probs, 2)
+        lp_full.append(float(log_probs[response_ids[t]]))
+        teacher_entropy_full.append(float(-(probs * torch.log(probs + 1e-12)).sum()))
+        teacher_top1_margin_full.append(float(top2.values[0] - top2.values[1]))
+
+    # Build logit_list as VIEWS into full_logits with EXPECTED TAM shape:
+    #   logit_list[0]  : (1, prompt_len, V)   — all prompt positions
+    #   logit_list[r>0]: (1, 1, V)            — single new token
+    # This matches the contract in _tam_core.TAM (line ~305) where
+    # `cat([logit_list[r][0, :, cls_id] for r in range(round_idx+1)])` should
+    # produce a length-(prompt_len + R) vector aligned to the tokens list.
+    full_logits_3d = full_logits_2d.unsqueeze(0)  # (1, T_full, V) — view
+    logit_list = []
+    for r in range(response_length):
+        if r == 0:
+            logit_list.append(full_logits_3d[:, :input_len, :])
+        else:
+            logit_list.append(full_logits_3d[:, input_len + r - 1: input_len + r, :])
     _mem("after_lm_head")
     if _DBG and logit_list:
         print(f"    [mem:shape] logit_list[0]={tuple(logit_list[0].shape)}  "
@@ -239,9 +285,33 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     img_start_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][0]) if QWEN_VL_SPECIAL_IDS["img_id"][0] in input_ids_full else -1
     img_end_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][1]) if QWEN_VL_SPECIAL_IDS["img_id"][1] in input_ids_full else -1
     t3 = time.time()
-    if img_start_idx_full >= 0 and img_end_idx_full >= 0 and outputs.attentions is not None:
+    # v0.1.3: source attentions from the teacher-forced forward instead of
+    # generate. Under SDPA they are None → fallback to zeros (same as before).
+    # Under eager: out_full.attentions[layer] is (1, heads, T_full, T_full).
+    # Synthesize the OLD per-step structure expected by _attention_baseline:
+    # `attn_per_step[t][layer]` should be the attn ROW used to predict
+    # response_ids[t], i.e. position (input_len + t - 1) attending to
+    # positions [0, input_len + t]. NOTE: under eager + high-res images
+    # (prompt_len > 1000) the per-layer (T, T) tensor itself can be
+    # 100+ GB — eager baseline needs further per-layer streaming to be
+    # OOM-safe. SDPA path is unaffected.
+    fwd_attns = out_full.attentions if hasattr(out_full, "attentions") else None
+    sdpa_drop = (
+        fwd_attns is None
+        or len(fwd_attns) == 0
+        or fwd_attns[0] is None
+    )
+    if img_start_idx_full >= 0 and img_end_idx_full >= 0 and not sdpa_drop:
+        attn_per_step = []
+        for t in range(response_length):
+            pos = input_len + t - 1
+            layer_tuple = tuple(
+                layer_attn[:, :, pos: pos + 1, : pos + 1]
+                for layer_attn in fwd_attns
+            )
+            attn_per_step.append(layer_tuple)
         attn_maps, attn_scalars, attn_peak, attn_failure = _attention_baseline(
-            outputs.attentions[:response_length], response_length, input_len,
+            attn_per_step, response_length, input_len,
             img_start_idx_full, img_end_idx_full, vision_shape,
         )
     else:
@@ -294,25 +364,22 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     dt_blank = time.time() - t4
     _mem("after_blank")
 
-    # v0.1.2 OOM fix: eager attention + long CoT (ChartQA / MathVerse) blows
-    # GPU memory across samples because outputs.hidden_states +
-    # outputs.attentions hold large tensor refs. Drop those AFTER extraction;
-    # outer loop also calls empty_cache between samples.
+    # v0.1.3 cleanup: out_full holds the heavy hidden_states / logits + (under
+    # eager) full attention matrices. Drop all device-side refs so empty_cache
+    # can return memory before the next sample.
+    del logit_list           # list of views into full_logits_3d
+    del full_logits_3d
+    del full_logits_2d
     try:
-        outputs.hidden_states = None    # type: ignore[attr-defined]
-        outputs.attentions    = None    # type: ignore[attr-defined]
-        outputs.scores        = None    # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
-        pass
-    del logit_list, scores_trimmed
-    try:
-        del blank_outputs, blank_inputs, blank_kwargs, blank_input_ids, blank_attn_mask
+        del out_full
     except NameError:
         pass
-    # Drop the GenerateOutput dataclass itself — it can still hold refs via
-    # past_key_values / cache attributes that the field-nulling above missed.
     try:
-        del outputs
+        del blank_outputs, blank_inputs, blank_kwargs, blank_input_ids, blank_attn_mask, response_tensor
+    except NameError:
+        pass
+    try:
+        del response_tensor_dev, full_ids, full_mask, fwd_kwargs
     except NameError:
         pass
     if torch.cuda.is_available():
@@ -525,7 +592,7 @@ def _build_row(rec, image, image_path, tcache, student_ckpt, student_block,
         "tokenizer_name_or_path":  args.teacher,
         "tokenizer_vocab_hash":    _tokenizer_vocab_hash(processor),
         "processor_name_or_path":  args.teacher,
-        "tam_preproc_version":     "v0.1.2",
+        "tam_preproc_version":     "v0.1.3",
         "code_commit_run":         os.environ.get("MLLMOPD_CODE_COMMIT", "unknown"),
         "code_commit_analyzed":    None,
         "pos_tagger":              "spacy/en_core_web_sm" if _SPACY_AVAILABLE else "none",
