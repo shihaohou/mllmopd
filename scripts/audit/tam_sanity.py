@@ -143,6 +143,15 @@ ANSWER_COMMIT_RE = re.compile(r"^\s*(Yes|No|yes|no)[,.]?\s*$")
 # Model loading (parity with run_audit_pass.py:_build_model)
 # ============================================================================
 def _build_model(model_id: str):
+    """v0.1.2: honor MLLMOPD_ATTN_IMPL env. Default is "eager" for tam_sanity
+    because FA2 and SDPA both silently return None for outputs.attentions
+    when output_attentions=True is requested, which breaks the v0.1.2
+    attention baseline. eager is ~3-5× slower than FA2 but Step 0 only
+    runs 4 probes, so the cost is ~5-10 min instead of ~1-2 min.
+
+    Override with `MLLMOPD_ATTN_IMPL=flash_attention_2` (or `sdpa`) if you
+    do not need the attention baseline (e.g. you are only checking
+    TAM scalars, not the baseline)."""
     import torch
     from transformers import AutoProcessor
 
@@ -164,16 +173,26 @@ def _build_model(model_id: str):
         device_map="auto",
         trust_remote_code=True,
     )
+    attn_impl = os.environ.get("MLLMOPD_ATTN_IMPL", "eager")
+    print(f">>> attn_implementation = {attn_impl} (override via MLLMOPD_ATTN_IMPL)",
+          file=sys.stderr)
     try:
         model = ModelCls.from_pretrained(
-            model_id, attn_implementation="flash_attention_2", **common
+            model_id, attn_implementation=attn_impl, **common
         )
     except (ImportError, ValueError, RuntimeError) as e:
-        print(f">>> flash_attention_2 unavailable ({e!s:.80}); falling back to sdpa",
-              file=sys.stderr)
-        model = ModelCls.from_pretrained(
-            model_id, attn_implementation="sdpa", **common
-        )
+        # Only fall back if user did NOT explicitly choose eager (eager is
+        # what enables the attention baseline; if it fails we want a hard
+        # error, not silent degradation).
+        if attn_impl == "eager" and os.environ.get("MLLMOPD_ATTN_IMPL") is None:
+            print(f">>> eager unavailable ({e!s:.80}); falling back to sdpa "
+                  f"— attention baseline will be invalid",
+                  file=sys.stderr)
+            model = ModelCls.from_pretrained(
+                model_id, attn_implementation="sdpa", **common
+            )
+        else:
+            raise
     model.eval()
     return processor, model
 
@@ -527,6 +546,22 @@ def _attention_baseline(
             f"image_patch_count_mismatch: expected_n={expected_n} "
             f"vision_shape={vision_shape} (Hp*Wp={n_patches})"
         )
+
+    # Early-fail check: if attentions are None (FA2 / SDPA silently dropped
+    # them), abort cleanly with a clear remediation message.
+    if (len(attentions_tuple) > 0
+            and attentions_tuple[0] is not None
+            and len(attentions_tuple[0]) > 0
+            and attentions_tuple[0][-1] is None):
+        failure = (
+            "outputs.attentions[t][-1] is None — current attn_implementation "
+            "does not support output_attentions=True. Set MLLMOPD_ATTN_IMPL=eager "
+            "and re-run; FA2 / SDPA silently drop attention tensors."
+        )
+        zero_maps = [np.zeros(vision_shape, dtype=np.float32)] * response_length
+        zero_scalars = [tam_scalars(m) for m in zero_maps]
+        zero_peaks = [_tam_peak_meta(m) for m in zero_maps]
+        return zero_maps, zero_scalars, zero_peaks, failure
 
     for t in range(response_length):
         try:

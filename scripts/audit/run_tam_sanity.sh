@@ -28,6 +28,11 @@
 #   SYSTEM_PROMPT_MODE   — mmr1|empty (default: mmr1; empty for plain Qwen2.5-VL)
 #   CUDA_VISIBLE_DEVICES — which GPU (default: 0)
 #   LIMIT                — limit n probes for fast debug (default: 0 = all)
+#   MLLMOPD_ATTN_IMPL    — eager|sdpa|flash_attention_2 (default: eager).
+#                          v0.1.2 attention baseline REQUIRES eager because
+#                          FA2/SDPA silently drop output_attentions tensors.
+#                          eager is ~3-5x slower; for 4 probes the diff is
+#                          ~1-2 min vs ~5-10 min on H800 — acceptable.
 #
 # Decision criterion: see scripts/audit/tam_sanity.py module docstring.
 #
