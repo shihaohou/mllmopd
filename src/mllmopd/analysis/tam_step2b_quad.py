@@ -150,19 +150,36 @@ def _compute_paired(deltas_top_random: list, deltas_top_scrambled: list) -> dict
     return out
 
 
-def _token_paired_deltas(token_strats: dict) -> tuple[float | None, float | None]:
-    """For one Step 2 token (dict of strategy → row), compute
-    (top − mean_random, top − mean_scrambled)."""
+def _token_paired_deltas(token_strats: dict) -> tuple[float | None, float | None, float | None]:
+    """For one Step 2 token (dict of strategy → row), compute:
+      (top − mean_random, top − mean_scrambled, bottom − top).
+
+    bottom − top is the "smoking-gun" test for TAM-inverted-on-q3: if it's
+    LARGE POSITIVE on quad==3, it means masking the LEAST-TAM region hurts
+    MORE than masking the TOP-TAM region — TAM is pointing at the wrong
+    place for q3."""
     top = token_strats.get("top_tam_20pct", {}).get("logp_drop")
+    bot = token_strats.get("bottom_tam_20pct", {}).get("logp_drop")
     if top is None:
-        return None, None
+        return None, None, None
     rands = [token_strats.get(s, {}).get("logp_drop") for s in RANDOM_STRATEGIES]
     rands = [v for v in rands if v is not None]
     scrs  = [token_strats.get(s, {}).get("logp_drop") for s in SCRAMBLED_STRATEGIES]
     scrs  = [v for v in scrs if v is not None]
     d_random = top - (sum(rands) / len(rands)) if rands else None
     d_scram  = top - (sum(scrs) / len(scrs)) if scrs else None
-    return d_random, d_scram
+    d_bot_top = bot - top if bot is not None else None
+    return d_random, d_scram, d_bot_top
+
+
+# Raw strategies whose per-(ckpt × quad) mean drops we report verbatim.
+RAW_STRATEGIES_TO_REPORT = [
+    "top_tam_20pct",
+    "random_20pct_seed_42", "random_20pct_seed_43", "random_20pct_seed_44",
+    "scrambled_tam_seed_142", "scrambled_tam_seed_143", "scrambled_tam_seed_144",
+    "keep_top_tam_20pct",
+    "bottom_tam_20pct",
+]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,16 +199,16 @@ def main(argv: list[str] | None = None) -> int:
     all_ckpts = sorted({k[1] for k in step1a_lookup.keys() if k[1]})
     print(f">>> step1a ckpts: {all_ckpts}", file=sys.stderr)
 
-    # Per (ckpt, quad): collect paired Δ
-    # Key: (ckpt, quad_int)
-    deltas_random: dict = defaultdict(list)   # → list of Δ(top − random)
-    deltas_scrambled: dict = defaultdict(list)
+    # Per (ckpt, quad): collect paired Δ AND raw drops per strategy
+    deltas_random: dict    = defaultdict(list)   # (ckpt, q) → [Δ(top − rand)]
+    deltas_scrambled: dict = defaultdict(list)   # (ckpt, q) → [Δ(top − scram)]
+    deltas_bot_top: dict   = defaultdict(list)   # (ckpt, q) → [Δ(bottom − top)]  ← smoking-gun for TAM-inverted-on-q3
+    raw_drops_per_strat: dict = defaultdict(lambda: defaultdict(list))  # (ckpt, q) → strat → [drops]
     n_resolved = 0
     n_unresolved = 0
-    by_category_per_quad: dict = defaultdict(lambda: defaultdict(list))  # quad → cat → Δ_random
+    by_category_per_quad: dict = defaultdict(lambda: defaultdict(list))
 
     for uid, by_strat in step2_by_uid.items():
-        # Peek any row to get token meta
         any_row = next(iter(by_strat.values()))
         token_repr = {
             "id":            any_row["id"],
@@ -199,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
             "response_hash": any_row.get("response_hash"),
             "token_category": any_row.get("token_category"),
         }
-        d_random, d_scram = _token_paired_deltas(by_strat)
+        d_random, d_scram, d_bot_top = _token_paired_deltas(by_strat)
         if d_random is None and d_scram is None:
             continue
         per_ckpt_quad = _resolve_quad_per_ckpt(token_repr, step1a_lookup, all_ckpts)
@@ -215,6 +232,13 @@ def main(argv: list[str] | None = None) -> int:
                 by_category_per_quad[(ckpt, q)][token_repr["token_category"] or "other"].append(d_random)
             if d_scram is not None:
                 deltas_scrambled[(ckpt, q)].append(d_scram)
+            if d_bot_top is not None:
+                deltas_bot_top[(ckpt, q)].append(d_bot_top)
+            # Raw drops per strategy
+            for strat in RAW_STRATEGIES_TO_REPORT:
+                drop = by_strat.get(strat, {}).get("logp_drop")
+                if drop is not None:
+                    raw_drops_per_strat[(ckpt, q)][strat].append(drop)
     print(f">>> resolved {n_resolved} tokens to step1a quad; "
           f"unresolved {n_unresolved}", file=sys.stderr)
 
@@ -225,8 +249,31 @@ def main(argv: list[str] | None = None) -> int:
         for q in (0, 1, 2, 3):
             d_r = deltas_random.get((ckpt, q), [])
             d_s = deltas_scrambled.get((ckpt, q), [])
+            d_bt = deltas_bot_top.get((ckpt, q), [])
             block = _compute_paired(d_r, d_s)
             block["quad_label"] = QUAD_LABEL[q]
+            # Raw mean drops per strategy
+            raw = {}
+            for strat, vals in raw_drops_per_strat.get((ckpt, q), {}).items():
+                if vals:
+                    raw[strat] = {"n": len(vals), "mean": sum(vals) / len(vals)}
+            # Derived: random_avg & scrambled_avg (mean across seeds)
+            r_vals = [v for s in RANDOM_STRATEGIES
+                      for v in raw_drops_per_strat.get((ckpt, q), {}).get(s, [])]
+            s_vals = [v for s in SCRAMBLED_STRATEGIES
+                      for v in raw_drops_per_strat.get((ckpt, q), {}).get(s, [])]
+            raw["random_avg"]    = {"n": len(r_vals), "mean": (sum(r_vals)/len(r_vals)) if r_vals else None}
+            raw["scrambled_avg"] = {"n": len(s_vals), "mean": (sum(s_vals)/len(s_vals)) if s_vals else None}
+            block["raw_strategy_drops"] = raw
+            # Bottom-vs-top paired Δ (smoking gun for TAM-inverted-on-q3)
+            block["bottom_minus_top"] = _dist(d_bt)
+            if d_bt:
+                m = sum(d_bt) / len(d_bt)
+                block["bottom_minus_top"]["bootstrap_ci"] = _bootstrap_ci_mean(d_bt)
+                block["bottom_minus_top"]["wilcoxon"]    = _wilcoxon_signed_rank(d_bt)
+                block["bottom_minus_top"]["frac_positive"] = (
+                    sum(1 for x in d_bt if x > 0) / len(d_bt)
+                )
             # Per-category breakdown within this quad
             cat_block = {}
             for cat, vals in by_category_per_quad.get((ckpt, q), {}).items():
@@ -259,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         lines.append("")
         for ckpt in all_ckpts:
             lines.append(f"## {ckpt}")
+            # Table 1: paired Δ table (existing)
             lines.append(f"  {'quad':<32} {'n':>5}  "
                          f"{'mean_Δ_random':>13}  {'CI_low':>8} {'CI_hi':>8}  "
                          f"{'frac+':>6}  {'Wilcox p':>10}  "
@@ -283,6 +331,57 @@ def main(argv: list[str] | None = None) -> int:
                              f"{mr:>+13.4f}  {lo:>+8.4f} {hi:>+8.4f}  "
                              f"{fp:>+6.3f}  {p:>10.2e}  {ms:>+13.4f}")
             lines.append("")
+
+            # Table 2: raw mean drops per strategy per quad (NEW)
+            lines.append(f"  Raw mean logp_drop by strategy:")
+            lines.append(f"  {'quad':<32} {'n':>5}  "
+                         f"{'top_tam':>8} {'random':>8} {'scram':>8} "
+                         f"{'keep_top':>9} {'bot_tam':>8}")
+            for q in (0, 1, 2, 3):
+                block = report["per_ckpt_per_quad"][ckpt][str(q)]
+                n   = block.get("n_tokens", 0)
+                if n == 0:
+                    continue
+                raw = block.get("raw_strategy_drops") or {}
+                def _g(s):
+                    v = raw.get(s, {}).get("mean")
+                    return v if v is not None else float("nan")
+                top    = _g("top_tam_20pct")
+                rand   = _g("random_avg")
+                scram  = _g("scrambled_avg")
+                keept  = _g("keep_top_tam_20pct")
+                bot    = _g("bottom_tam_20pct")
+                label  = QUAD_LABEL[q]
+                lines.append(f"  q{q}={label:<28} {n:>5d}  "
+                             f"{top:>+8.3f} {rand:>+8.3f} {scram:>+8.3f} "
+                             f"{keept:>+9.3f} {bot:>+8.3f}")
+            lines.append("")
+
+            # Table 3: bottom_tam − top_tam paired Δ (smoking-gun for TAM-inverted-on-q)
+            lines.append(f"  Paired Δ(bottom_tam − top_tam) — "
+                         f"Δ > 0 means low-TAM region IS the evidence (TAM inverted):")
+            lines.append(f"  {'quad':<32} {'n':>5}  "
+                         f"{'mean_Δ':>+8} {'CI_low':>8} {'CI_hi':>8} "
+                         f"{'frac+':>6}  {'Wilcox p':>10}")
+            for q in (0, 1, 2, 3):
+                block = report["per_ckpt_per_quad"][ckpt][str(q)]
+                bt = block.get("bottom_minus_top") or {}
+                n = bt.get("n", 0)
+                if n == 0:
+                    continue
+                m = bt.get("mean", float("nan"))
+                ci = bt.get("bootstrap_ci") or {}
+                lo = ci.get("lo", float("nan"))
+                hi = ci.get("hi", float("nan"))
+                fp = bt.get("frac_positive", float("nan"))
+                wil = bt.get("wilcoxon") or {}
+                p = wil.get("p_two_sided", float("nan"))
+                label = QUAD_LABEL[q]
+                lines.append(f"  q{q}={label:<28} {n:>5d}  "
+                             f"{m:>+8.4f} {lo:>+8.4f} {hi:>+8.4f} "
+                             f"{fp:>+6.3f}  {p:>10.2e}")
+            lines.append("")
+
             # Per-category breakdown for quad==3 (visual_rejection)
             block3 = report["per_ckpt_per_quad"][ckpt]["3"]
             cats = block3.get("by_category") or {}
