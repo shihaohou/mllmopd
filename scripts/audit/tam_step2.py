@@ -99,6 +99,16 @@ MASK_STRATEGIES = [
     "random_20pct_seed_42",
     "random_20pct_seed_43",
     "random_20pct_seed_44",
+    # GPT round on `2f10687`: scrambled-TAM is the "near-mandatory" control.
+    # Same TAM value distribution, randomized positions. Operationally
+    # equivalent to random_20pct_seed_X (top-K of value-shuffled map ==
+    # uniform-random patch selection), but stored as a distinct condition
+    # to make the equivalence explicit in the paper: "TAM value
+    # distribution alone doesn't drive the effect; position assignment
+    # does."
+    "scrambled_tam_seed_142",
+    "scrambled_tam_seed_143",
+    "scrambled_tam_seed_144",
     "keep_top_tam_20pct",
     "bottom_tam_20pct",
 ]
@@ -129,6 +139,16 @@ def _build_patch_mask(tam_map: np.ndarray, strategy: str,
         rng = np.random.default_rng(seed)
         chosen = rng.choice(n_total, size=n_mask, replace=False)
         mask_flat[chosen] = True
+    elif strategy.startswith("scrambled_tam_seed_"):
+        # Shuffle TAM values across positions, then take top-K of the
+        # SHUFFLED map. Mathematically equivalent to random_20pct (uniform
+        # random patch selection) — but explicit as a transparency control.
+        seed = int(strategy.split("_")[-1])
+        rng = np.random.default_rng(seed)
+        shuffled = flat.copy()
+        rng.shuffle(shuffled)
+        perm_sort_idx = np.argsort(shuffled)
+        mask_flat[perm_sort_idx[-n_mask:]] = True
     else:
         raise ValueError(f"unknown strategy: {strategy}")
 
@@ -222,7 +242,13 @@ def teacher_pass_with_tam(processor, model, image, question, system_prompt,
             "input_ids_full": input_ids_full, "chat_template": chat,
         }
 
-    # --- Phase 2: single teacher-forced forward WITH hidden_states ---
+    # --- Phase 2: single teacher-forced forward (logits only) ---
+    # Step 2 does NOT need hidden_states. We use `out_full.logits` (already
+    # the lm_head projection) directly as `logit_list` for TAM. This is
+    # numerically identical to `model.lm_head(out_full.hidden_states[-1])`
+    # but skips an extra ~600 MB tensor allocation. (Step 1a kept hidden
+    # states because it ALSO needed eager-attention output and a separate
+    # blank-image forward; Step 2 has neither.)
     response_tensor = torch.tensor(response_ids, device=model.device).unsqueeze(0)
     full_ids = torch.cat([inputs["input_ids"], response_tensor], dim=1)
     full_mask = torch.cat([
@@ -235,7 +261,7 @@ def teacher_pass_with_tam(processor, model, image, question, system_prompt,
     with torch.inference_mode():
         out_full = model(
             **fwd_kwargs,
-            output_hidden_states=False,   # Step 2 doesn't need hidden_states
+            output_hidden_states=False,
             output_attentions=False,
         )
 

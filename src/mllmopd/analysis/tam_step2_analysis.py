@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -37,14 +38,91 @@ RANDOM_STRATEGIES = [
     "random_20pct_seed_43",
     "random_20pct_seed_44",
 ]
+SCRAMBLED_STRATEGIES = [
+    "scrambled_tam_seed_142",
+    "scrambled_tam_seed_143",
+    "scrambled_tam_seed_144",
+]
 NAMED_STRATEGIES = [
     "top_tam_20pct",
     "random_20pct_seed_42",
     "random_20pct_seed_43",
     "random_20pct_seed_44",
+    "scrambled_tam_seed_142",
+    "scrambled_tam_seed_143",
+    "scrambled_tam_seed_144",
     "keep_top_tam_20pct",
     "bottom_tam_20pct",
 ]
+
+
+def _wilcoxon_signed_rank(diffs: list) -> dict | None:
+    """One-sample Wilcoxon signed-rank for paired differences.
+    Returns {W_plus, z, p_two_sided, n_nonzero} or None.
+
+    Drops zero-differences (Wilcoxon convention), assigns ranks to |d|
+    with average for ties, uses normal approximation for p (valid for
+    n_nonzero ≥ ~20). For heavy-tail Δ distributions this is more robust
+    than the paired t-stat.
+    """
+    nz = [d for d in diffs if abs(d) > 1e-12]
+    n = len(nz)
+    if n < 5:
+        return None
+    # Sort by absolute value, keeping sign
+    sorted_pairs = sorted(((abs(d), 1 if d > 0 else -1) for d in nz),
+                          key=lambda x: x[0])
+    # Assign ranks (average for ties)
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and sorted_pairs[j + 1][0] == sorted_pairs[i][0]:
+            j += 1
+        avg_rank = (i + j + 2) / 2  # 1-indexed average
+        for k in range(i, j + 1):
+            ranks[k] = avg_rank
+        i = j + 1
+    W_plus = sum(ranks[k] for k in range(n) if sorted_pairs[k][1] > 0)
+    # Normal approximation under H0 (no continuity correction)
+    mean = n * (n + 1) / 4
+    var = n * (n + 1) * (2 * n + 1) / 24
+    if var <= 0:
+        return None
+    z = (W_plus - mean) / math.sqrt(var)
+    p_two = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+    return {
+        "W_plus": float(W_plus),
+        "z": float(z),
+        "p_two_sided": float(p_two),
+        "n_nonzero": n,
+        "n_total": len(diffs),
+    }
+
+
+def _bootstrap_ci_mean(diffs: list, n_resamples: int = 2000,
+                       alpha: float = 0.05, seed: int = 1729) -> dict | None:
+    """Bootstrap CI for mean of diffs. Heavy-tail-safe (no t-distribution
+    assumption). Returns {mean, lo, hi, n, n_resamples}."""
+    vals = [d for d in diffs if d is not None
+            and not (isinstance(d, float) and math.isnan(d))]
+    if len(vals) < 5:
+        return None
+    rng = random.Random(seed)
+    n = len(vals)
+    boots = []
+    for _ in range(n_resamples):
+        sample = [rng.choice(vals) for _ in range(n)]
+        boots.append(sum(sample) / n)
+    boots.sort()
+    nb = len(boots)
+    return {
+        "mean": sum(boots) / nb,
+        "lo":   boots[int(nb * (alpha / 2))],
+        "hi":   boots[int(nb * (1 - alpha / 2))],
+        "n":    n,
+        "n_resamples": nb,
+    }
 
 
 def _dist(vs: list) -> dict:
@@ -157,24 +235,21 @@ def main(argv: list[str] | None = None) -> int:
                 if r["mask_strategy"] == strat and r.get("logp_drop") is not None]
         pooled[strat] = _dist(vals)
 
-    # Headline: paired delta = top_tam_20pct − mean(random_20pct seeds)
-    # Per token: average across 3 seeds → one "random" drop
+    # Headline A: paired delta = top_tam_20pct − mean(random_20pct seeds)
     paired_deltas = []
-    paired_top_vs_pooled_random = []
+    paired_top_vs_scrambled = []   # GPT round: spatial-structure-only control
     for uid, by_strat in by_uid.items():
         top = by_strat.get("top_tam_20pct", {}).get("logp_drop")
-        rands = []
-        for s in RANDOM_STRATEGIES:
-            v = by_strat.get(s, {}).get("logp_drop")
-            if v is not None:
-                rands.append(v)
-        if top is None or not rands:
-            continue
-        rand_mean = sum(rands) / len(rands)
-        paired_deltas.append(top - rand_mean)
+        rands = [by_strat.get(s, {}).get("logp_drop") for s in RANDOM_STRATEGIES]
+        rands = [v for v in rands if v is not None]
+        scrs  = [by_strat.get(s, {}).get("logp_drop") for s in SCRAMBLED_STRATEGIES]
+        scrs  = [v for v in scrs if v is not None]
+        if top is not None and rands:
+            paired_deltas.append(top - sum(rands) / len(rands))
+        if top is not None and scrs:
+            paired_top_vs_scrambled.append(top - sum(scrs) / len(scrs))
     headline_paired = _dist(paired_deltas)
     if paired_deltas:
-        # one-sample t-stat
         m = sum(paired_deltas) / len(paired_deltas)
         var = sum((x - m) ** 2 for x in paired_deltas) / max(1, len(paired_deltas) - 1)
         se = math.sqrt(var / len(paired_deltas)) if var > 0 else 0.0
@@ -182,6 +257,42 @@ def main(argv: list[str] | None = None) -> int:
         headline_paired["frac_positive"] = (
             sum(1 for x in paired_deltas if x > 0) / len(paired_deltas)
         )
+        headline_paired["wilcoxon"]    = _wilcoxon_signed_rank(paired_deltas)
+        headline_paired["bootstrap_ci"] = _bootstrap_ci_mean(paired_deltas)
+
+    # Headline B: paired delta = top_tam_20pct − mean(scrambled_tam_seeds)
+    # If TAM's spatial structure is causal (not just "20% area masked"),
+    # this Δ should be POSITIVE and large too. If TAM ≈ scrambled, the
+    # spatial structure claim fails.
+    headline_vs_scrambled = _dist(paired_top_vs_scrambled)
+    if paired_top_vs_scrambled:
+        m = sum(paired_top_vs_scrambled) / len(paired_top_vs_scrambled)
+        var = sum((x - m) ** 2 for x in paired_top_vs_scrambled) / max(1, len(paired_top_vs_scrambled) - 1)
+        se = math.sqrt(var / len(paired_top_vs_scrambled)) if var > 0 else 0.0
+        headline_vs_scrambled["paired_t_stat"] = (m / se) if se > 0 else None
+        headline_vs_scrambled["frac_positive"] = (
+            sum(1 for x in paired_top_vs_scrambled if x > 0)
+            / len(paired_top_vs_scrambled)
+        )
+        headline_vs_scrambled["wilcoxon"]    = _wilcoxon_signed_rank(paired_top_vs_scrambled)
+        headline_vs_scrambled["bootstrap_ci"] = _bootstrap_ci_mean(paired_top_vs_scrambled)
+
+    # Headline C: paired delta = random_20pct − scrambled_tam_20pct
+    # Should be ≈ 0 (both are uniform-random spatial masks). If non-zero,
+    # there's some hidden artifact in the masking pipeline.
+    paired_random_vs_scrambled = []
+    for uid, by_strat in by_uid.items():
+        rands = [by_strat.get(s, {}).get("logp_drop") for s in RANDOM_STRATEGIES]
+        rands = [v for v in rands if v is not None]
+        scrs  = [by_strat.get(s, {}).get("logp_drop") for s in SCRAMBLED_STRATEGIES]
+        scrs  = [v for v in scrs if v is not None]
+        if rands and scrs:
+            paired_random_vs_scrambled.append(
+                sum(rands) / len(rands) - sum(scrs) / len(scrs)
+            )
+    headline_sanity_scrambled = _dist(paired_random_vs_scrambled)
+    if paired_random_vs_scrambled:
+        headline_sanity_scrambled["bootstrap_ci"] = _bootstrap_ci_mean(paired_random_vs_scrambled)
 
     # Breakdowns
     by_category = _stratum_breakdown(by_uid, "token_category")
@@ -191,7 +302,12 @@ def main(argv: list[str] | None = None) -> int:
         "n_rows":            len(rows),
         "n_unique_tokens":   n_tokens,
         "pooled_by_strategy": pooled,
-        "headline_top_minus_random": headline_paired,
+        # Headline A — old causal claim (top-TAM vs uniform-random)
+        "headline_top_minus_random":    headline_paired,
+        # Headline B — pure spatial-structure test (top-TAM vs scrambled-TAM)
+        "headline_top_minus_scrambled": headline_vs_scrambled,
+        # Sanity — random vs scrambled-TAM should be ≈ 0 (both uniform random)
+        "headline_random_minus_scrambled_sanity": headline_sanity_scrambled,
         "by_token_category": by_category,
         "by_stratum":        by_stratum,
         "jsonl":             str(args.jsonl),
@@ -216,18 +332,49 @@ def main(argv: list[str] | None = None) -> int:
                          f"{d['mean']:>+8.4f} {d['p50']:>+8.4f} {d['p95']:>+8.4f}")
         lines.append("")
 
-        lines.append("## HEADLINE: paired Δ(top_tam_20pct − mean_random_20pct)")
-        h = headline_paired
-        if h.get("n", 0) > 0:
+        def _hbody(h: dict, name: str) -> None:
+            if h.get("n", 0) == 0:
+                return
             lines.append(f"  n_tokens = {h['n']}")
             lines.append(f"  mean Δ   = {h['mean']:+.4f}")
             lines.append(f"  p50 Δ    = {h['p50']:+.4f}")
             lines.append(f"  p95 Δ    = {h['p95']:+.4f}")
-            lines.append(f"  frac_positive (Δ > 0) = {h.get('frac_positive'):+.3f}")
+            lines.append(f"  frac_positive (Δ > 0) = {h.get('frac_positive', float('nan')):+.3f}")
             lines.append(f"  paired t-stat = {h.get('paired_t_stat')!s}")
-            lines.append("")
-            lines.append("  Δ > 0 means top-TAM mask hurts MORE than random mask.")
-            lines.append("  Δ ≈ 0 means TAM region is NOT causally privileged → TAM = fancy CAM.")
+            wil = h.get("wilcoxon") or {}
+            if wil:
+                lines.append(f"  Wilcoxon signed-rank: z={wil.get('z'):+.3f}  "
+                             f"p≈{wil.get('p_two_sided'):.2e}  "
+                             f"n_nonzero={wil.get('n_nonzero')}")
+            ci = h.get("bootstrap_ci") or {}
+            if ci:
+                lines.append(f"  Bootstrap CI (95%, n_resamples={ci.get('n_resamples')}): "
+                             f"[{ci.get('lo'):+.4f}, {ci.get('hi'):+.4f}]  "
+                             f"mean_of_means={ci.get('mean'):+.4f}")
+
+        lines.append("## HEADLINE A: paired Δ(top_tam_20pct − mean_random_20pct)")
+        _hbody(headline_paired, "A")
+        lines.append("")
+        lines.append("  Δ > 0 means top-TAM mask hurts MORE than uniform random mask.")
+        lines.append("  This is the original Step 2 causal claim.")
+        lines.append("")
+
+        lines.append("## HEADLINE B: paired Δ(top_tam_20pct − mean_scrambled_tam_20pct)")
+        _hbody(headline_vs_scrambled, "B")
+        lines.append("")
+        lines.append("  Δ > 0 means TAM's SPATIAL STRUCTURE is causal, not just value distribution.")
+        lines.append("  If ≈ Headline A → confirms; if ≪ A → effect is value-distribution artifact.")
+        lines.append("")
+
+        lines.append("## SANITY: paired Δ(mean_random − mean_scrambled_tam)")
+        sn = headline_sanity_scrambled
+        if sn.get("n", 0) > 0:
+            lines.append(f"  n_tokens = {sn['n']}  mean Δ = {sn['mean']:+.4f}  "
+                         f"p50 = {sn['p50']:+.4f}")
+            ci = sn.get("bootstrap_ci") or {}
+            if ci:
+                lines.append(f"  Bootstrap 95% CI: [{ci.get('lo'):+.4f}, {ci.get('hi'):+.4f}]")
+            lines.append("  Should be ≈ 0 — both are uniform-random spatial masks.")
         lines.append("")
 
         lines.append("## By token_category")
