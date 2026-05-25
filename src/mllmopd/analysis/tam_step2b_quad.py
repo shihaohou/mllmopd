@@ -36,13 +36,15 @@ from pathlib import Path
 # Reuse helpers from the existing analyzer.
 try:
     from mllmopd.analysis.tam_step2_analysis import (
-        _wilcoxon_signed_rank, _bootstrap_ci_mean, _dist,
+        _wilcoxon_signed_rank, _bootstrap_ci_mean,
+        _bootstrap_ci_mean_sample_clustered, _dist,
         RANDOM_STRATEGIES, SCRAMBLED_STRATEGIES,
     )
 except ImportError:                                          # pragma: no cover
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from tam_step2_analysis import (                          # type: ignore[no-redef]
-        _wilcoxon_signed_rank, _bootstrap_ci_mean, _dist,
+        _wilcoxon_signed_rank, _bootstrap_ci_mean,
+        _bootstrap_ci_mean_sample_clustered, _dist,
         RANDOM_STRATEGIES, SCRAMBLED_STRATEGIES,
     )
 
@@ -55,11 +57,16 @@ QUAD_LABEL = {
 }
 
 
-def _load_step1a_lookup(path: Path) -> dict:
+def _load_step1a_lookup(path: Path, fail_on_duplicates: bool = False) -> dict:
     """Build {(sample_id, student_ckpt): {'response_hash', 'R', 'quads',
-    'vds', 'advs', 'tokens'}}. Skips rows where tam_valid=false."""
+    'vds', 'advs', 'tokens'}}. Skips rows where tam_valid=false.
+
+    Per GPT static-review (3b290eb): detect duplicate (id, ckpt) keys
+    (e.g. from append / rerun / merge). Default = warn + last-wins;
+    pass `fail_on_duplicates=True` to raise."""
     out: dict = {}
     n_rows = n_valid = 0
+    dup_keys: dict = Counter()
     with path.open() as f:
         for line in f:
             line = line.strip()
@@ -73,6 +80,8 @@ def _load_step1a_lookup(path: Path) -> dict:
             if R <= 0:
                 continue
             key = (row["id"], row.get("student_ckpt"))
+            if key in out:
+                dup_keys[key] += 1
             out[key] = {
                 "response_hash": row.get("response_hash"),
                 "R": R,
@@ -81,7 +90,15 @@ def _load_step1a_lookup(path: Path) -> dict:
                 "advs":  (row.get("adv")  or [None] * R)[:R],
             }
             n_valid += 1
-    print(f">>> step1a: loaded {n_rows} rows, {n_valid} valid", file=sys.stderr)
+    print(f">>> step1a: loaded {n_rows} rows, {n_valid} valid, "
+          f"{len(out)} unique (id, ckpt) keys", file=sys.stderr)
+    if dup_keys:
+        msg = (f"WARNING: {len(dup_keys)} duplicate step1a (id, ckpt) keys; "
+               f"last-occurrence wins. Sample duplicates: "
+               f"{list(dup_keys.items())[:3]}")
+        if fail_on_duplicates:
+            raise RuntimeError(msg)
+        print(f"!! {msg}", file=sys.stderr)
     return out
 
 
@@ -128,8 +145,14 @@ def _resolve_quad_per_ckpt(step2_token_repr: dict, step1a_lookup: dict,
     return out
 
 
-def _compute_paired(deltas_top_random: list, deltas_top_scrambled: list) -> dict:
-    """Returns mean/CI/Wilcoxon for both top-vs-random and top-vs-scrambled."""
+def _compute_paired(deltas_top_random: list, deltas_top_scrambled: list,
+                    deltas_top_random_with_sid: list | None = None) -> dict:
+    """Returns mean/CI/Wilcoxon for both top-vs-random and top-vs-scrambled.
+
+    When `deltas_top_random_with_sid` (list of (sample_id, Δ)) is provided,
+    also reports sample-clustered bootstrap CI (per GPT static review 3b290eb)
+    — token-level bootstrap underestimates CI when Step 2 picks multiple
+    target tokens per sample."""
     out = {
         "n_tokens": len(deltas_top_random),
         "top_minus_random": _dist(deltas_top_random),
@@ -137,6 +160,10 @@ def _compute_paired(deltas_top_random: list, deltas_top_scrambled: list) -> dict
     }
     if deltas_top_random:
         out["top_minus_random"]["bootstrap_ci"] = _bootstrap_ci_mean(deltas_top_random)
+        if deltas_top_random_with_sid:
+            out["top_minus_random"]["bootstrap_ci_cluster"] = (
+                _bootstrap_ci_mean_sample_clustered(deltas_top_random_with_sid)
+            )
         out["top_minus_random"]["wilcoxon"]    = _wilcoxon_signed_rank(deltas_top_random)
         out["top_minus_random"]["frac_positive"] = (
             sum(1 for x in deltas_top_random if x > 0) / len(deltas_top_random)
@@ -201,11 +228,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Per (ckpt, quad): collect paired Δ AND raw drops per strategy
     deltas_random: dict    = defaultdict(list)   # (ckpt, q) → [Δ(top − rand)]
-    deltas_scrambled: dict = defaultdict(list)   # (ckpt, q) → [Δ(top − scram)]
-    deltas_bot_top: dict   = defaultdict(list)   # (ckpt, q) → [Δ(bottom − top)]  ← smoking-gun for TAM-inverted-on-q3
-    raw_drops_per_strat: dict = defaultdict(lambda: defaultdict(list))  # (ckpt, q) → strat → [drops]
-    n_resolved = 0
-    n_unresolved = 0
+    deltas_random_with_sid: dict = defaultdict(list)  # (ckpt, q) → [(sample_id, Δ)]   for cluster bootstrap
+    deltas_scrambled: dict = defaultdict(list)
+    deltas_bot_top: dict   = defaultdict(list)
+    deltas_bot_top_with_sid: dict = defaultdict(list)
+    raw_drops_per_strat: dict = defaultdict(lambda: defaultdict(list))
+    n_resolved_any = 0
+    n_unresolved   = 0
+    per_ckpt_total: dict = Counter()       # tokens resolved per ckpt
+    per_ckpt_missing: dict = Counter()      # tokens NOT resolved per ckpt
     by_category_per_quad: dict = defaultdict(lambda: defaultdict(list))
 
     for uid, by_strat in step2_by_uid.items():
@@ -220,27 +251,47 @@ def main(argv: list[str] | None = None) -> int:
         if d_random is None and d_scram is None:
             continue
         per_ckpt_quad = _resolve_quad_per_ckpt(token_repr, step1a_lookup, all_ckpts)
-        if all(v is None for v in per_ckpt_quad.values()):
+        # Per-ckpt resolution audit (GPT static-review 3b290eb)
+        any_resolved = False
+        for ckpt in all_ckpts:
+            if per_ckpt_quad.get(ckpt) is None:
+                per_ckpt_missing[ckpt] += 1
+            else:
+                per_ckpt_total[ckpt] += 1
+                any_resolved = True
+        if not any_resolved:
             n_unresolved += 1
             continue
-        n_resolved += 1
+        n_resolved_any += 1
+        sid = token_repr["id"]
         for ckpt, q in per_ckpt_quad.items():
             if q is None:
                 continue
             if d_random is not None:
                 deltas_random[(ckpt, q)].append(d_random)
+                deltas_random_with_sid[(ckpt, q)].append((sid, d_random))
                 by_category_per_quad[(ckpt, q)][token_repr["token_category"] or "other"].append(d_random)
             if d_scram is not None:
                 deltas_scrambled[(ckpt, q)].append(d_scram)
             if d_bot_top is not None:
                 deltas_bot_top[(ckpt, q)].append(d_bot_top)
+                deltas_bot_top_with_sid[(ckpt, q)].append((sid, d_bot_top))
             # Raw drops per strategy
             for strat in RAW_STRATEGIES_TO_REPORT:
                 drop = by_strat.get(strat, {}).get("logp_drop")
                 if drop is not None:
                     raw_drops_per_strat[(ckpt, q)][strat].append(drop)
-    print(f">>> resolved {n_resolved} tokens to step1a quad; "
+    print(f">>> resolved {n_resolved_any} tokens (any ckpt); "
           f"unresolved {n_unresolved}", file=sys.stderr)
+    for ckpt in all_ckpts:
+        tot = per_ckpt_total[ckpt]
+        miss = per_ckpt_missing[ckpt]
+        print(f"      {ckpt:>10s}: resolved={tot:>4d}  missing={miss:>4d}  "
+              f"(of {len(step2_by_uid)} step2 tokens)", file=sys.stderr)
+        # Sanity: resolved + missing should equal total step2 tokens
+        assert tot + miss == len(step2_by_uid), (
+            f"counter mismatch for {ckpt}: {tot}+{miss} ≠ {len(step2_by_uid)}"
+        )
 
     # Per-ckpt × quad stats
     report: dict = {"per_ckpt_per_quad": {}, "all_ckpts": all_ckpts}
@@ -250,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
             d_r = deltas_random.get((ckpt, q), [])
             d_s = deltas_scrambled.get((ckpt, q), [])
             d_bt = deltas_bot_top.get((ckpt, q), [])
-            block = _compute_paired(d_r, d_s)
+            d_r_sid = deltas_random_with_sid.get((ckpt, q), [])
+            block = _compute_paired(d_r, d_s, deltas_top_random_with_sid=d_r_sid)
             block["quad_label"] = QUAD_LABEL[q]
             # Raw mean drops per strategy
             raw = {}
@@ -270,7 +322,11 @@ def main(argv: list[str] | None = None) -> int:
             if d_bt:
                 m = sum(d_bt) / len(d_bt)
                 block["bottom_minus_top"]["bootstrap_ci"] = _bootstrap_ci_mean(d_bt)
-                block["bottom_minus_top"]["wilcoxon"]    = _wilcoxon_signed_rank(d_bt)
+                # Sample-clustered bootstrap (GPT static-review 3b290eb)
+                block["bottom_minus_top"]["bootstrap_ci_cluster"] = (
+                    _bootstrap_ci_mean_sample_clustered(deltas_bot_top_with_sid.get((ckpt, q), []))
+                )
+                block["bottom_minus_top"]["wilcoxon"] = _wilcoxon_signed_rank(d_bt)
                 block["bottom_minus_top"]["frac_positive"] = (
                     sum(1 for x in d_bt if x > 0) / len(d_bt)
                 )
@@ -285,11 +341,13 @@ def main(argv: list[str] | None = None) -> int:
             block["by_category"] = cat_block
             report["per_ckpt_per_quad"][ckpt][str(q)] = block
 
-    report["n_step2_unique_tokens"]    = len(step2_by_uid)
-    report["n_tokens_resolved"]        = n_resolved
-    report["n_tokens_unresolved"]      = n_unresolved
-    report["step2_jsonl"]              = str(args.step2_jsonl)
-    report["step1a_jsonl"]             = str(args.step1a_jsonl)
+    report["n_step2_unique_tokens"]   = len(step2_by_uid)
+    report["n_tokens_resolved_any"]   = n_resolved_any
+    report["n_tokens_unresolved_all"] = n_unresolved
+    report["per_ckpt_resolved"]       = dict(per_ckpt_total)
+    report["per_ckpt_missing"]        = dict(per_ckpt_missing)
+    report["step2_jsonl"]             = str(args.step2_jsonl)
+    report["step1a_jsonl"]            = str(args.step1a_jsonl)
 
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     with args.out_json.open("w") as f:
@@ -300,15 +358,26 @@ def main(argv: list[str] | None = None) -> int:
         lines: list[str] = []
         lines.append(f"# Step 2b quad-aware analysis  "
                      f"(step2 n={len(step2_by_uid)} tokens, "
-                     f"resolved={n_resolved}, unresolved={n_unresolved})")
+                     f"resolved_any_ckpt={n_resolved_any}, "
+                     f"unresolved_all={n_unresolved})")
         lines.append(f"step2_jsonl  = {args.step2_jsonl}")
         lines.append(f"step1a_jsonl = {args.step1a_jsonl}")
+        lines.append("")
+        # Per-ckpt resolution audit (GPT static review 3b290eb)
+        lines.append("## Per-ckpt resolution audit")
+        for ckpt in all_ckpts:
+            t = per_ckpt_total[ckpt]
+            m = per_ckpt_missing[ckpt]
+            lines.append(f"  {ckpt:>10s}  resolved={t:>4d}  missing={m:>4d}  "
+                         f"total={t+m:>4d}")
         lines.append("")
         for ckpt in all_ckpts:
             lines.append(f"## {ckpt}")
             # Table 1: paired Δ table (existing)
             lines.append(f"  {'quad':<32} {'n':>5}  "
-                         f"{'mean_Δ_random':>13}  {'CI_low':>8} {'CI_hi':>8}  "
+                         f"{'mean_Δ_random':>13}  "
+                         f"{'CI_tok':>15}  "
+                         f"{'CI_cluster':>15}  "
                          f"{'frac+':>6}  {'Wilcox p':>10}  "
                          f"{'mean_Δ_scram':>13}")
             for q in (0, 1, 2, 3):
@@ -321,15 +390,24 @@ def main(argv: list[str] | None = None) -> int:
                 mr  = tr.get("mean", float("nan"))
                 ms  = ts.get("mean", float("nan"))
                 ci  = tr.get("bootstrap_ci") or {}
+                cic = tr.get("bootstrap_ci_cluster") or {}
                 lo  = ci.get("lo", float("nan"))
                 hi  = ci.get("hi", float("nan"))
+                clo = cic.get("lo", float("nan"))
+                chi = cic.get("hi", float("nan"))
                 fp  = tr.get("frac_positive", float("nan"))
                 wil = tr.get("wilcoxon") or {}
                 p   = wil.get("p_two_sided", float("nan"))
                 label = QUAD_LABEL[q]
+                tok_ci  = f"[{lo:+.3f},{hi:+.3f}]"
+                clus_ci = f"[{clo:+.3f},{chi:+.3f}]"
                 lines.append(f"  q{q}={label:<28} {n:>5d}  "
-                             f"{mr:>+13.4f}  {lo:>+8.4f} {hi:>+8.4f}  "
+                             f"{mr:>+13.4f}  "
+                             f"{tok_ci:>15}  "
+                             f"{clus_ci:>15}  "
                              f"{fp:>+6.3f}  {p:>10.2e}  {ms:>+13.4f}")
+            lines.append("")
+            lines.append("  CI_tok = token-level bootstrap; CI_cluster = sample-clustered.")
             lines.append("")
 
             # Table 2: raw mean drops per strategy per quad (NEW)

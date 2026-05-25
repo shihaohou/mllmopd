@@ -2,31 +2,47 @@
 
 ## TL;DR
 
-We previously closed Step 2 v2 with strong positive evidence: top-TAM
-mask vs random mask Δ = +0.99 nat (Wilcoxon p ≈ 10⁻¹¹), and top-TAM vs
-scrambled-TAM Δ = +1.06 nat (spatial-structure-only control). Step 2b
-joins Step 1a's per-token `quad` labels (vd × adv sign quadrants) into
-Step 2's tokens to ask: **does TAM's causal effect hold up on the
-visual-rejection bucket (quad==3, vd<0 ∧ adv<0) — the bucket T2-1
-mis-targeted?**
+Step 2 v2 closed with strong positive evidence: top-TAM mask vs random
+mask Δ = +0.99 nat (Wilcoxon p ≈ 10⁻¹¹), and top-TAM vs scrambled-TAM
+Δ = +1.06 nat (spatial-structure-only control). Step 2b joins Step
+1a's per-token `quad` labels (vd × adv sign quadrants) into Step 2's
+tokens to ask a scoped question: **on the Step 2 selected target
+tokens, does TAM's causal effect hold up when subset by quad?**
 
-**Answer: NO, but not because TAM is inverted. q3 evidence is globally
-distributed; no spatial 20%-patch mask captures it.** All 5 mask
-strategies (top-TAM / random / scrambled / keep-top / bottom-TAM)
-produce drops of ≈ 0 nat on q3 tokens, with paired Δ(bottom − top) ≈ 0
-(Wilcoxon p > 0.4 across all 4 ckpts).
+**Answer: q0/q1 (local-evidence support) carry the full causal
+signal; q3 (T2-1's failure bucket) shows zero sensitivity to ANY
+spatial 20%-patch mask.** All 5 mask strategies (top-TAM / random /
+scrambled / keep-top / bottom-TAM) produce drops ≈ 0 nat on q3
+tokens, with paired Δ(bottom − top) ≈ 0 (Wilcoxon p > 0.4 across all
+4 ckpts). The null cannot be rejected for "TAM inverted on q3";
+combined with all-strategies-near-zero, the most parsimonious read is
+**q3 evidence is not captured by a local 20% spatial intervention on
+this selection of target tokens**.
 
-**Implication for §Method**: OPD has two structurally distinct failure
-modes. Local-evidence support (q0/q1) is causally addressable by
-TAM-region-Boost gate (Δ = +1.27 nat). Distributed-evidence rejection
-(q3, T2-1's failure mode) is NOT addressable by any spatial-locator
-intervention — it needs a complementary, non-spatial mechanism
-(e.g. `|VD|`-boost no-suppress on negative-VD tokens, à la T2-2).
+**⚠️ Scope caveat (per GPT static review on 3b290eb)**: Step 2 target
+tokens are selected by TAM-mass proxy + non-template categories (see
+§"Target selection caveat"). They are NOT a uniform sample of
+quad==3 tokens. The claim is therefore:
 
-The TAM line as written is scoped to q0/q1 and is publication-ready
-for §Diagnostic + §Method on that scope. T2-1's failure mode remains
-open, but it is now clearly **orthogonal** to the TAM mechanism rather
-than something TAM can address.
+> ON the Step-2 selected target-token subset, q3 tokens show no
+> sensitivity to top / bottom / random / scrambled / keep-top
+> spatial interventions.
+
+NOT:
+
+> All q3 tokens in the corpus have globally distributed evidence.
+
+To upgrade to the stronger claim, a **Step 2c** is needed: uniformly
+sample q3 tokens from Step 1a JSONL (by `|vd|` bin × category) and
+run the same masking protocol. Step 2c is NOT a prerequisite for
+Step 3a but is required before strong q3 generalization.
+
+**Implication for §Method**: TAM-region-Boost gate is scoped to
+support-side tokens where local evidence exists. The §Method does NOT
+claim to address T2-1's rejection-side failure mode. That remains an
+open complementary problem (best addressed by something like T2-2's
+`|VD|`-boost no-suppress on vd<0 tokens, abandoned earlier — see
+[[t2-1-result-status-2026-05-25]]).
 
 ## Run provenance
 
@@ -161,32 +177,54 @@ All three mechanisms predict the observed pattern: VD is large (because
 removing the WHOLE image lets the token become more probable under no
 information), but Step 2 Δ ≈ 0 for any local mask.
 
-## Proposed §Method gate (Step 3)
+## Proposed §Method gate (Step 3a)
 
-Given Step 2 + Step 2b:
+**KEY DESIGN POINT (per GPT static review on 3b290eb)**: the main
+method gate must NOT depend on `quad`, because `quad` requires
+`vd = lp_full - lp_blank` which requires a blank-image forward.
+Including `quad` in the gate would defeat the **one-forward** claim
+that makes TAM-Boost attractive in the first place. So the gate uses
+ONLY teacher-side, single-forward signals (category from POS tagger,
+TAM map from teacher's hidden states):
 
 ```
+# Deployable, one-forward gate:
 g_t = 𝟙[c_t ∈ {content_noun, visual_attribute, proper_noun}]   # local-evidence category
-    ∧ 𝟙[quad(t) ∈ {0, 1}]                                       # vis_support
     ∧ 𝟙[coverage(top_K(M_t), E_x) ≥ τ]                          # spatial coverage in sample bottleneck
 
-w_t = 1 + α · g_t       (only boost, never suppress; per GPT round on 2f10687)
+w_t = 1 + α · g_t       (only boost, never suppress)
 ```
 
-q3 tokens deliberately excluded. The §Method is honest about scope:
+q3 tokens are NOT explicitly excluded by the gate. The data say q3
+tokens are mostly orthogonal to the gate firing anyway (low TAM
+coverage; non-local-evidence categories often). The §Method is honest:
 
-> TAM-Boost OPD addresses local-evidence support tokens (vd ≥ 0 quadrants
-> with content-bearing categories). The orthogonal failure mode —
-> visual rejection correction (vd < 0 ∧ adv < 0, T2-1's failure
-> bucket) — has globally distributed evidence and is NOT addressed
-> by this method.
+> TAM-Boost OPD upweights tokens where the teacher's TAM map identifies
+> a localized image evidence region overlapping the sample-level
+> evidence bottleneck. The orthogonal failure mode — visual rejection
+> correction (vd < 0 ∧ adv < 0, T2-1's failure bucket) — is NOT
+> claimed to be addressed by this method.
 
-Defaults (per GPT round on 2f10687):
+Defaults (per prior GPT round on 2f10687):
 - `token_topK = 20%`
 - `sample_bottleneck_rho = 30%` (or 40%)
 - `tau = 0.5` (coverage threshold)
 - `alpha = 0.5`
 - visual_number kept in holdout (Step 2 Δ ≈ 0; possibly separate mechanism)
+
+### Oracle ablation arm (NOT the main method)
+
+We will additionally run an **oracle quad-aware** arm that DOES
+condition on quad. This requires the two-forward path:
+
+```
+g_t^oracle = g_t · 𝟙[quad(t) ∈ {0, 1}]
+```
+
+The oracle arm establishes the upper bound: "if we could costlessly
+filter to q0/q1, how much more would TAM-Boost gain?" The paper
+clearly labels this as oracle / non-deployable; it does NOT replace
+the main one-forward method.
 
 ## Questions for GPT
 

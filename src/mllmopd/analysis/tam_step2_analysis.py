@@ -58,12 +58,22 @@ NAMED_STRATEGIES = [
 
 def _wilcoxon_signed_rank(diffs: list) -> dict | None:
     """One-sample Wilcoxon signed-rank for paired differences.
-    Returns {W_plus, z, p_two_sided, n_nonzero} or None.
+    Returns {W_plus, z, p_two_sided, n_nonzero, n_tie_groups} or None.
 
-    Drops zero-differences (Wilcoxon convention), assigns ranks to |d|
-    with average for ties, uses normal approximation for p (valid for
-    n_nonzero ≥ ~20). For heavy-tail Δ distributions this is more robust
-    than the paired t-stat.
+    Per GPT static-review on 3b290eb:
+      - drop zero-differences (Wilcoxon convention)
+      - average-rank ties on |d|
+      - **tie correction on variance**:
+            var0 = n(n+1)(2n+1) / 24
+            tie_term = Σ_i (t_i^3 − t_i) / 48      (over tie groups of size t_i)
+            var = var0 − tie_term
+      - **p computed via math.erfc** (no tail underflow on large |z|;
+        old `2*(1-0.5*(1+erf))` could underflow to 0 for z > ~8.3).
+      - normal approximation valid for n_nonzero ≥ ~20
+
+    For heavy-tail Δ distributions this is more robust than the paired
+    t-stat. Still not a replacement for scipy.stats.wilcoxon for
+    publication; recommend cross-check before final paper table.
     """
     nz = [d for d in diffs if abs(d) > 1e-12]
     n = len(nz)
@@ -72,8 +82,9 @@ def _wilcoxon_signed_rank(diffs: list) -> dict | None:
     # Sort by absolute value, keeping sign
     sorted_pairs = sorted(((abs(d), 1 if d > 0 else -1) for d in nz),
                           key=lambda x: x[0])
-    # Assign ranks (average for ties)
+    # Assign ranks (average for ties); track tie-group sizes for var correction
     ranks = [0.0] * n
+    tie_sizes: list[int] = []
     i = 0
     while i < n:
         j = i
@@ -82,28 +93,38 @@ def _wilcoxon_signed_rank(diffs: list) -> dict | None:
         avg_rank = (i + j + 2) / 2  # 1-indexed average
         for k in range(i, j + 1):
             ranks[k] = avg_rank
+        if j > i:
+            tie_sizes.append(j - i + 1)
         i = j + 1
     W_plus = sum(ranks[k] for k in range(n) if sorted_pairs[k][1] > 0)
-    # Normal approximation under H0 (no continuity correction)
     mean = n * (n + 1) / 4
-    var = n * (n + 1) * (2 * n + 1) / 24
-    if var <= 0:
-        return None
+    var0 = n * (n + 1) * (2 * n + 1) / 24
+    tie_term = sum((t ** 3 - t) for t in tie_sizes) / 48.0
+    var = max(var0 - tie_term, 1e-12)
     z = (W_plus - mean) / math.sqrt(var)
-    p_two = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+    # erfc(|z|/√2) is the two-sided p (= 2 · survival(|z|)) and stays
+    # numerically meaningful out to z ≈ 38 (vs old form underflowing at z≈8).
+    p_two = math.erfc(abs(z) / math.sqrt(2))
     return {
         "W_plus": float(W_plus),
         "z": float(z),
         "p_two_sided": float(p_two),
         "n_nonzero": n,
         "n_total": len(diffs),
+        "n_tie_groups": len(tie_sizes),
+        "var_tie_correction_applied": tie_term > 0.0,
     }
 
 
 def _bootstrap_ci_mean(diffs: list, n_resamples: int = 2000,
                        alpha: float = 0.05, seed: int = 1729) -> dict | None:
-    """Bootstrap CI for mean of diffs. Heavy-tail-safe (no t-distribution
-    assumption). Returns {mean, lo, hi, n, n_resamples}."""
+    """Bootstrap CI for mean of diffs. Token-level resampling (each diff
+    treated independent). Heavy-tail-safe (no t-distribution assumption).
+    Returns {mean, lo, hi, n, n_resamples}.
+
+    NOTE: Step 2 has multiple target tokens per sample, so token-level
+    bootstrap may under-estimate CI vs the sample-clustered version
+    (see `_bootstrap_ci_mean_sample_clustered`). Report both in paper."""
     vals = [d for d in diffs if d is not None
             and not (isinstance(d, float) and math.isnan(d))]
     if len(vals) < 5:
@@ -121,6 +142,59 @@ def _bootstrap_ci_mean(diffs: list, n_resamples: int = 2000,
         "lo":   boots[int(nb * (alpha / 2))],
         "hi":   boots[int(nb * (1 - alpha / 2))],
         "n":    n,
+        "n_resamples": nb,
+    }
+
+
+def _bootstrap_ci_mean_sample_clustered(pairs: list[tuple],
+                                         n_resamples: int = 2000,
+                                         alpha: float = 0.05,
+                                         seed: int = 1729) -> dict | None:
+    """Cluster bootstrap by sample_id. Per GPT static-review (3b290eb):
+    token-level bootstrap underestimates CI when multiple tokens per
+    sample are correlated. This resamples SAMPLE_IDS with replacement,
+    pulling in all (sample_id, diff) pairs under each sampled id, and
+    recomputes the mean.
+
+    Args:
+        pairs: list of (sample_id, diff) tuples. diff must be float (not None).
+    Returns:
+        {mean, lo, hi, n_pairs, n_samples, n_resamples} or None if too few.
+    """
+    valid = [(sid, d) for sid, d in pairs
+             if d is not None
+             and not (isinstance(d, float) and math.isnan(d))]
+    if len(valid) < 5:
+        return None
+    # Group by sample_id
+    by_sid: dict[str, list[float]] = defaultdict(list)
+    for sid, d in valid:
+        by_sid[sid].append(d)
+    sample_ids = list(by_sid.keys())
+    if len(sample_ids) < 3:
+        return None
+
+    rng = random.Random(seed)
+    boots = []
+    for _ in range(n_resamples):
+        # Resample sample_ids with replacement
+        chosen = [rng.choice(sample_ids) for _ in range(len(sample_ids))]
+        # Collect all diffs from these samples
+        all_diffs = []
+        for sid in chosen:
+            all_diffs.extend(by_sid[sid])
+        if all_diffs:
+            boots.append(sum(all_diffs) / len(all_diffs))
+    if not boots:
+        return None
+    boots.sort()
+    nb = len(boots)
+    return {
+        "mean": sum(boots) / nb,
+        "lo":   boots[int(nb * (alpha / 2))],
+        "hi":   boots[int(nb * (1 - alpha / 2))],
+        "n_pairs":    len(valid),
+        "n_samples":  len(sample_ids),
         "n_resamples": nb,
     }
 

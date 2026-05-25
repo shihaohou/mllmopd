@@ -45,16 +45,26 @@ Usage::
         [--limit N] [--shard-id i --num-shards K]
 
 Output schema (one row per sample × target_token × mask_strategy):
-  { id, benchmark, image_path,
-    response_source="teacher_greedy", teacher_ckpt, student_ckpt,
-    response_hash, token_uid, token_idx, token, token_category,
-    vd, adv, quad,
-    tam_mass_top20, tam_peak_xy, tam_peak_patch_idx,
-    mask_strategy, mask_n_patches, mask_patch_indices (b64),
+  { id, benchmark, split_tag, image_path, image_corruption, question,
+    response_source="teacher_greedy", teacher_ckpt,
+    response_hash, response_length,
+    token_idx, token, token_uid, token_category,
+    is_answer_token, is_think_token, is_blankness_token,
+    stratum, rank_within_stratum,
+    tam_mass_top10, tam_mass_top20, tam_mass_top40, tam_entropy_norm,
+    tam_peak_patch_idx, tam_peak_xy, tam_center_of_mass_xy,
+    mask_strategy, mask_target_frac, mask_n_patches,
     lp_full_baseline, lp_full_masked,
     logp_drop = lp_full_baseline - lp_full_masked,
     vision_shape, image_grid_thw, map_h, map_w,
     code_commit_run, tam_preproc_version }
+
+NOTE (per GPT static review on 3b290eb): rows do NOT carry vd / adv /
+quad / student_ckpt. Step 2 is a teacher-only causal-masking experiment;
+quad / vd / adv require Step 1a's student forward + blank-image forward.
+The post-hoc quad join is the job of `mllmopd.analysis.tam_step2b_quad`,
+which reads Step 1a JSONL and joins on (sample_id, response_hash,
+token_idx).
 """
 
 from __future__ import annotations
@@ -100,12 +110,14 @@ MASK_STRATEGIES = [
     "random_20pct_seed_43",
     "random_20pct_seed_44",
     # GPT round on `2f10687`: scrambled-TAM is the "near-mandatory" control.
-    # Same TAM value distribution, randomized positions. Operationally
-    # equivalent to random_20pct_seed_X (top-K of value-shuffled map ==
-    # uniform-random patch selection), but stored as a distinct condition
-    # to make the equivalence explicit in the paper: "TAM value
-    # distribution alone doesn't drive the effect; position assignment
-    # does."
+    # Per GPT static-review on `3b290eb`: do NOT call this "mathematically
+    # equivalent to random". This control RANDOMIZES the SPATIAL ASSIGNMENT
+    # of TAM values while PRESERVING the map's value distribution.
+    # Marginally, the top-K positions of the permuted map are uniform random,
+    # but this is a value-distribution-preserving control rather than a
+    # vanilla random mask. Paper claim: random ≈ scrambled supports that
+    # TAM's spatial assignment matters; it does NOT prove mathematical
+    # equivalence to random.
     "scrambled_tam_seed_142",
     "scrambled_tam_seed_143",
     "scrambled_tam_seed_144",
