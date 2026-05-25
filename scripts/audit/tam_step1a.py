@@ -579,7 +579,8 @@ def _parse_student_args(student_args: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-def _load_subset(subset_path: Path, limit: int) -> list[dict]:
+def _load_subset(subset_path: Path, limit: int,
+                 shard_id: int = 0, num_shards: int = 1) -> list[dict]:
     rows: list[dict] = []
     with subset_path.open() as f:
         for line in f:
@@ -587,6 +588,10 @@ def _load_subset(subset_path: Path, limit: int) -> list[dict]:
                 rows.append(json.loads(line))
     if limit > 0:
         rows = rows[:limit]
+    # Stride-shard so each shard sees a mix of benchmarks (subset is
+    # ordered: opd_target → chartqa → hall → pope → neg_control).
+    if num_shards > 1:
+        rows = rows[shard_id::num_shards]
     return rows
 
 
@@ -611,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-student", action="store_true",
                     help="Run teacher pass only; write teacher cache and exit. "
                          "Useful for splitting wall-time across sessions.")
+    ap.add_argument("--shard-id", type=int, default=0,
+                    help="When sharding across N GPUs (data parallel), this "
+                         "process handles rows[shard_id::num_shards].")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="Total number of shards (==NUM_GPUS in the launcher).")
     args = ap.parse_args(argv)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -622,8 +632,13 @@ def main(argv: list[str] | None = None) -> int:
     if not students and not args.skip_student:
         ap.error("Need at least one --students NAME=PATH (or use --skip-student).")
 
-    subset = _load_subset(args.subset, args.limit)
-    print(f">>> subset: {len(subset)} samples", file=sys.stderr)
+    subset = _load_subset(args.subset, args.limit,
+                          shard_id=args.shard_id, num_shards=args.num_shards)
+    if args.num_shards > 1:
+        print(f">>> shard {args.shard_id}/{args.num_shards}: "
+              f"{len(subset)} samples", file=sys.stderr)
+    else:
+        print(f">>> subset: {len(subset)} samples", file=sys.stderr)
     swap_lookup = _swap_image_lookup(subset)
     image_root = Path(args.image_root)
 

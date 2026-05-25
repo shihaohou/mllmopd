@@ -31,6 +31,11 @@
 #                          attention baseline requires it)
 #   SKIP_STUDENT         — 1 = write teacher cache only, no student pass
 #   TEACHER_CACHE        — reuse existing teacher cache JSONL
+#   NUM_GPUS             — data-parallel shard count (default: 1; set 8 on
+#                          H800 to fan out — each GPU runs its own
+#                          subprocess on rows[shard_id::NUM_GPUS]). Speedup
+#                          ~linear in NUM_GPUS; ~6-7 min wall for 200×4 on 8
+#                          H800s vs ~40 min single-GPU
 #
 # Usage:
 #   bash scripts/audit/run_tam_step1a.sh
@@ -71,7 +76,10 @@ SUBSET="${SUBSET:-data/audit/tam_calibration_subset_v0.jsonl}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 LIMIT="${LIMIT:-0}"
 TEACHER_CKPT="${MMR1_7B_RL_CKPT:-MMR1/MMR1-7B-RL}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+NUM_GPUS="${NUM_GPUS:-1}"
+if [ "${NUM_GPUS}" = "1" ]; then
+  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+fi
 
 # Build --students NAME=PATH args from env. Skip any that are empty.
 STUDENT_ARGS=(--students "T1_0=${MMR1_3B_SFT_CKPT}")
@@ -98,18 +106,82 @@ TAM Step 1a launching
   MAX_NEW_TOK = ${MAX_NEW_TOKENS}
   LIMIT       = ${LIMIT}
   ATTN_IMPL   = ${MLLMOPD_ATTN_IMPL}
-  CUDA        = ${CUDA_VISIBLE_DEVICES}
+  NUM_GPUS    = ${NUM_GPUS}
+  CUDA        = ${CUDA_VISIBLE_DEVICES:-<unset>}
 ========================================
 EOF
 
-PYTHONPATH=src python -m scripts.audit.tam_step1a \
-  --subset "${SUBSET}" \
-  --teacher "${TEACHER_CKPT}" \
-  "${STUDENT_ARGS[@]}" \
-  --out-dir "${RUN_DIR}" \
-  --max-new-tokens "${MAX_NEW_TOKENS}" \
-  --image-root . \
-  "${EXTRA[@]}"
+mkdir -p "${RUN_DIR}"
+
+if [ "${NUM_GPUS}" = "1" ]; then
+  PYTHONPATH=src python -m scripts.audit.tam_step1a \
+    --subset "${SUBSET}" \
+    --teacher "${TEACHER_CKPT}" \
+    "${STUDENT_ARGS[@]}" \
+    --out-dir "${RUN_DIR}" \
+    --max-new-tokens "${MAX_NEW_TOKENS}" \
+    --image-root . \
+    "${EXTRA[@]}"
+else
+  # ---- Multi-GPU data-parallel fan-out ----
+  # Each shard process is pinned to one GPU via CUDA_VISIBLE_DEVICES, gets
+  # the stride-i'th rows of the subset. Per-shard outputs are merged below.
+  echo ">>> Fanning out to ${NUM_GPUS} GPUs (data parallel; stride sharding)"
+  PIDS=()
+  for i in $(seq 0 $((NUM_GPUS - 1))); do
+    SHARD_DIR="${RUN_DIR}/shard_${i}"
+    mkdir -p "${SHARD_DIR}"
+    (
+      export CUDA_VISIBLE_DEVICES="${i}"
+      PYTHONPATH=src python -m scripts.audit.tam_step1a \
+        --subset "${SUBSET}" \
+        --teacher "${TEACHER_CKPT}" \
+        "${STUDENT_ARGS[@]}" \
+        --out-dir "${SHARD_DIR}" \
+        --max-new-tokens "${MAX_NEW_TOKENS}" \
+        --image-root . \
+        --shard-id "${i}" \
+        --num-shards "${NUM_GPUS}" \
+        "${EXTRA[@]}" \
+        > "${SHARD_DIR}/stdout.log" 2> "${SHARD_DIR}/stderr.log"
+      echo "  shard ${i} done"
+    ) &
+    PIDS+=($!)
+  done
+
+  # Wait for all shards; print partial status
+  echo ">>> Waiting for ${#PIDS[@]} shards (tail per-shard logs at ${RUN_DIR}/shard_<i>/std{out,err}.log)"
+  for pid in "${PIDS[@]}"; do
+    wait "${pid}" || echo "!! shard pid ${pid} exited non-zero"
+  done
+
+  # Merge per-shard JSONLs
+  echo ">>> Merging shard outputs"
+  cat "${RUN_DIR}"/shard_*/teacher_cache.jsonl > "${RUN_DIR}/teacher_cache.jsonl" 2>/dev/null || true
+  cat "${RUN_DIR}"/shard_*/tam_step1a.jsonl   > "${RUN_DIR}/tam_step1a.jsonl"   2>/dev/null || true
+
+  # Aggregate summary
+  {
+    echo "# Step 1a teacher_greedy (multi-GPU)  (commit=${MLLMOPD_CODE_COMMIT})"
+    echo "teacher = ${TEACHER_CKPT}"
+    for s in "${STUDENT_ARGS[@]}"; do
+      case "${s}" in --students) ;; *=*) echo "student ${s}" ;; esac
+    done
+    echo "subset    = ${SUBSET}"
+    echo "num_shards (NUM_GPUS) = ${NUM_GPUS}"
+    echo "n_samples_total = $(wc -l < "${SUBSET}")"
+    echo "n_rows_total    = $(wc -l < "${RUN_DIR}/tam_step1a.jsonl" 2>/dev/null || echo 0)"
+    echo "merged JSONL = ${RUN_DIR}/tam_step1a.jsonl"
+    echo ""
+    echo "per-shard:"
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+      sd="${RUN_DIR}/shard_${i}"
+      n_t=$(wc -l < "${sd}/teacher_cache.jsonl" 2>/dev/null || echo 0)
+      n_r=$(wc -l < "${sd}/tam_step1a.jsonl"   2>/dev/null || echo 0)
+      echo "  shard ${i}: teacher_cache=${n_t}  rows=${n_r}"
+    done
+  } > "${RUN_DIR}/summary.txt"
+fi
 
 echo
 echo "========================================"
