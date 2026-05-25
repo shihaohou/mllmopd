@@ -22,7 +22,11 @@
 !/runs/audit/
 /runs/audit/*
 !/runs/audit/level1_v4_sysprompt_fixed/
-/data/
+/data/*
+# Probe sample lists are tiny, content-reviewed, part of the audit-schema contract.
+!/data/audit/
+/data/audit/*
+!/data/audit/tam_probes.jsonl
 /models/
 wandb/
 outputs/
