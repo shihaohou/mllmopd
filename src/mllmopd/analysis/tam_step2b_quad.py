@@ -361,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             lines.append(f"  Paired Δ(bottom_tam − top_tam) — "
                          f"Δ > 0 means low-TAM region IS the evidence (TAM inverted):")
             lines.append(f"  {'quad':<32} {'n':>5}  "
-                         f"{'mean_Δ':>+8} {'CI_low':>8} {'CI_hi':>8} "
+                         f"{'mean_Δ':>8} {'CI_low':>8} {'CI_hi':>8} "
                          f"{'frac+':>6}  {'Wilcox p':>10}")
             for q in (0, 1, 2, 3):
                 block = report["per_ckpt_per_quad"][ckpt][str(q)]
