@@ -62,6 +62,14 @@ unset -v http_proxy https_proxy no_proxy || true
 export MLLMOPD_CODE_COMMIT="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
 export MLLMOPD_ATTN_IMPL="${MLLMOPD_ATTN_IMPL:-eager}"
 
+# Mitigate per-shard allocator fragmentation on long-CoT samples
+# (ChartQA / HallusionBench produced 77/86 of the OOMs on `926e8f4`).
+# expandable_segments:True lets PyTorch grow / shrink virtual segments
+# instead of locking into fixed blocks that fragment with variable-size
+# generations. PyTorch ≥ 2.1 required; the error message itself
+# explicitly recommends this.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # spaCy preflight
 python -c "import spacy; spacy.load('en_core_web_sm')" 2>/dev/null || {
   echo "!! spaCy en_core_web_sm not loadable. POS-based token_category will"

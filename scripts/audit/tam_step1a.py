@@ -266,6 +266,12 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
         del blank_outputs, blank_inputs, blank_kwargs, blank_input_ids, blank_attn_mask
     except NameError:
         pass
+    # Drop the GenerateOutput dataclass itself — it can still hold refs via
+    # past_key_values / cache attributes that the field-nulling above missed.
+    try:
+        del outputs
+    except NameError:
+        pass
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
