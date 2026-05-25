@@ -77,6 +77,17 @@ def _render_one_row(row: dict, image_root: Path, out_dir: Path, alpha: float):
     image_path = Path(row["image_path"])
     if not image_path.is_absolute():
         image_path = (image_root / image_path).resolve()
+    # Fallback: JSONL may carry a foreign-host absolute path (e.g. H800
+    # cluster path while we render on Mac). Try to reconstruct the local
+    # path under image_root using the `data/audit/images/<...>` suffix.
+    if not image_path.exists():
+        s = str(image_path).replace("\\", "/")
+        marker = "data/audit/images/"
+        if marker in s:
+            tail = s.rsplit(marker, 1)[-1]      # "POPE_adversarial/1636.png"
+            candidate = image_root / "data" / "audit" / "images" / tail
+            if candidate.exists():
+                image_path = candidate
     if not image_path.exists():
         return 0, f"image missing: {image_path}"
     image = Image.open(image_path).convert("RGB")
