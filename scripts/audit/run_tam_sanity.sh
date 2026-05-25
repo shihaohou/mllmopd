@@ -56,6 +56,16 @@ source scripts/env/_activate.sh
 # silently 502 → process "Killed". Lowercase only; do not export NO_PROXY.
 unset -v http_proxy https_proxy no_proxy || true
 
+# --- 3b. v0.1.2: pin code_commit_run into the JSONL row metadata ---
+export MLLMOPD_CODE_COMMIT="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+
+# --- 3c. v0.1.2: pre-check spaCy + en_core_web_sm; warn if missing ---
+python -c "import spacy; spacy.load('en_core_web_sm')" 2>/dev/null || {
+  echo "!! spaCy en_core_web_sm not loadable. v0.1.2 token_category will fall"
+  echo "!! back to regex-only categorization (content_noun / pronoun / etc → 'other')."
+  echo "!! To enable: pip install spacy && python -m spacy download en_core_web_sm"
+}
+
 # --- 4. defaults / arg derivation ---
 TS="$(date +%Y%m%d-%H%M%S)"
 RUN_ID="${RUN_ID:-tam_sanity_${TS}}"

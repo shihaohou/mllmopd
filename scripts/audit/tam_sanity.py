@@ -1,19 +1,28 @@
 """Step 0 TAM sanity check on Qwen2.5-VL (MMR1-3B-SFT default).
 
+v0.1.2 (incorporates GPT review on commit 31b67ac of Step 0 brief):
+  - token_category enum × R (12 categories) via spaCy POS + regex pre-pass
+  - attention baseline (last-layer-avg-heads) with same scalar family as TAM
+  - TAM peak metadata (peak_patch_idx, peak_xy, center_of_mass_xy)
+  - prompt_tam_scope = "question_only" (locked vs v0.1.1 doc-vs-code drift)
+  - tam_maps_subset.attention_maps_uint8_b64 for direct visual comparison
+
 For each probe in `data/audit/tam_probes.jsonl`:
   1. Load Qwen2.5-VL via HF transformers
   2. Build chat-template prompt (MMR1 system_prompt before image, per
      run_audit_pass.py:_build_messages)
   3. Run `model.generate(..., output_hidden_states=True, output_scores=True,
-     return_dict_in_generate=True)`
+     output_attentions=True, return_dict_in_generate=True)`
   4. Compute `logits = [model.lm_head(feats[-1]) for feats in
      outputs.hidden_states]` (TAM input)
   5. Compute `lp_full`, `teacher_entropy_full`, `teacher_top1_margin_full`
      from `outputs.scores`
   6. For each generated token (and via ECI recursion, each question-prompt
      token), call `_tam_core.TAM` → get normalized [0,1] map → compute
-     scalars via `_tam_core.tam_scalars` → optionally save PNG overlay
-  7. Emit JSONL row matching v0.1.1 Step 0 schema subset
+     scalars + peak meta + attention baseline → optionally save PNG overlay
+  7. Classify each response token (POS + regex → token_category enum)
+  8. Emit JSONL row matching v0.1.2 Step 0 schema subset (see
+     docs/tam_calibration_schema.md)
 
 Output dir: $MLLMOPD_RUNS/tam_sanity_<TS>/
   ├── tam_sanity.jsonl       — one row per probe (v0.1.1 Step 0 subset)
@@ -54,6 +63,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _tam_core import TAM, tam_scalars  # noqa: E402  (after sys.path tweak)
 
+# v0.1.2: spaCy POS tagger for token_category. Optional — fall back to
+# regex-only categorization if unavailable; the run is still valid but
+# content_noun / pronoun / visual_attribute become "other".
+try:
+    import spacy as _spacy_mod
+    _SPACY_NLP = _spacy_mod.load("en_core_web_sm")
+    _SPACY_AVAILABLE = True
+    _SPACY_VERSION = _spacy_mod.__version__
+    _SPACY_LOAD_ERROR = None
+except Exception as _spacy_err:  # noqa: BLE001
+    _SPACY_NLP = None
+    _SPACY_AVAILABLE = False
+    _SPACY_VERSION = None
+    _SPACY_LOAD_ERROR = f"{type(_spacy_err).__name__}: {_spacy_err!s:.160}"
+
 
 # Qwen2.5-VL shares Qwen2-VL's tokenizer + special-token IDs.
 # See _tam_core docstring for derivation.
@@ -90,6 +114,29 @@ BLANK_PHRASES = [
     r"no chart\b", r"no image\b", r"\birrelevant\b",
 ]
 BLANK_RE = re.compile("|".join(BLANK_PHRASES), re.IGNORECASE)
+
+# v0.1.2: token-category constants (per docs/tam_calibration_schema.md §token_category)
+# Qwen2.5-VL special IDs that mark non-content positions in the response.
+QWEN_SPECIAL_IDS_SET = {
+    151643, 151644, 151645, 151652, 151653, 151654, 151655, 151656, 151657, 151658,
+}
+TEMPLATE_TOKEN_RE = re.compile(
+    r"<think>|</think>|<answer>|</answer>|\\boxed|:\*\*|\*\*:"
+)
+META_COT_WORDS = {
+    "Crop", "crop", "Looking", "examine", "analyze", "carefully",
+    "image", "based", "according", "user",
+}
+SPATIAL_RELATION_WORDS = {
+    "above", "below", "left", "right", "near", "far", "between", "behind",
+    "front", "beneath", "underneath", "over", "around", "inside", "outside",
+    "top", "bottom", "center", "middle", "edge", "beside", "next",
+}
+ADJ_STOPLIST = {
+    "good", "bad", "many", "some", "few", "much", "more", "less",
+    "any", "every", "such", "other",
+}
+ANSWER_COMMIT_RE = re.compile(r"^\s*(Yes|No|yes|no)[,.]?\s*$")
 
 
 # ============================================================================
@@ -303,6 +350,217 @@ def _compute_prompt_segments(input_ids_full: list[int], special_ids) -> dict:
 
 
 # ============================================================================
+# v0.1.2: token-category classification (regex pre-pass + spaCy POS)
+# ============================================================================
+def _classify_tokens_v012(
+    response_ids: list[int],
+    tokenizer,
+    is_answer_token: list[bool],
+) -> dict:
+    """Return per-token (pos_tag, word_idx, word_text, token_category)
+    per v0.1.2 schema. Regex pre-pass for mechanical categories first;
+    spaCy POS for the linguistic ones; fallback to "other" if spaCy
+    unavailable."""
+    R = len(response_ids)
+    full_text = tokenizer.decode(response_ids, skip_special_tokens=False)
+
+    # Cumulative char-length at each subword boundary
+    boundaries = [0]
+    for r in range(1, R + 1):
+        boundaries.append(len(tokenizer.decode(response_ids[:r], skip_special_tokens=False)))
+
+    # spaCy doc on the full response text (response is already plain text after
+    # decode; special-token text like "<answer>" is decoded literally and POS-
+    # tagged as a tag-shaped token, which we override below).
+    spacy_doc = _SPACY_NLP(full_text) if _SPACY_AVAILABLE else None
+
+    pos_tag = [""] * R
+    word_idx = [-1] * R
+    word_text = [""] * R
+    token_category = ["other"] * R
+
+    for t in range(R):
+        tid = response_ids[t]
+        tok_str = tokenizer.decode([tid], skip_special_tokens=False)
+        char_start = boundaries[t]
+        char_end = boundaries[t + 1]
+        char_mid = (char_start + char_end) // 2
+
+        # 1. special_token by id
+        if tid in QWEN_SPECIAL_IDS_SET:
+            token_category[t] = "special_token"
+            continue
+
+        # 2. template_token by text pattern
+        if TEMPLATE_TOKEN_RE.search(tok_str):
+            token_category[t] = "template_token"
+            continue
+
+        # 3. punctuation
+        stripped = tok_str.strip()
+        if stripped and all(not c.isalnum() for c in stripped):
+            token_category[t] = "punctuation"
+            pos_tag[t] = "PUNCT"
+            continue
+
+        # 4. answer_token marker (Yes/No commitment inside <answer>)
+        if is_answer_token[t] and ANSWER_COMMIT_RE.match(tok_str):
+            token_category[t] = "answer_token"
+            continue
+
+        # 5. spaCy POS lookup via char midpoint
+        if spacy_doc is None:
+            token_category[t] = "other"
+            continue
+
+        matched_word = None
+        matched_idx = -1
+        for i, w in enumerate(spacy_doc):
+            if w.idx <= char_mid < w.idx + len(w.text):
+                matched_word = w
+                matched_idx = i
+                break
+        if matched_word is None:
+            continue
+        pos_tag[t] = matched_word.pos_
+        word_idx[t] = matched_idx
+        word_text[t] = matched_word.text
+
+        # 6. Meta-CoT keyword override (e.g. "Crop", "Looking")
+        if matched_word.text in META_COT_WORDS:
+            token_category[t] = "meta_cot_token"
+            continue
+
+        # 7. POS → category
+        text_lower = matched_word.text.lower()
+        if matched_word.pos_ == "PRON":
+            token_category[t] = "pronoun"
+        elif matched_word.pos_ == "PROPN":
+            token_category[t] = "proper_noun"
+        elif matched_word.pos_ == "NUM" or re.match(r"^[0-9]+(\.[0-9]+)?$", matched_word.text):
+            token_category[t] = "visual_number"
+        elif matched_word.pos_ == "NOUN":
+            token_category[t] = "content_noun"
+        elif matched_word.pos_ == "ADJ" and text_lower not in ADJ_STOPLIST:
+            token_category[t] = "visual_attribute"
+        elif text_lower in SPATIAL_RELATION_WORDS:
+            token_category[t] = "spatial_relation"
+        else:
+            token_category[t] = "other"
+
+    return {
+        "pos_tag": pos_tag,
+        "word_idx": word_idx,
+        "word_text": word_text,
+        "token_category": token_category,
+        # Derived booleans (per v0.1.2 schema for analyzer convenience)
+        "is_template_token":  [c == "template_token"  for c in token_category],
+        "is_special_token":   [c == "special_token"   for c in token_category],
+        "is_pronoun":         [c == "pronoun"         for c in token_category],
+        "is_meta_cot_token":  [c == "meta_cot_token"  for c in token_category],
+    }
+
+
+# ============================================================================
+# v0.1.2: TAM peak metadata
+# ============================================================================
+def _tam_peak_meta(normalized_map_2d: np.ndarray) -> dict:
+    """Return {tam_peak_patch_idx, tam_peak_xy, tam_center_of_mass_xy} for
+    one TAM map in [0,1]^(H×W). xy normalized to [0,1]: x=col/(W-1),
+    y=row/(H-1)."""
+    H, W = normalized_map_2d.shape
+    flat = normalized_map_2d.flatten()
+    if flat.sum() < 1e-12:
+        return {
+            "tam_peak_patch_idx": -1,
+            "tam_peak_xy": [0.0, 0.0],
+            "tam_center_of_mass_xy": [0.5, 0.5],
+        }
+    peak_flat = int(np.argmax(flat))
+    peak_r, peak_c = divmod(peak_flat, W)
+    x_peak = peak_c / max(1, W - 1)
+    y_peak = peak_r / max(1, H - 1)
+
+    # Center of mass — weighted by activation
+    rows = np.arange(H).reshape(-1, 1).repeat(W, axis=1)
+    cols = np.arange(W).reshape(1, -1).repeat(H, axis=0)
+    total = float(normalized_map_2d.sum())
+    cm_r = float((rows * normalized_map_2d).sum() / total)
+    cm_c = float((cols * normalized_map_2d).sum() / total)
+    return {
+        "tam_peak_patch_idx": peak_flat,
+        "tam_peak_xy": [float(x_peak), float(y_peak)],
+        "tam_center_of_mass_xy": [cm_c / max(1, W - 1), cm_r / max(1, H - 1)],
+    }
+
+
+# ============================================================================
+# v0.1.2: attention baseline — last-layer-avg-heads from outputs.attentions
+# ============================================================================
+def _attention_baseline(
+    attentions_tuple,        # outputs.attentions: tuple of length response_length
+    response_length: int,
+    input_len: int,
+    img_start_idx_full: int,
+    img_end_idx_full: int,
+    vision_shape: tuple,
+):
+    """Compute per-response-token attention-baseline map (same H×W as TAM),
+    plus per-token scalars and peak metadata. Last-layer attention, averaged
+    over heads, sliced to image-patch key positions, normalized to [0,1].
+
+    Returns (maps_list[R], scalars_list[R], peak_list[R], failure_reason_or_None).
+    Maps that fail (e.g. attentions missing for that step) get a zero map."""
+    import torch  # noqa: F401
+    Hp, Wp = vision_shape
+    n_patches = Hp * Wp
+    img_slice = slice(img_start_idx_full + 1, img_end_idx_full)
+    expected_n = img_end_idx_full - (img_start_idx_full + 1)
+
+    maps_list = []
+    scalars_list = []
+    peak_list = []
+    failure = None
+
+    if expected_n != n_patches:
+        failure = (
+            f"image_patch_count_mismatch: expected_n={expected_n} "
+            f"vision_shape={vision_shape} (Hp*Wp={n_patches})"
+        )
+
+    for t in range(response_length):
+        try:
+            per_layer = attentions_tuple[t]
+            last_layer = per_layer[-1]                  # (1, H, q, k)
+            avg_heads = last_layer.float().mean(dim=1)  # (1, q, k)
+            if t == 0:
+                att_q = avg_heads[0, -1, :]             # query = last prompt position
+            else:
+                att_q = avg_heads[0, 0, :]              # query = new token
+            img_attn = att_q[img_slice].detach().cpu().numpy()
+            if img_attn.size != n_patches:
+                # Pad / truncate defensively to vision_shape
+                vec = np.zeros(n_patches, dtype=np.float32)
+                k = min(img_attn.size, n_patches)
+                vec[:k] = img_attn[:k]
+                img_attn = vec
+            m = img_attn.reshape(Hp, Wp).astype(np.float32)
+            mx = float(m.max())
+            if mx < 1e-12:
+                m_norm = m
+            else:
+                m_norm = m / mx
+        except Exception as e:  # noqa: BLE001
+            if failure is None:
+                failure = f"step {t}: {type(e).__name__}: {e!s:.120}"
+            m_norm = np.zeros(vision_shape, dtype=np.float32)
+        maps_list.append(m_norm)
+        scalars_list.append(tam_scalars(m_norm))
+        peak_list.append(_tam_peak_meta(m_norm))
+    return maps_list, scalars_list, peak_list, failure
+
+
+# ============================================================================
 # Per-token logp / entropy / margin from generate scores
 # ============================================================================
 def _per_token_teacher_stats(scores, sequences, input_len: int) -> tuple[list, list, list]:
@@ -412,6 +670,7 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
             pad_token_id=processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id,
             output_hidden_states=True,
             output_scores=True,
+            output_attentions=True,   # v0.1.2: needed for attention baseline
             return_dict_in_generate=True,
         )
     dt_gen = time.time() - t0
@@ -476,15 +735,43 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
 
     tam_valid = (tam_failure_reason is None and len(response_maps) == response_length)
 
-    # Scalars per token
+    # Scalars per token + TAM peak metadata (v0.1.2)
     response_scalars = [tam_scalars(m) for m in response_maps]
     prompt_scalars   = [tam_scalars(m) for m in prompt_maps]
+    response_peak    = [_tam_peak_meta(m) for m in response_maps]
 
     # Detokenize for labels + display
     tokenizer = processor.tokenizer
     response_tokens = tokenizer.convert_ids_to_tokens(response_ids)
     response_text = tokenizer.decode(response_ids, skip_special_tokens=False)
     labels = _label_response_tokens(response_ids, tokenizer)
+
+    # v0.1.2: token category classification (POS + regex). Depends on labels
+    # (for is_answer_token gating of answer_token category).
+    classification = _classify_tokens_v012(
+        response_ids, tokenizer, labels["is_answer_token"],
+    )
+
+    # v0.1.2: attention baseline (last-layer-avg-heads on image-patch positions).
+    img_start_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][0]) if QWEN_VL_SPECIAL_IDS["img_id"][0] in input_ids_full else -1
+    img_end_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][1]) if QWEN_VL_SPECIAL_IDS["img_id"][1] in input_ids_full else -1
+    t3 = time.time()
+    if img_start_idx_full >= 0 and img_end_idx_full >= 0 and outputs.attentions is not None:
+        attn_maps, attn_scalars, attn_peak, attn_failure = _attention_baseline(
+            outputs.attentions[:response_length],
+            response_length,
+            input_len,
+            img_start_idx_full,
+            img_end_idx_full,
+            vision_shape,
+        )
+    else:
+        attn_maps = [np.zeros(vision_shape, dtype=np.float32)] * response_length
+        attn_scalars = [tam_scalars(m) for m in attn_maps]
+        attn_peak = [_tam_peak_meta(m) for m in attn_maps]
+        attn_failure = "vision_span_or_attentions_missing"
+    dt_attn = time.time() - t3
+    attn_baseline_valid = (attn_failure is None)
 
     # Prompt-side detokenization (TAM's prompt range = between vision_end and im_end)
     prompt_segments = _compute_prompt_segments(input_ids_full, QWEN_VL_SPECIAL_IDS)
@@ -528,7 +815,7 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         out_path = overlays_dir / f"prompt_{i:03d}_{tok_safe}.png"
         _overlay_png(image, prompt_maps[i], out_path)
 
-    # Assemble row (v0.1.1 Step 0 subset)
+    # Assemble row (v0.1.2 Step 0 subset)
     response_hash = _sha256_hex(json.dumps(response_ids).encode())
     row = {
         # identity
@@ -546,11 +833,20 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         "teacher_ckpt":    args.model,
         "student_ckpt":    None,  # Step 0: no student
 
-        # run metadata
+        # run metadata (v0.1.2)
         "tokenizer_name_or_path":  args.model,
         "tokenizer_vocab_hash":    _tokenizer_vocab_hash(processor),
         "processor_name_or_path":  args.model,
-        "tam_preproc_version":     "v0.1.1",
+        "tam_preproc_version":     "v0.1.2",
+        "code_commit_run":         os.environ.get("MLLMOPD_CODE_COMMIT", "unknown"),
+        "code_commit_analyzed":    None,
+        "pos_tagger":              "spacy/en_core_web_sm" if _SPACY_AVAILABLE else "none",
+        "pos_tagger_version":      _SPACY_VERSION,
+        "pos_tagger_load_error":   _SPACY_LOAD_ERROR,
+        "token_category_source":   "regex+spacy_align:v0.1.2",
+        "attention_baseline_method": "last_layer_avg_heads:v0.1.2",
+        "attention_baseline_layers": [-1],
+        "attention_baseline_heads":  "all",
         "tam_score_def": {
             "mass_top_K": [10, 20, 40],
             "entropy": (
@@ -560,6 +856,11 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
             "map_pipeline": (
                 "lm_head(last_hidden)[:, img_idx, cls_id] → ECI subtract → "
                 "clip ≥0 → rank_gaussian_filter(3) → normalize 0-1"
+            ),
+            "peak": (
+                "tam_peak_patch_idx = argmax(map.flatten()); "
+                "tam_peak_xy = (col/(W-1), row/(H-1)) in [0,1]; "
+                "tam_center_of_mass_xy = Σ p_i·(x_i, y_i) / Σ p_i"
             ),
         },
 
@@ -586,11 +887,23 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         "tam_entropy_norm":         [s["tam_entropy_norm"] for s in response_scalars],
         "tam_effective_patch_frac": [s["tam_effective_patch_frac"] for s in response_scalars],
 
+        # v0.1.2: TAM peak metadata per response token
+        "tam_peak_patch_idx":     [p["tam_peak_patch_idx"] for p in response_peak],
+        "tam_peak_xy":            [p["tam_peak_xy"] for p in response_peak],
+        "tam_center_of_mass_xy":  [p["tam_center_of_mass_xy"] for p in response_peak],
+
+        # v0.1.2: attention baseline (same scalar family as TAM)
+        "attention_baseline_mass_top10":   [s["tam_mass_top10"] for s in attn_scalars],
+        "attention_baseline_mass_top20":   [s["tam_mass_top20"] for s in attn_scalars],
+        "attention_baseline_mass_top40":   [s["tam_mass_top40"] for s in attn_scalars],
+        "attention_baseline_entropy_norm": [s["tam_entropy_norm"] for s in attn_scalars],
+
         # confound disentanglers
         "teacher_entropy_full":     teacher_entropy_full,
         "teacher_top1_margin_full": teacher_top1_margin_full,
 
-        # prompt-token TAM (question span only, per upstream prompt_id definition)
+        # prompt-token TAM (v0.1.2: scope locked to question_only per schema)
+        "prompt_tam_scope":         "question_only",
         "prompt_length":            len(tokens_prompt),
         "tokens_prompt":            tokens_prompt,
         "tam_mass_top20_prompt":    [s["tam_mass_top20"] for s in prompt_scalars],
@@ -604,8 +917,11 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         "adv":             None,
         "quad":            None,
 
-        # token-text labels
+        # token-text labels (v0.1.1) + token category (v0.1.2)
         **labels,
+        **classification,    # pos_tag, word_idx, word_text, token_category,
+                              # is_template_token, is_special_token, is_pronoun,
+                              # is_meta_cot_token
 
         # image metadata
         "image_grid_thw":    grid_thw,
@@ -615,11 +931,13 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         "map_w":             int(vision_shape[1]),
         "patch_index_order": "row_major_top_left",
 
-        # QC
+        # QC (v0.1.1 + v0.1.2 attention baseline QC)
         "tam_valid":          bool(tam_valid),
         "tam_failure_reason": tam_failure_reason,
+        "attn_baseline_valid":          bool(attn_baseline_valid),
+        "attn_baseline_failure_reason": attn_failure,
 
-        # tam_maps_subset (Step 0 strata)
+        # tam_maps_subset (Step 0 strata + v0.1.2 attention maps for direct comparison)
         "tam_maps_subset": {
             "token_indices":       subset_idx,
             "selection_strata":    subset_strata,
@@ -627,6 +945,7 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
             "selection_score":     subset_score,
             "deduped_from_strata": subset_dedup,
             "maps_uint8_b64":      subset_maps_b64,
+            "attention_maps_uint8_b64": [_b64_uint8_map(attn_maps[i]) for i in subset_idx],
         },
 
         # timings (not in schema; useful for cost validation)
@@ -634,6 +953,7 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
             "generate_s":      dt_gen,
             "logit_compute_s": dt_logit,
             "tam_compute_s":   dt_tam,
+            "attn_compute_s":  dt_attn,
         },
     }
     return row
