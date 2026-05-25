@@ -123,6 +123,16 @@ QWEN_SPECIAL_IDS_SET = {
 TEMPLATE_TOKEN_RE = re.compile(
     r"<think>|</think>|<answer>|</answer>|\\boxed|:\*\*|\*\*:"
 )
+# v0.1.3 classifier: MMR1's "\boxed{answer}" template tokenizes to BPE pieces
+# `\`, `boxed`, `{`, `answer`, `}` — TEMPLATE_TOKEN_RE catches `\boxed` as the
+# combined string, but the BPE-split bare pieces `boxed` and `answer` slip
+# through and reach spaCy, which tags them as PROPN → proper_noun. Pre-flight
+# audit on tam_step1a_20260525-190333 found this contaminated 63 (sample,
+# token) pairs across ChartQA / HallusionBench / POPE / MathVista all with
+# vd≈adv≈0. Catch them here as template_token regardless of spaCy POS.
+MMR1_BOXED_BARE_RE = re.compile(
+    r"^\s*(?:boxed|Boxed|BOXED|answer|Answer|ANSWER)\s*$"
+)
 META_COT_WORDS = {
     "Crop", "crop", "Looking", "examine", "analyze", "carefully",
     "image", "based", "according", "user",
@@ -416,6 +426,13 @@ def _classify_tokens_v012(
 
         # 2. template_token by text pattern
         if TEMPLATE_TOKEN_RE.search(tok_str):
+            token_category[t] = "template_token"
+            continue
+
+        # 2b. v0.1.3: MMR1 \boxed{answer} BPE-split pieces. The bare
+        # `boxed` / `answer` tokens decode without the surrounding `\`/`{}` and
+        # spaCy would call them PROPN. Override before reaching spaCy.
+        if MMR1_BOXED_BARE_RE.match(tok_str):
             token_category[t] = "template_token"
             continue
 
@@ -882,7 +899,7 @@ def process_probe(model, processor, probe: dict, args, out_dir: Path) -> dict:
         "pos_tagger":              "spacy/en_core_web_sm" if _SPACY_AVAILABLE else "none",
         "pos_tagger_version":      _SPACY_VERSION,
         "pos_tagger_load_error":   _SPACY_LOAD_ERROR,
-        "token_category_source":   "regex+spacy_align:v0.1.2",
+        "token_category_source":   "regex+spacy_align:v0.1.3",
         "attention_baseline_method": "last_layer_avg_heads:v0.1.2",
         "attention_baseline_layers": [-1],
         "attention_baseline_heads":  "all",
