@@ -1620,10 +1620,10 @@ path = os.environ["MLLMOPD_PATCH_LOSS_TAM_PATH"]
 with open(path) as f:
     src = f.read()
 
-# Anchor A: insert tam_weights reader after P13's VD-reader end sentinel.
-anchor_a = '''        # === end mllmopd P13 vd weights apply (reader) ===
-
-        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+# Anchor A: insert tam_weights reader IMMEDIATELY AFTER P13's VD-reader
+# end sentinel. Single-line anchor so we're robust to other patches (e.g.
+# P19 adv-dump) being wedged between P13 and the "Reverse KL" header.
+anchor_a = '        # === end mllmopd P13 vd weights apply (reader) ==='
 patch_a = '''        # === end mllmopd P13 vd weights apply (reader) ===
         # === mllmopd P22 tam weights apply ===
         # Per-token TAM-Boost weights from cached precompute, attached by
@@ -1639,9 +1639,7 @@ patch_a = '''        # === end mllmopd P13 vd weights apply (reader) ===
                 w[-response_length:]
                 for w, response_length in zip(teacher_tam_weights_list, response_lengths, strict=False)
             ]
-        # === end mllmopd P22 tam weights apply (reader) ===
-
-        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+        # === end mllmopd P22 tam weights apply (reader) ==='''
 
 # Anchor B: insert tam multiplier inside per-sample loop, AFTER P13's VD
 # multiplier end-sentinel and BEFORE `advantages.append(adv)`.
