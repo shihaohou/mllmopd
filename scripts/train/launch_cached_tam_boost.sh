@@ -85,12 +85,24 @@ if [ "${MLLMOPD_USE_TAM_BOOST}" = "1" ] && [ ! -f "${MLLMOPD_TAM_CACHE_JSONL}" ]
   exit 1
 fi
 
+# Pick baseline launcher: Xbox (cross-box, external rollout) or single-box
+# (--colocate). Auto-dispatch based on ROLLOUT_ENGINE_ADDRS — if set, user
+# has rollout servers running elsewhere; else fall back to single-box.
+# Override explicitly via MLLMOPD_BASELINE_LAUNCHER.
+if [ -n "${MLLMOPD_BASELINE_LAUNCHER:-}" ]; then
+  BASELINE_LAUNCHER="${MLLMOPD_BASELINE_LAUNCHER}"
+elif [ -n "${ROLLOUT_ENGINE_ADDRS:-}" ]; then
+  BASELINE_LAUNCHER="scripts/train/opd_mmr1_3b_baseline_xbox.sh"
+else
+  BASELINE_LAUNCHER="scripts/train/opd_mmr1_3b_baseline.sh"
+fi
+echo ">>> baseline launcher = ${BASELINE_LAUNCHER}"
+
 # Mandatory invariant per GPT verdict §3 point 5: TAM-Boost requires the
-# no-suppress semantics, which whitening would destroy. The baseline
-# launcher omits --normalize-advantages (default False); we re-assert here
+# no-suppress semantics, which whitening would destroy. Re-assert here
 # in case anyone added it.
-if grep -q -- "--normalize-advantages" scripts/train/opd_mmr1_3b_baseline_xbox.sh; then
-  echo "ERROR: baseline launcher contains --normalize-advantages flag; "\
+if grep -q -- "--normalize-advantages" "${BASELINE_LAUNCHER}"; then
+  echo "ERROR: ${BASELINE_LAUNCHER} contains --normalize-advantages flag; "\
        "TAM-Boost no-suppress semantics (w_t >= 1) cannot survive "\
        "advantage whitening. Remove the flag or use a different launcher." >&2
   exit 1
@@ -121,6 +133,6 @@ Cached TAM-Boost OPD launching
 ========================================
 EOF
 
-# Hand off to the baseline launcher. It picks up MLLMOPD_POST_PROCESS_HOOK
+# Hand off to the chosen baseline launcher. It picks up MLLMOPD_POST_PROCESS_HOOK
 # and inserts it into --custom-reward-post-process-path.
-exec bash scripts/train/opd_mmr1_3b_baseline_xbox.sh "$@"
+exec bash "${BASELINE_LAUNCHER}" "$@"

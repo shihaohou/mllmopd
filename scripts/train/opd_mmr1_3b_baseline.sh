@@ -537,9 +537,13 @@ TRAIN_ENV_ARGS=(
 )
 
 # --- Custom reward (T1 dual-teacher) ---
+# Post-process hook overridable via MLLMOPD_POST_PROCESS_HOOK env var (parity
+# with opd_mmr1_3b_baseline_xbox.sh). Default = diagnostics hook (T1/T2-1
+# reference). Step 3a A0/A1 sets this to tam_boost_hook.
+POST_PROCESS_HOOK="${MLLMOPD_POST_PROCESS_HOOK:-mllmopd.training.opd_diagnostics_hook.post_process_rewards_with_diagnostics}"
 RM_ARGS=(
   --custom-rm-path mllmopd.training.dual_teacher_get_reward.get_reward
-  --custom-reward-post-process-path mllmopd.training.opd_diagnostics_hook.post_process_rewards_with_diagnostics
+  --custom-reward-post-process-path "${POST_PROCESS_HOOK}"
   # v11: before-train-step hook for per-step memsnap baseline + one-shot
   # DDP buffer audit (GPT diag Q1). No-op when MLLMOPD_MEMSNAP unset.
   --custom-megatron-before-train-step-hook-path mllmopd.training.memsnap.before_train_step_hook
