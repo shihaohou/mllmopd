@@ -59,10 +59,20 @@ VALID_MODES = ("main", "category_only", "random_region", "scrambled", "oracle_qu
 
 @dataclass
 class GateConfig:
-    """Frozen defaults from docs/step3a-design-2026-05-25.md. Override per arm."""
+    """Frozen defaults from docs/step3a-design-2026-05-26.md (v2).
+
+    Locked 2026-05-26 after Phase 1 preflight v2 on
+    tam_step1a_classifier_v013_full + GPT verdict Q1 refine:
+        τ = 0.70   (Q1 必修 1; was 0.50 in design v1 pre-preflight)
+        K = 0.20
+        ρ = 0.30
+        α = 0.50
+
+    Override per arm — see docs/step3a-design-2026-05-26.md §arms.
+    """
     K: float = 0.20
     rho: float = 0.30
-    tau: float = 0.50
+    tau: float = 0.70
     alpha: float = 0.50
     C_local: tuple[str, ...] = C_LOCAL_DEFAULT
     mode: str = "main"

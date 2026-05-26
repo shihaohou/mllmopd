@@ -1485,3 +1485,194 @@ echo "    # default_weight_loader fallback diag (should not fire if P5/P6 work):
 echo "    grep -A3 '\\[mllmopd diag\\]' \${MLLMOPD_RUNS}/t1_smoke_*/logs/train_*.log"
 echo "    # T2-1 VD weights flow (when MLLMOPD_USE_VD_WEIGHTING=1):"
 echo "    zcat \${MLLMOPD_RUNS}/t2_1_v0_*/diagnostics/step_*.jsonl.gz | head -1 | python -m json.tool | grep -A2 vd_weights"
+echo "    # Step 3a A1 TAM-Boost flow (when MLLMOPD_USE_TAM_BOOST=1):"
+echo "    grep -E 'tam_cache_hit_rate|teacher_tam_weights' \${MLLMOPD_RUNS}/cached_tam_boost_*/logs/train_*.log"
+
+# --- Patch P20: rollout.py — collect + partition teacher_tam_weights ----
+# Step 3a Phase 2: mirror P11 VD plumbing for TAM-Boost weights. Source
+# is sample.teacher_tam_weights set by mllmopd.training.tam_boost_hook
+# when MLLMOPD_USE_TAM_BOOST=1. A0/T1 baselines never set this attribute
+# so the branches are silent no-ops. Loss-side application is P22.
+# We anchor on the P11-applied end sentinel + the next blank-line block.
+ROLLOUT_TAM_SENTINEL="# === mllmopd P20 tam weights collect ==="
+if [ -f "${ROLLOUT}" ]; then
+  if grep -q "${ROLLOUT_TAM_SENTINEL}" "${ROLLOUT}"; then
+    echo ">>> ${ROLLOUT}: already patched (P20 tam-weights sentinel present)"
+  else
+    echo ">>> patching ${ROLLOUT}: collect + partition teacher_tam_weights"
+    export MLLMOPD_PATCH_ROLLOUT_TAM_PATH="${ROLLOUT}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_ROLLOUT_TAM_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor A: insert tam collect block after P11's VD-collect end sentinel
+# (P11 is always applied earlier in this script). If P11 hasn't been
+# applied for some reason (skipped via --skip-vd or similar future flag),
+# fall back to anchoring on response_correct.
+anchor_a = '''            if "teacher_vd_weights" in samples[0].__dict__:
+                train_data["teacher_vd_weights"] = [sample.teacher_vd_weights for sample in samples]
+            # === end mllmopd P11 vd weights collect ===
+
+        return train_data'''
+patch_a = '''            if "teacher_vd_weights" in samples[0].__dict__:
+                train_data["teacher_vd_weights"] = [sample.teacher_vd_weights for sample in samples]
+            # === end mllmopd P11 vd weights collect ===
+            # === mllmopd P20 tam weights collect ===
+            # Per-token TAM-Boost weights computed by
+            # mllmopd.training.tam_boost_hook when MLLMOPD_USE_TAM_BOOST=1
+            # (see docs/step3a-design-2026-05-26.md). Cache miss /
+            # mismatch path attaches ones(response_length), so the
+            # attribute is present whenever the hook is active.
+            if "teacher_tam_weights" in samples[0].__dict__:
+                train_data["teacher_tam_weights"] = [sample.teacher_tam_weights for sample in samples]
+            # === end mllmopd P20 tam weights collect ===
+
+        return train_data'''
+
+# Anchor B: partition keys list — add teacher_tam_weights after the
+# P11-inserted teacher_vd_weights key.
+anchor_b = '''                "teacher_vd_weights",  # === mllmopd P11 vd partition key ==='''
+patch_b = '''                "teacher_vd_weights",  # === mllmopd P11 vd partition key ===
+                "teacher_tam_weights",  # === mllmopd P20 tam partition key ==='''
+
+if anchor_a not in src:
+    sys.exit(f"ERROR: P20 anchor A not found in {path!r} — P11 vd-collect block may have moved or not applied yet")
+if anchor_b not in src:
+    sys.exit(f"ERROR: P20 anchor B not found in {path!r} — P11 vd partition key may have moved")
+
+new_src = src.replace(anchor_a, patch_a, 1).replace(anchor_b, patch_b, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P20 applied (tam collect block + tam partition key)")
+PY
+  fi
+else
+  echo ">>> ${ROLLOUT}: skipped (file not found for P20)"
+fi
+
+# --- Patch P21: data.py — cuda conversion for teacher_tam_weights -------
+# Mirror P12 VD cuda block for TAM weights.
+DATA_TAM_SENTINEL="# === mllmopd P21 tam weights cuda ==="
+if [ -f "${DATA_FILE}" ]; then
+  if grep -q "${DATA_TAM_SENTINEL}" "${DATA_FILE}"; then
+    echo ">>> ${DATA_FILE}: already patched (P21 tam-cuda sentinel present)"
+  else
+    echo ">>> patching ${DATA_FILE}: cuda conversion for teacher_tam_weights"
+    export MLLMOPD_PATCH_DATA_TAM_PATH="${DATA_FILE}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_DATA_TAM_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor on the P12 VD-cuda end sentinel + the blank line before
+# rollout_routed_experts.
+anchor = '''        # === end mllmopd P12 vd weights cuda ===
+
+    if "rollout_routed_experts" in rollout_data:'''
+patch = '''        # === end mllmopd P12 vd weights cuda ===
+        # === mllmopd P21 tam weights cuda ===
+        # Same cuda move for TAM-Boost weights when present. Hook always
+        # attaches a tensor when MLLMOPD_USE_TAM_BOOST=1 (ones on miss),
+        # so this branch fires on every A1-style step but silently skips
+        # on A0 / pre-Step3a baselines.
+        if "teacher_tam_weights" in rollout_data:
+            rollout_data["teacher_tam_weights"] = [
+                torch.tensor(w, device=torch.cuda.current_device(), dtype=torch.float32)
+                if not isinstance(w, torch.Tensor)
+                else w.to(device=torch.cuda.current_device(), dtype=torch.float32)
+                for w in rollout_data["teacher_tam_weights"]
+            ]
+        # === end mllmopd P21 tam weights cuda ===
+
+    if "rollout_routed_experts" in rollout_data:'''
+if anchor not in src:
+    sys.exit(f"ERROR: P21 anchor not found in {path!r} — P12 vd-cuda block may have moved or not applied yet")
+new_src = src.replace(anchor, patch, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P21 applied (teacher_tam_weights cuda conversion)")
+PY
+  fi
+else
+  echo ">>> ${DATA_FILE}: skipped (file not found for P21)"
+fi
+
+# --- Patch P22: loss.py — multiply OPD advantage by TAM weight ----------
+# Mirror P13: read teacher_tam_weights from rollout_data, slice to
+# response length, multiply into adv inside the per-sample loop. Position
+# is AFTER P13's VD multiplier (commutative; both end up applied if both
+# present). No-suppress invariant: tam_w ≥ 1.0 by construction.
+LOSS_TAM_SENTINEL="# === mllmopd P22 tam weights apply ==="
+if [ -f "${LOSS}" ]; then
+  if grep -q "${LOSS_TAM_SENTINEL}" "${LOSS}"; then
+    echo ">>> ${LOSS}: already patched (P22 tam-apply sentinel present)"
+  else
+    echo ">>> patching ${LOSS}: read + apply teacher_tam_weights in OPD branch"
+    export MLLMOPD_PATCH_LOSS_TAM_PATH="${LOSS}"
+    python3 - <<'PY'
+import os, sys
+path = os.environ["MLLMOPD_PATCH_LOSS_TAM_PATH"]
+with open(path) as f:
+    src = f.read()
+
+# Anchor A: insert tam_weights reader after P13's VD-reader end sentinel.
+anchor_a = '''        # === end mllmopd P13 vd weights apply (reader) ===
+
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+patch_a = '''        # === end mllmopd P13 vd weights apply (reader) ===
+        # === mllmopd P22 tam weights apply ===
+        # Per-token TAM-Boost weights from cached precompute, attached by
+        # mllmopd.training.tam_boost_hook when MLLMOPD_USE_TAM_BOOST=1.
+        # Multiplicative on top of any VD weights (commutative). No-suppress
+        # invariant: each entry is ≥ 1.0. See docs/step3a-design-2026-05-26.md.
+        teacher_tam_weights_list: list[torch.Tensor] | None = rollout_data.get("teacher_tam_weights")
+        if teacher_tam_weights_list is not None:
+            teacher_tam_weights_list = [
+                w.to(device=device) for w in teacher_tam_weights_list
+            ]
+            teacher_tam_weights_list = [
+                w[-response_length:]
+                for w, response_length in zip(teacher_tam_weights_list, response_lengths, strict=False)
+            ]
+        # === end mllmopd P22 tam weights apply (reader) ===
+
+        # Reverse KL divergence 正值表示教师比学生"更倾向"于选择该 token，即学生需要向教师靠拢'''
+
+# Anchor B: insert tam multiplier inside per-sample loop, AFTER P13's VD
+# multiplier end-sentinel and BEFORE `advantages.append(adv)`.
+anchor_b = '''                # === end mllmopd P13 vd weights apply (multiplier) ===
+            advantages.append(adv)'''
+patch_b = '''                # === end mllmopd P13 vd weights apply (multiplier) ===
+                # === mllmopd P22 tam weights apply (multiplier) ===
+                if teacher_tam_weights_list is not None:
+                    tam_w = teacher_tam_weights_list[i]
+                    if tam_w.shape[0] == adv.shape[0]:
+                        adv = adv * tam_w
+                    else:
+                        logger.warning(
+                            f"[OPD/TAM] sample {i}: tam_weight length {tam_w.shape[0]} "
+                            f"!= advantage length {adv.shape[0]}; skipping weight."
+                        )
+                # === end mllmopd P22 tam weights apply (multiplier) ===
+            advantages.append(adv)'''
+
+if anchor_a not in src:
+    sys.exit(f"ERROR: P22 anchor A (tam reader) not found in {path!r} — P13 vd-reader sentinel may have moved or not applied yet")
+if anchor_b not in src:
+    sys.exit(f"ERROR: P22 anchor B (tam multiplier) not found in {path!r} — P13 vd-multiplier sentinel may have moved or not applied yet")
+
+new_src = src.replace(anchor_a, patch_a, 1).replace(anchor_b, patch_b, 1)
+with open(path + ".tmp", "w") as f:
+    f.write(new_src)
+os.replace(path + ".tmp", path)
+print("    P22 applied (tam reader + tam multiplier)")
+PY
+  fi
+else
+  echo ">>> ${LOSS}: skipped (file not found for P22)"
+fi
