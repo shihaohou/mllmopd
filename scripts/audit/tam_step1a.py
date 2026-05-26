@@ -114,8 +114,25 @@ def _load_image_for_sample(rec: dict, image_root: Path, swap_lookup: dict):
 # Teacher pass — one sample
 # ============================================================================
 def teacher_pass(processor, model, rec: dict, image, args) -> dict:
-    """Returns the teacher-side block to be merged into the final row(s)."""
+    """Returns the teacher-side block to be merged into the final row(s).
+
+    Precompute mode (`MLLMOPD_TAM_PRECOMPUTE_ONLY=1`, added 2026-05-26):
+    skips work that's needed for Step 1a calibration analysis but NOT for
+    Step 3a TAM cache building (consumed by tam_precompute_train_pool.py).
+    Specifically skipped:
+      - teacher-forced forward with output_hidden_states/attentions=True
+        (heavy under eager attention)
+      - per-token lp / entropy / top1_margin computation
+      - attention baseline computation
+      - blank-image forward (only used to compute vd = lp_full - lp_blank)
+    Kept: generate + teacher-forced forward (logits only) + per-token TAM
+    extraction + classification. Fields populated by skipped steps are
+    filled with None / zeros so the writer schema stays stable.
+    Expect ~3-5x speedup on top of FA2 vs the full Step 1a pipeline.
+    """
     import torch
+
+    PRECOMPUTE_ONLY = os.environ.get("MLLMOPD_TAM_PRECOMPUTE_ONLY", "0") == "1"
 
     # OOM debug: reset peak-memory tracking and print at each phase.
     _DBG = os.environ.get("MLLMOPD_DEBUG_MEM", "0") == "1"
@@ -199,8 +216,11 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     with torch.inference_mode():
         out_full = model(
             **fwd_kwargs,
-            output_hidden_states=True,
-            output_attentions=True,
+            # Precompute only needs logits (for TAM); hidden_states +
+            # attentions are for the analysis side (entropy / margin /
+            # attention baseline) which we skip in PRECOMPUTE_ONLY mode.
+            output_hidden_states=(not PRECOMPUTE_ONLY),
+            output_attentions=(not PRECOMPUTE_ONLY),
         )
     dt_logit = time.time() - t1
     _mem("after_forward")
@@ -219,18 +239,24 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     # Predictor for response_ids[t] sits at index input_len + t - 1.
     full_logits_2d = out_full.logits[0]  # (T_full, V)
     T_full = full_logits_2d.shape[0]
-    lp_full: list[float] = []
-    teacher_entropy_full: list[float] = []
-    teacher_top1_margin_full: list[float] = []
-    for t in range(response_length):
-        pred_idx = input_len + t - 1
-        row = full_logits_2d[pred_idx]
-        log_probs = torch.log_softmax(row, dim=-1)
-        probs = torch.softmax(row.float(), dim=-1)
-        top2 = torch.topk(probs, 2)
-        lp_full.append(float(log_probs[response_ids[t]]))
-        teacher_entropy_full.append(float(-(probs * torch.log(probs + 1e-12)).sum()))
-        teacher_top1_margin_full.append(float(top2.values[0] - top2.values[1]))
+    if PRECOMPUTE_ONLY:
+        # Skip per-token loop — saves softmax + topk × response_length.
+        lp_full = [None] * response_length
+        teacher_entropy_full = [None] * response_length
+        teacher_top1_margin_full = [None] * response_length
+    else:
+        lp_full: list[float] = []
+        teacher_entropy_full: list[float] = []
+        teacher_top1_margin_full: list[float] = []
+        for t in range(response_length):
+            pred_idx = input_len + t - 1
+            row = full_logits_2d[pred_idx]
+            log_probs = torch.log_softmax(row, dim=-1)
+            probs = torch.softmax(row.float(), dim=-1)
+            top2 = torch.topk(probs, 2)
+            lp_full.append(float(log_probs[response_ids[t]]))
+            teacher_entropy_full.append(float(-(probs * torch.log(probs + 1e-12)).sum()))
+            teacher_top1_margin_full.append(float(top2.values[0] - top2.values[1]))
 
     # Build logit_list as VIEWS into full_logits with EXPECTED TAM shape:
     #   logit_list[0]  : (1, prompt_len, V)   — all prompt positions
@@ -281,10 +307,18 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     prompt_scalars   = [tam_scalars(m) for m in prompt_maps]
     response_peak    = [_tam_peak_meta(m) for m in response_maps]
 
-    # Attention baseline
+    # Attention baseline (skipped under PRECOMPUTE_ONLY — Step 3a doesn't need it)
     img_start_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][0]) if QWEN_VL_SPECIAL_IDS["img_id"][0] in input_ids_full else -1
     img_end_idx_full = input_ids_full.index(QWEN_VL_SPECIAL_IDS["img_id"][1]) if QWEN_VL_SPECIAL_IDS["img_id"][1] in input_ids_full else -1
     t3 = time.time()
+    if PRECOMPUTE_ONLY:
+        attn_maps = [np.zeros(vision_shape, dtype=np.float32) for _ in range(response_length)]
+        attn_scalars = [tam_scalars(m) for m in attn_maps]
+        attn_peak = [_tam_peak_meta(m) for m in attn_maps]
+        attn_failure = "skipped_precompute_only"
+        dt_attn = time.time() - t3
+        attn_baseline_valid = False
+    else:
     # v0.1.3: source attentions from the teacher-forced forward instead of
     # generate. Under SDPA they are None → fallback to zeros (same as before).
     # Under eager: out_full.attentions[layer] is (1, heads, T_full, T_full).
@@ -295,73 +329,79 @@ def teacher_pass(processor, model, rec: dict, image, args) -> dict:
     # (prompt_len > 1000) the per-layer (T, T) tensor itself can be
     # 100+ GB — eager baseline needs further per-layer streaming to be
     # OOM-safe. SDPA path is unaffected.
-    fwd_attns = out_full.attentions if hasattr(out_full, "attentions") else None
-    sdpa_drop = (
-        fwd_attns is None
-        or len(fwd_attns) == 0
-        or fwd_attns[0] is None
-    )
-    if img_start_idx_full >= 0 and img_end_idx_full >= 0 and not sdpa_drop:
-        attn_per_step = []
-        for t in range(response_length):
-            pos = input_len + t - 1
-            layer_tuple = tuple(
-                layer_attn[:, :, pos: pos + 1, : pos + 1]
-                for layer_attn in fwd_attns
-            )
-            attn_per_step.append(layer_tuple)
-        attn_maps, attn_scalars, attn_peak, attn_failure = _attention_baseline(
-            attn_per_step, response_length, input_len,
-            img_start_idx_full, img_end_idx_full, vision_shape,
+        fwd_attns = out_full.attentions if hasattr(out_full, "attentions") else None
+        sdpa_drop = (
+            fwd_attns is None
+            or len(fwd_attns) == 0
+            or fwd_attns[0] is None
         )
-    else:
-        attn_maps = [np.zeros(vision_shape, dtype=np.float32)] * response_length
-        attn_scalars = [tam_scalars(m) for m in attn_maps]
-        attn_peak = [_tam_peak_meta(m) for m in attn_maps]
-        attn_failure = "vision_span_or_attentions_missing"
-    dt_attn = time.time() - t3
-    attn_baseline_valid = (attn_failure is None)
+        if img_start_idx_full >= 0 and img_end_idx_full >= 0 and not sdpa_drop:
+            attn_per_step = []
+            for t in range(response_length):
+                pos = input_len + t - 1
+                layer_tuple = tuple(
+                    layer_attn[:, :, pos: pos + 1, : pos + 1]
+                    for layer_attn in fwd_attns
+                )
+                attn_per_step.append(layer_tuple)
+            attn_maps, attn_scalars, attn_peak, attn_failure = _attention_baseline(
+                attn_per_step, response_length, input_len,
+                img_start_idx_full, img_end_idx_full, vision_shape,
+            )
+        else:
+            attn_maps = [np.zeros(vision_shape, dtype=np.float32)] * response_length
+            attn_scalars = [tam_scalars(m) for m in attn_maps]
+            attn_peak = [_tam_peak_meta(m) for m in attn_maps]
+            attn_failure = "vision_span_or_attentions_missing"
+        dt_attn = time.time() - t3
+        attn_baseline_valid = (attn_failure is None)
     _mem("after_tam_attn")
 
     # --- Blank-image scoring on the SAME response_ids ---
-    # Build a blank-image chat with same prompt; teacher-forced forward.
-    from PIL import Image
-    blank_pil = Image.new("RGB", image.size, (128, 128, 128))
-    blank_chat = chat  # same prompt text (image-token positions are processor-driven)
-    blank_inputs = processor(
-        text=[blank_chat], images=[blank_pil], return_tensors="pt", padding=True,
-    ).to(model.device)
-    # Append response_ids to the prompt for teacher-forced scoring.
-    import torch
-    response_tensor = torch.tensor(response_ids, device=model.device).unsqueeze(0)
-    blank_input_ids = torch.cat([blank_inputs["input_ids"], response_tensor], dim=1)
-    blank_attn_mask = torch.cat([
-        blank_inputs["attention_mask"],
-        torch.ones_like(response_tensor),
-    ], dim=1)
-    blank_kwargs = dict(blank_inputs)
-    blank_kwargs["input_ids"] = blank_input_ids
-    blank_kwargs["attention_mask"] = blank_attn_mask
-
-    t4 = time.time()
-    lp_blank: list[float] = []
-    try:
-        with torch.inference_mode():
-            blank_outputs = model(**blank_kwargs)
-        blank_input_len = blank_inputs["input_ids"].shape[1]
-        # logits[i] predicts position i+1; so predictor for response[t]
-        # (which is at full position blank_input_len + t) is at index
-        # (blank_input_len + t - 1).
-        logits_blank = blank_outputs.logits[0]   # (T, V)
-        for t in range(response_length):
-            pred_idx = blank_input_len + t - 1
-            log_probs = torch.log_softmax(logits_blank[pred_idx], dim=-1)
-            lp_blank.append(float(log_probs[response_ids[t]]))
-    except Exception as e:  # noqa: BLE001
+    # SKIPPED under PRECOMPUTE_ONLY — only used to compute vd = lp_full - lp_blank,
+    # which Step 3a TAM cache builder doesn't need.
+    if PRECOMPUTE_ONLY:
         lp_blank = [None] * response_length
-        print(f"!! blank-image scoring failed: {type(e).__name__}: {e!s:.120}",
-              file=sys.stderr)
-    dt_blank = time.time() - t4
+        dt_blank = 0.0
+    else:
+        # Build a blank-image chat with same prompt; teacher-forced forward.
+        from PIL import Image
+        blank_pil = Image.new("RGB", image.size, (128, 128, 128))
+        blank_chat = chat  # same prompt text (image-token positions are processor-driven)
+        blank_inputs = processor(
+            text=[blank_chat], images=[blank_pil], return_tensors="pt", padding=True,
+        ).to(model.device)
+        # Append response_ids to the prompt for teacher-forced scoring.
+        import torch
+        response_tensor = torch.tensor(response_ids, device=model.device).unsqueeze(0)
+        blank_input_ids = torch.cat([blank_inputs["input_ids"], response_tensor], dim=1)
+        blank_attn_mask = torch.cat([
+            blank_inputs["attention_mask"],
+            torch.ones_like(response_tensor),
+        ], dim=1)
+        blank_kwargs = dict(blank_inputs)
+        blank_kwargs["input_ids"] = blank_input_ids
+        blank_kwargs["attention_mask"] = blank_attn_mask
+
+        t4 = time.time()
+        lp_blank: list[float] = []
+        try:
+            with torch.inference_mode():
+                blank_outputs = model(**blank_kwargs)
+            blank_input_len = blank_inputs["input_ids"].shape[1]
+            # logits[i] predicts position i+1; so predictor for response[t]
+            # (which is at full position blank_input_len + t) is at index
+            # (blank_input_len + t - 1).
+            logits_blank = blank_outputs.logits[0]   # (T, V)
+            for t in range(response_length):
+                pred_idx = blank_input_len + t - 1
+                log_probs = torch.log_softmax(logits_blank[pred_idx], dim=-1)
+                lp_blank.append(float(log_probs[response_ids[t]]))
+        except Exception as e:  # noqa: BLE001
+            lp_blank = [None] * response_length
+            print(f"!! blank-image scoring failed: {type(e).__name__}: {e!s:.120}",
+                  file=sys.stderr)
+        dt_blank = time.time() - t4
     _mem("after_blank")
 
     # v0.1.3 cleanup: out_full holds the heavy hidden_states / logits + (under
