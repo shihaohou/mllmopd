@@ -85,8 +85,20 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 LIMIT="${LIMIT:-0}"
 TEACHER_CKPT="${MMR1_7B_RL_CKPT:-MMR1/MMR1-7B-RL}"
 NUM_GPUS="${NUM_GPUS:-1}"
+# Cross-box sharding (2026-05-26): when running precompute on multiple
+# boxes that share a ceph mount, set BOX_RANK / NUM_BOXES per box. Each
+# box owns shards [BOX_RANK*NUM_GPUS .. (BOX_RANK+1)*NUM_GPUS-1] of the
+# cluster-wide TOTAL_SHARDS = NUM_BOXES * NUM_GPUS. All boxes write to
+# the SAME RUN_DIR; final merge is manual (see banner at end).
+BOX_RANK="${BOX_RANK:-0}"
+NUM_BOXES="${NUM_BOXES:-1}"
+TOTAL_SHARDS=$(( NUM_GPUS * NUM_BOXES ))
 if [ "${NUM_GPUS}" = "1" ]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+fi
+if [ "${BOX_RANK}" -ge "${NUM_BOXES}" ]; then
+  echo "ERROR: BOX_RANK=${BOX_RANK} must be < NUM_BOXES=${NUM_BOXES}" >&2
+  exit 1
 fi
 
 # Build --students NAME=PATH args from env. Skip any that are empty.
@@ -106,16 +118,20 @@ cat <<EOF
 ========================================
 TAM Step 1a launching
 ========================================
-  RUN_ID      = ${RUN_ID}
-  RUN_DIR     = ${RUN_DIR}
-  TEACHER     = ${TEACHER_CKPT}
-  STUDENTS    = ${STUDENT_ARGS[@]}
-  SUBSET      = ${SUBSET}
-  MAX_NEW_TOK = ${MAX_NEW_TOKENS}
-  LIMIT       = ${LIMIT}
-  ATTN_IMPL   = ${MLLMOPD_ATTN_IMPL}
-  NUM_GPUS    = ${NUM_GPUS}
-  CUDA        = ${CUDA_VISIBLE_DEVICES:-<unset>}
+  RUN_ID       = ${RUN_ID}
+  RUN_DIR      = ${RUN_DIR}
+  TEACHER      = ${TEACHER_CKPT}
+  STUDENTS     = ${STUDENT_ARGS[@]}
+  SUBSET       = ${SUBSET}
+  MAX_NEW_TOK  = ${MAX_NEW_TOKENS}
+  LIMIT        = ${LIMIT}
+  ATTN_IMPL    = ${MLLMOPD_ATTN_IMPL}
+  NUM_GPUS     = ${NUM_GPUS}
+  NUM_BOXES    = ${NUM_BOXES}
+  BOX_RANK     = ${BOX_RANK}
+  TOTAL_SHARDS = ${TOTAL_SHARDS}  (= NUM_GPUS × NUM_BOXES)
+  this box owns shard IDs [$(( BOX_RANK * NUM_GPUS ))..$(( (BOX_RANK + 1) * NUM_GPUS - 1 ))]
+  CUDA         = ${CUDA_VISIBLE_DEVICES:-<unset>}
 ========================================
 EOF
 
@@ -131,13 +147,24 @@ if [ "${NUM_GPUS}" = "1" ]; then
     --image-root . \
     "${EXTRA[@]}"
 else
-  # ---- Multi-GPU data-parallel fan-out ----
+  # ---- Multi-GPU data-parallel fan-out (optionally cross-box) ----
   # Each shard process is pinned to one GPU via CUDA_VISIBLE_DEVICES, gets
-  # the stride-i'th rows of the subset. Per-shard outputs are merged below.
-  echo ">>> Fanning out to ${NUM_GPUS} GPUs (data parallel; stride sharding)"
+  # the stride-(global_id)'th rows of the subset (where global_id =
+  # BOX_RANK*NUM_GPUS + i, and stride = TOTAL_SHARDS). All boxes write to
+  # the same RUN_DIR/shard_<global_id> via shared ceph.
+  if [ "${NUM_BOXES}" -gt 1 ]; then
+    echo ">>> Cross-box mode: BOX_RANK=${BOX_RANK} of ${NUM_BOXES}; "\
+         "this box runs ${NUM_GPUS} shards out of cluster-wide ${TOTAL_SHARDS}"
+    echo ">>> Auto-merge SKIPPED (other boxes may still be running)."
+    echo "    After all boxes finish, run ON ONE BOX:"
+    echo "      cat ${RUN_DIR}/shard_*/teacher_cache.jsonl > ${RUN_DIR}/teacher_cache.jsonl"
+    echo "      cat ${RUN_DIR}/shard_*/tam_step1a.jsonl   > ${RUN_DIR}/tam_step1a.jsonl"
+  fi
+  echo ">>> Fanning out to ${NUM_GPUS} GPUs on this box (cluster-wide stride sharding)"
   PIDS=()
   for i in $(seq 0 $((NUM_GPUS - 1))); do
-    SHARD_DIR="${RUN_DIR}/shard_${i}"
+    GLOBAL_ID=$(( BOX_RANK * NUM_GPUS + i ))
+    SHARD_DIR="${RUN_DIR}/shard_${GLOBAL_ID}"
     mkdir -p "${SHARD_DIR}"
     (
       export CUDA_VISIBLE_DEVICES="${i}"
@@ -148,25 +175,33 @@ else
         --out-dir "${SHARD_DIR}" \
         --max-new-tokens "${MAX_NEW_TOKENS}" \
         --image-root . \
-        --shard-id "${i}" \
-        --num-shards "${NUM_GPUS}" \
+        --shard-id "${GLOBAL_ID}" \
+        --num-shards "${TOTAL_SHARDS}" \
         "${EXTRA[@]}" \
         > "${SHARD_DIR}/stdout.log" 2> "${SHARD_DIR}/stderr.log"
-      echo "  shard ${i} done"
+      echo "  shard ${GLOBAL_ID} done (local gpu ${i})"
     ) &
     PIDS+=($!)
   done
 
   # Wait for all shards; print partial status
-  echo ">>> Waiting for ${#PIDS[@]} shards (tail per-shard logs at ${RUN_DIR}/shard_<i>/std{out,err}.log)"
+  echo ">>> Waiting for ${#PIDS[@]} local shards on this box "\
+       "(tail per-shard logs at ${RUN_DIR}/shard_<id>/std{out,err}.log)"
   for pid in "${PIDS[@]}"; do
     wait "${pid}" || echo "!! shard pid ${pid} exited non-zero"
   done
 
-  # Merge per-shard JSONLs
-  echo ">>> Merging shard outputs"
-  cat "${RUN_DIR}"/shard_*/teacher_cache.jsonl > "${RUN_DIR}/teacher_cache.jsonl" 2>/dev/null || true
-  cat "${RUN_DIR}"/shard_*/tam_step1a.jsonl   > "${RUN_DIR}/tam_step1a.jsonl"   2>/dev/null || true
+  # Merge only when single-box (cross-box: user merges manually after
+  # confirming all boxes finished).
+  if [ "${NUM_BOXES}" = "1" ]; then
+    echo ">>> Merging shard outputs (single-box mode)"
+    cat "${RUN_DIR}"/shard_*/teacher_cache.jsonl > "${RUN_DIR}/teacher_cache.jsonl" 2>/dev/null || true
+    cat "${RUN_DIR}"/shard_*/tam_step1a.jsonl   > "${RUN_DIR}/tam_step1a.jsonl"   2>/dev/null || true
+  else
+    echo ">>> Multi-box mode: NOT merging on this box. After all boxes:"
+    echo "    cat ${RUN_DIR}/shard_*/teacher_cache.jsonl > ${RUN_DIR}/teacher_cache.jsonl"
+    echo "    cat ${RUN_DIR}/shard_*/tam_step1a.jsonl   > ${RUN_DIR}/tam_step1a.jsonl"
+  fi
 
   # Aggregate summary
   {
