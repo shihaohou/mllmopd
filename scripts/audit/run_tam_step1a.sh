@@ -92,7 +92,15 @@ NUM_GPUS="${NUM_GPUS:-1}"
 # the SAME RUN_DIR; final merge is manual (see banner at end).
 BOX_RANK="${BOX_RANK:-0}"
 NUM_BOXES="${NUM_BOXES:-1}"
-TOTAL_SHARDS=$(( NUM_GPUS * NUM_BOXES ))
+# SHARDS_PER_GPU > 1 (2026-05-26): run multiple processes per physical GPU
+# when teacher_pass underutilizes compute. Useful for high-mem GPUs (H800
+# 141GB) where one MMR1-7B-RL teacher only occupies ~20GB. Each extra
+# process pays for its own CUDA context + model copy (~14GB weights), so
+# the practical max is ~6 procs/gpu before OOM. Speedup is typically
+# 1.3-1.5x at SHARDS_PER_GPU=2 (compute, not memory, is the bottleneck).
+SHARDS_PER_GPU="${SHARDS_PER_GPU:-1}"
+LOCAL_SHARDS=$(( NUM_GPUS * SHARDS_PER_GPU ))
+TOTAL_SHARDS=$(( LOCAL_SHARDS * NUM_BOXES ))
 if [ "${NUM_GPUS}" = "1" ]; then
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
@@ -126,12 +134,14 @@ TAM Step 1a launching
   MAX_NEW_TOK  = ${MAX_NEW_TOKENS}
   LIMIT        = ${LIMIT}
   ATTN_IMPL    = ${MLLMOPD_ATTN_IMPL}
-  NUM_GPUS     = ${NUM_GPUS}
-  NUM_BOXES    = ${NUM_BOXES}
-  BOX_RANK     = ${BOX_RANK}
-  TOTAL_SHARDS = ${TOTAL_SHARDS}  (= NUM_GPUS × NUM_BOXES)
-  this box owns shard IDs [$(( BOX_RANK * NUM_GPUS ))..$(( (BOX_RANK + 1) * NUM_GPUS - 1 ))]
-  CUDA         = ${CUDA_VISIBLE_DEVICES:-<unset>}
+  NUM_GPUS        = ${NUM_GPUS}
+  SHARDS_PER_GPU  = ${SHARDS_PER_GPU}
+  LOCAL_SHARDS    = ${LOCAL_SHARDS}  (= NUM_GPUS × SHARDS_PER_GPU)
+  NUM_BOXES       = ${NUM_BOXES}
+  BOX_RANK        = ${BOX_RANK}
+  TOTAL_SHARDS    = ${TOTAL_SHARDS}  (= LOCAL_SHARDS × NUM_BOXES)
+  this box owns shard IDs [$(( BOX_RANK * LOCAL_SHARDS ))..$(( (BOX_RANK + 1) * LOCAL_SHARDS - 1 ))]
+  CUDA            = ${CUDA_VISIBLE_DEVICES:-<unset>}
 ========================================
 EOF
 
@@ -154,20 +164,25 @@ else
   # the same RUN_DIR/shard_<global_id> via shared ceph.
   if [ "${NUM_BOXES}" -gt 1 ]; then
     echo ">>> Cross-box mode: BOX_RANK=${BOX_RANK} of ${NUM_BOXES}; "\
-         "this box runs ${NUM_GPUS} shards out of cluster-wide ${TOTAL_SHARDS}"
+         "this box runs ${LOCAL_SHARDS} shards out of cluster-wide ${TOTAL_SHARDS}"
     echo ">>> Auto-merge SKIPPED (other boxes may still be running)."
     echo "    After all boxes finish, run ON ONE BOX:"
     echo "      cat ${RUN_DIR}/shard_*/teacher_cache.jsonl > ${RUN_DIR}/teacher_cache.jsonl"
     echo "      cat ${RUN_DIR}/shard_*/tam_step1a.jsonl   > ${RUN_DIR}/tam_step1a.jsonl"
   fi
-  echo ">>> Fanning out to ${NUM_GPUS} GPUs on this box (cluster-wide stride sharding)"
+  if [ "${SHARDS_PER_GPU}" -gt 1 ]; then
+    echo ">>> Multi-process per GPU: ${SHARDS_PER_GPU} shards share each of ${NUM_GPUS} GPUs"
+    echo "    (each shard reloads MMR1-7B-RL ~14GB; expect 1.3-1.5x throughput, not Nx)"
+  fi
+  echo ">>> Fanning out to ${LOCAL_SHARDS} local shards on this box (cluster-wide stride sharding)"
   PIDS=()
-  for i in $(seq 0 $((NUM_GPUS - 1))); do
-    GLOBAL_ID=$(( BOX_RANK * NUM_GPUS + i ))
+  for local_i in $(seq 0 $((LOCAL_SHARDS - 1))); do
+    GPU_IDX=$(( local_i % NUM_GPUS ))
+    GLOBAL_ID=$(( BOX_RANK * LOCAL_SHARDS + local_i ))
     SHARD_DIR="${RUN_DIR}/shard_${GLOBAL_ID}"
     mkdir -p "${SHARD_DIR}"
     (
-      export CUDA_VISIBLE_DEVICES="${i}"
+      export CUDA_VISIBLE_DEVICES="${GPU_IDX}"
       PYTHONPATH=src python -m scripts.audit.tam_step1a \
         --subset "${SUBSET}" \
         --teacher "${TEACHER_CKPT}" \
@@ -179,7 +194,7 @@ else
         --num-shards "${TOTAL_SHARDS}" \
         "${EXTRA[@]}" \
         > "${SHARD_DIR}/stdout.log" 2> "${SHARD_DIR}/stderr.log"
-      echo "  shard ${GLOBAL_ID} done (local gpu ${i})"
+      echo "  shard ${GLOBAL_ID} done (gpu ${GPU_IDX})"
     ) &
     PIDS+=($!)
   done
