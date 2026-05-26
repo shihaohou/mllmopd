@@ -768,15 +768,29 @@ def main(argv: list[str] | None = None) -> int:
                     rec = json.loads(line)
                     teacher_cache[rec["id"]] = rec
         print(f">>> reused {len(teacher_cache)} teacher cache entries", file=sys.stderr)
-    else:
+
+    # Robustness fix (2026-05-26): a 0-byte or partial teacher_cache.jsonl
+    # from a prior interrupted run used to short-circuit the entire
+    # pipeline. The original code was `if exists: load; else: run teacher
+    # pass` — load-zero-rows entered the if-branch, fell straight through to
+    # student pass which had nothing to score, and wrote 0 rows of output
+    # without any error. Now: always check what's MISSING relative to the
+    # subset and run teacher pass to fill the gap. Append (vs overwrite) so
+    # any entries that DID load successfully are preserved.
+    missing = [rec for rec in subset if rec["id"] not in teacher_cache]
+    if missing:
+        print(f">>> teacher pass needed for {len(missing)}/{len(subset)} samples "
+              f"(cache had {len(teacher_cache)} valid entries)", file=sys.stderr)
         print(f">>> loading teacher: {args.teacher}", file=sys.stderr)
         t_proc, t_model = _build_model(args.teacher)
         teacher_cache_path.parent.mkdir(parents=True, exist_ok=True)
         import gc
         import torch
-        with teacher_cache_path.open("w") as tcf:
-            for k, rec in enumerate(subset):
-                print(f"--- [{k+1}/{len(subset)}] teacher pass on {rec['id']} "
+        # Append if pre-existing cache had any valid entries, else fresh write.
+        open_mode = "a" if teacher_cache else "w"
+        with teacher_cache_path.open(open_mode) as tcf:
+            for k, rec in enumerate(missing):
+                print(f"--- [{k+1}/{len(missing)}] teacher pass on {rec['id']} "
                       f"({rec.get('split_tag')}) ---", file=sys.stderr)
                 try:
                     image, source_tag = _load_image_for_sample(rec, image_root, swap_lookup)
@@ -805,6 +819,10 @@ def main(argv: list[str] | None = None) -> int:
             torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001
             pass
+    else:
+        print(f">>> teacher cache complete: {len(teacher_cache)} entries cover "
+              f"all {len(subset)} samples; skipping teacher pass",
+              file=sys.stderr)
 
     if args.skip_student:
         print(">>> --skip-student set; wrote teacher cache and exiting.",
