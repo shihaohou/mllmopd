@@ -57,7 +57,7 @@ def load_alignment(path: Path) -> list[dict]:
 
 def _per_sample_means(rec: dict, *,
                       token_filter=None,
-                      reliability_thresh: float | None = 0.95
+                      reliability_thresh: float | None = RELIABILITY_THRESH_DEFAULT
                       ) -> dict | None:
     """Compute sample-level mean of (S1−S0 vs T) for IoU / JS / Cos over
     tokens that satisfy `token_filter` AND have valid TAM on all three
@@ -120,6 +120,16 @@ def _per_sample_means(rec: dict, *,
 #   E[IoU]  ≈ p² / (2p−p²) = p / (2−p) = 0.2/1.8 ≈ 0.1111
 # (Reported alongside raw IoU for chance correction.)
 RANDOM_IOU_BASELINE_TOP20 = 0.20 / (2 - 0.20)  # = 0.1111...
+
+# Reliability filter threshold for `tam_entropy_norm_T < threshold`. v0.1.3
+# TAM on long-CoT MMR1 outputs has entropy saturated at 0.99+ (smoke
+# 2026-05-28 on 4355 tokens: min=0.9936, p25=0.9964, median=0.9974,
+# p75=0.9982, p90=0.9988, max=0.9996). The Step 0 / Step 2 calibration
+# (0.85-0.99, threshold = 0.95) was on v0.1.2 + 3B + short prompt (R ≈ 80)
+# and is NOT applicable to the long-CoT 7B-teacher regime — 0.95 filters
+# out every token. Default raised to 0.998 (≈ p75 of v0.1.3 distribution
+# on this regime), overridable via --reliability-thresh.
+RELIABILITY_THRESH_DEFAULT = 0.998
 
 
 def cluster_bootstrap_ci(per_sample_values: list[float], n_iter: int = 10000,
@@ -221,9 +231,11 @@ def _metric_block(vals: list[float]) -> dict:
     return {"mean": m, "ci_low": lo, "ci_high": hi, "sd": sd, "mde_95": mde}
 
 
-def aggregate_overall(rows: list[dict], reliability: bool = False) -> dict:
+def aggregate_overall(rows: list[dict], reliability: bool = False,
+                      reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                      ) -> dict:
     """Overall paired Δ — no stratification."""
-    thresh = 0.95 if reliability else None
+    thresh = reliability_thresh if reliability else None
     per_sample = [_per_sample_means(r, reliability_thresh=thresh) for r in rows]
     per_sample = [s for s in per_sample if s is not None]
     out: dict = {"n_samples": len(per_sample),
@@ -242,8 +254,10 @@ def aggregate_overall(rows: list[dict], reliability: bool = False) -> dict:
     return out
 
 
-def aggregate_per_bucket(rows: list[dict], reliability: bool = False) -> dict:
-    thresh = 0.95 if reliability else None
+def aggregate_per_bucket(rows: list[dict], reliability: bool = False,
+                         reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                         ) -> dict:
+    thresh = reliability_thresh if reliability else None
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         s = _per_sample_means(r, reliability_thresh=thresh)
@@ -262,11 +276,13 @@ def aggregate_per_bucket(rows: list[dict], reliability: bool = False) -> dict:
 
 
 def aggregate_per_category(rows: list[dict], reliability: bool = False,
-                           min_samples: int = 10) -> dict:
+                           min_samples: int = 10,
+                           reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                           ) -> dict:
     """Per token_category: filter tokens by category at sample level, then
     cluster-bootstrap across samples that contributed any tokens to that
     category."""
-    thresh = 0.95 if reliability else None
+    thresh = reliability_thresh if reliability else None
     out: dict = {}
     for cat in ALL_TOKEN_CATEGORIES:
         def _filt(rec, t, c=cat):
@@ -345,7 +361,7 @@ def _iou_topk(m1: np.ndarray, m2: np.ndarray, frac: float = 0.20) -> float:
 
 
 def _load_primary_sample_maps(rows: list[dict],
-                              entropy_thresh: float = 0.95) -> list[dict]:
+                              entropy_thresh: float = RELIABILITY_THRESH_DEFAULT) -> list[dict]:
     """Decode + reliability-filter maps for the OPD_improved primary cell.
 
     Returns a list of per-sample dicts: {T_maps, S0_maps, S1_maps,
@@ -548,7 +564,9 @@ def calibrate_null_c_spatial_scramble(samples_with_maps: list[dict],
 
 def calibrate_deltas(rows: list[dict],
                      n_iter_b: int = 100,
-                     n_iter_c: int = 100) -> dict:
+                     n_iter_c: int = 100,
+                     reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                     ) -> dict:
     """Compute null δ per metric across the full (reliability-filtered)
     OPD_improved bucket. Headline δ = max(δ_A, δ_B, δ_C) per design §6.4.
 
@@ -564,7 +582,7 @@ def calibrate_deltas(rows: list[dict],
     for r in rows:
         if r.get("bucket") != "OPD_improved":
             continue
-        s = _per_sample_means(r, reliability_thresh=0.95)
+        s = _per_sample_means(r, reliability_thresh=reliability_thresh)
         if s is None:
             continue
         primary_samples.append(s)
@@ -578,7 +596,7 @@ def calibrate_deltas(rows: list[dict],
     # Null B and Null C — need map decoding from the primary rows
     print(f"  [delta calibration] decoding maps for {len(primary_samples)} samples...",
           file=sys.stderr)
-    samples_with_maps = _load_primary_sample_maps(rows, entropy_thresh=0.95)
+    samples_with_maps = _load_primary_sample_maps(rows, entropy_thresh=reliability_thresh)
     print(f"  [delta calibration] running Null B (cross-sample) n_iter={n_iter_b}...",
           file=sys.stderr)
     null_B = calibrate_null_b_cross_sample(samples_with_maps, n_iter=n_iter_b)
@@ -718,7 +736,9 @@ def plot_per_category(per_category: dict, out_path: Path) -> None:
 # Qualitative picks (for tam_render_overlays.py)
 # ============================================================================
 def pick_qualitative(rows: list[dict], k_per_bucket: int = 3,
-                     tokens_per_case: int = 4) -> list[dict]:
+                     tokens_per_case: int = 4,
+                     reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                     ) -> list[dict]:
     """Pick representative cases per bucket. Within each sample, pick a
     handful of tokens that (a) are C_local, (b) have valid TAM, (c)
     teacher map is reasonably concentrated."""
@@ -732,7 +752,7 @@ def pick_qualitative(rows: list[dict], k_per_bucket: int = 3,
         # rank samples by mean ΔJS (largest first — most visually different)
         scored: list[tuple[float, dict]] = []
         for r in lst:
-            s = _per_sample_means(r, reliability_thresh=0.95)
+            s = _per_sample_means(r, reliability_thresh=reliability_thresh)
             if s is None:
                 continue
             scored.append((s["delta_js"], r))
@@ -855,7 +875,7 @@ def write_calibration_csv(deltas: dict, teacher_reliability: tuple[float, int, i
 
 def compute_teacher_reliability_rate(rows: list[dict],
                                      bucket: str = "OPD_improved",
-                                     thresh: float = 0.95) -> tuple[float, int, int]:
+                                     thresh: float = RELIABILITY_THRESH_DEFAULT) -> tuple[float, int, int]:
     """Fraction of OPD_improved tokens where teacher map satisfies
     tam_entropy_norm_T < thresh. Used to trigger §8 branch (d)."""
     n_total = 0
@@ -879,7 +899,9 @@ def compute_teacher_reliability_rate(rows: list[dict],
 def decide_branch(per_bucket_rel: dict,
                   per_category_rel: dict,
                   deltas: dict,
-                  teacher_reliability: tuple[float, int, int]) -> dict:
+                  teacher_reliability: tuple[float, int, int],
+                  reliability_thresh: float = RELIABILITY_THRESH_DEFAULT,
+                  ) -> dict:
     """Step 5 §8 decision via TOST on the PRIMARY cell
     (OPD_improved bucket × reliability-filtered).
 
@@ -903,9 +925,10 @@ def decide_branch(per_bucket_rel: dict,
             "label": ("(d) Teacher TAM unreliable on OPD_improved "
                       "(rate={:.2f}, {}/{}).".format(rel_rate, n_rel, n_tot)),
             "metric_status": {},
-            "reasoning": ("Less than 50% of OPD_improved tokens have a "
-                          "concentrated teacher map (entropy_norm_T < 0.95). "
-                          "Cannot ground EA-OPD; main §Method = T2-2/v3 only."),
+            "reasoning": (f"Less than 50% of OPD_improved tokens have a "
+                          f"concentrated teacher map (entropy_norm_T < "
+                          f"{reliability_thresh:.3f}). Cannot ground EA-OPD; "
+                          f"main §Method = T2-2/v3 only."),
             "used_cell": "OPD_improved x reliability",
             "deltas": deltas,
             "teacher_reliability_rate": rel_rate,
@@ -1031,7 +1054,8 @@ def write_results_md(overall: dict, overall_rel: dict,
                      per_category_primary_rel: dict,
                      picks: list[dict], decision: dict,
                      deltas: dict, teacher_reliability: tuple[float, int, int],
-                     out_path: Path) -> None:
+                     out_path: Path,
+                     reliability_thresh: float = RELIABILITY_THRESH_DEFAULT) -> None:
     def _fmt(d):
         return (f"{d['mean']:+.4f} [{d['ci_low']:+.4f}, {d['ci_high']:+.4f}]"
                 f"  sd={d['sd']:.4f}")
@@ -1078,7 +1102,7 @@ def write_results_md(overall: dict, overall_rel: dict,
         f.write("\n(Null B/C are not computed for `delta_cos` because the map-level "
                 "decomposition is only meaningful for JS/IoU — Cos δ falls back to Null A.)\n\n")
         f.write(f"Teacher TAM reliability rate on `OPD_improved` "
-                f"(entropy_norm_T < 0.95): **{rel_rate:.3f}** "
+                f"(entropy_norm_T < {reliability_thresh:.3f}): **{rel_rate:.3f}** "
                 f"({n_rel}/{n_tot} tokens).\n\n")
         f.write(f"Random IoU baseline (top-20%, independent patch sets): "
                 f"**{RANDOM_IOU_BASELINE_TOP20:.4f}**. Chance-correct IoU "
@@ -1092,7 +1116,7 @@ def write_results_md(overall: dict, overall_rel: dict,
                 f"{_fmt(overall['delta_js'])} | "
                 f"{_fmt(overall['delta_iou'])} | "
                 f"{_fmt(overall['delta_cos'])} |\n")
-        f.write(f"| reliability (entropy_norm_T < 0.95) — decision input | {overall_rel['n_samples']} | "
+        f.write(f"| reliability (entropy_norm_T < {reliability_thresh:.3f}) — decision input | {overall_rel['n_samples']} | "
                 f"{_fmt(overall_rel['delta_js'])} | "
                 f"{_fmt(overall_rel['delta_iou'])} | "
                 f"{_fmt(overall_rel['delta_cos'])} |\n\n")
@@ -1171,7 +1195,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="alignment.jsonl from tam_step5_evidence_alignment")
     ap.add_argument("--out-dir", type=Path,
                     default=Path("docs/figures/step5/"))
+    ap.add_argument("--reliability-thresh", type=float,
+                    default=RELIABILITY_THRESH_DEFAULT,
+                    help=(f"Token-level reliability filter: keep tokens where "
+                          f"`tam_entropy_norm_T < THRESH`. Default "
+                          f"{RELIABILITY_THRESH_DEFAULT} — calibrated for v0.1.3 "
+                          f"TAM on long-CoT 7B teacher (smoke 2026-05-28: "
+                          f"min=0.9936, p25=0.9964, p75=0.9982). Step 0/2 used "
+                          f"0.95 on v0.1.2 + short prompt — NOT applicable here."))
     args = ap.parse_args(argv)
+    THRESH = args.reliability_thresh
+    print(f">>> reliability_thresh = {THRESH:.4f} "
+          f"(tokens kept iff entropy_norm_T < THRESH)", file=sys.stderr)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "tables").mkdir(parents=True, exist_ok=True)
@@ -1184,22 +1219,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Aggregate (both filters, all axes) ---
     print(">>> computing overall (all tokens)", file=sys.stderr)
-    overall = aggregate_overall(rows, reliability=False)
+    overall = aggregate_overall(rows, reliability=False, reliability_thresh=THRESH)
     print(">>> computing overall (reliability filter)", file=sys.stderr)
-    overall_rel = aggregate_overall(rows, reliability=True)
+    overall_rel = aggregate_overall(rows, reliability=True, reliability_thresh=THRESH)
     print(">>> per-bucket (both filters)", file=sys.stderr)
-    per_bucket = aggregate_per_bucket(rows, reliability=False)
-    per_bucket_rel = aggregate_per_bucket(rows, reliability=True)
+    per_bucket = aggregate_per_bucket(rows, reliability=False, reliability_thresh=THRESH)
+    per_bucket_rel = aggregate_per_bucket(rows, reliability=True, reliability_thresh=THRESH)
     print(">>> per-category (both filters)", file=sys.stderr)
-    per_category = aggregate_per_category(rows, reliability=False)
-    per_category_rel = aggregate_per_category(rows, reliability=True)
+    per_category = aggregate_per_category(rows, reliability=False, reliability_thresh=THRESH)
+    per_category_rel = aggregate_per_category(rows, reliability=True, reliability_thresh=THRESH)
 
     # --- Null calibration on the PRIMARY cell (max of A/B/C per §6.4) ---
     print(">>> calibrating null thresholds δ on OPD_improved × reliability",
           file=sys.stderr)
-    deltas = calibrate_deltas(rows)
+    deltas = calibrate_deltas(rows, reliability_thresh=THRESH)
     teacher_reliability = compute_teacher_reliability_rate(
-        rows, bucket="OPD_improved", thresh=0.95,
+        rows, bucket="OPD_improved", thresh=THRESH,
     )
     print(f"    δ_JS={deltas.get('delta_js', float('nan')):.4f}  "
           f"δ_IoU={deltas.get('delta_iou', float('nan')):.4f}  "
@@ -1219,7 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
     # report's exploratory table.
     primary_rows = [r for r in rows if r.get("bucket") == "OPD_improved"]
     per_category_primary_rel = aggregate_per_category(
-        primary_rows, reliability=True,
+        primary_rows, reliability=True, reliability_thresh=THRESH,
     )
 
     # --- Tables ---
@@ -1242,7 +1277,8 @@ def main(argv: list[str] | None = None) -> int:
                       args.out_dir / "fig3_per_token_category.png")
 
     # --- Qualitative picks ---
-    picks = pick_qualitative(rows, k_per_bucket=3, tokens_per_case=4)
+    picks = pick_qualitative(rows, k_per_bucket=3, tokens_per_case=4,
+                             reliability_thresh=THRESH)
     with (args.out_dir / "qualitative_cases.jsonl").open("w") as f:
         for p in picks:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
@@ -1250,14 +1286,16 @@ def main(argv: list[str] | None = None) -> int:
     # --- Decision via TOST on the primary cell. branch (c) per-category
     #     comparison uses OPD_improved-only aggregation (per design §8). ---
     decision = decide_branch(per_bucket_rel, per_category_primary_rel,
-                             deltas, teacher_reliability)
+                             deltas, teacher_reliability,
+                             reliability_thresh=THRESH)
     write_results_md(overall, overall_rel,
                      per_bucket, per_bucket_rel,
                      per_category, per_category_rel,
                      per_category_primary_rel,
                      picks, decision,
                      deltas, teacher_reliability,
-                     args.out_dir / "step5-results.md")
+                     args.out_dir / "step5-results.md",
+                     reliability_thresh=THRESH)
     # Sidecar CSV with the primary cell category breakdown (branch (c) input)
     _write_primary_category_csv(per_category_primary_rel,
                                 args.out_dir / "tables" / "per_category_primary.csv")
