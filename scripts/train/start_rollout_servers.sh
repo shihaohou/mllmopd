@@ -229,7 +229,10 @@ for i in $(seq 0 $((ROLLOUT_NUM_ENGINES - 1))); do
     --node-rank 0
     --dtype bfloat16
     --trust-remote-code
-    --skip-server-warmup
+    # --skip-server-warmup removed 2026-05-27: causes /health_generate to
+    # hang forever in _wait_server_healthy (server HTTP listen is ready
+    # but forward path not warmed → eternal timeout). +30-60s/engine
+    # startup cost is acceptable. See memory/feedback_sglang_skip_warmup.md
     --enable-draft-weights-cpu-backup
     --mem-fraction-static "${ROLLOUT_MEM_FRACTION}"
     --max-total-tokens "${ROLLOUT_MAX_TOTAL_TOKENS}"
