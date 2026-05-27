@@ -925,20 +925,35 @@ def decide_branch(per_bucket_rel: dict,
     """
     rel_rate, n_rel, n_tot = teacher_reliability
 
-    # (d) — teacher TAM unreliable on this prompt distribution
-    if n_tot > 0 and rel_rate < 0.50:
+    # (d) — teacher TAM unreliable on this prompt distribution.
+    # Recalibrated for v0.1.3 long-CoT regime (smoke 2026-05-28): entropy
+    # is saturated at 0.99+ across the entire token distribution, so the
+    # original 50% pass-rate cutoff (designed for v0.1.2 [0.85, 0.99]
+    # bi-modal regime) became a design artifact that trips on healthy
+    # data. New trigger: only (d) if either the absolute count of
+    # reliable tokens is below a usable-statistics floor (30) OR the
+    # rate falls below a true-saturation floor (20% — i.e. <1/5 of
+    # tokens have any concentration, way below what we saw in smoke).
+    MIN_RELIABLE_TOKENS = 30
+    RATE_FLOOR = 0.20
+    if n_tot > 0 and (n_rel < MIN_RELIABLE_TOKENS or rel_rate < RATE_FLOOR):
         return {
             "branch": "unreliable",
             "label": ("(d) Teacher TAM unreliable on OPD_improved "
                       "(rate={:.2f}, {}/{}).".format(rel_rate, n_rel, n_tot)),
             "metric_status": {},
-            "reasoning": (f"Less than 50% of OPD_improved tokens have a "
-                          f"concentrated teacher map (entropy_norm_T < "
-                          f"{reliability_thresh:.3f}). Cannot ground EA-OPD; "
-                          f"main §Method = T2-2/v3 only."),
+            "reasoning": (
+                f"Reliable-token floor not met: n_reliable={n_rel} < "
+                f"{MIN_RELIABLE_TOKENS} OR rate={rel_rate:.3f} < {RATE_FLOOR}. "
+                f"Threshold = entropy_norm_T < {reliability_thresh:.3f}. "
+                f"TAM signal too diffuse to ground EA-OPD; main §Method = "
+                f"T2-2/v3 only."
+            ),
             "used_cell": "OPD_improved x reliability",
             "deltas": deltas,
             "teacher_reliability_rate": rel_rate,
+            "min_reliable_tokens_required": MIN_RELIABLE_TOKENS,
+            "rate_floor": RATE_FLOOR,
         }
 
     primary = per_bucket_rel.get("OPD_improved")
