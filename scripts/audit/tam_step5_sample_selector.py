@@ -96,7 +96,15 @@ def _extract_predicted(response: str) -> str:
     return ""
 
 
-def _normalize_answer(s: str) -> str:
+def _normalize_answer(s) -> str:
+    # Some datasets store `answer` as a list (HallusionBench multi-answer,
+    # MathVista numeric arrays, etc.). Coerce defensively before string ops.
+    if s is None:
+        return ""
+    if isinstance(s, list):
+        s = " ".join(str(x) for x in s) if s else ""
+    elif not isinstance(s, str):
+        s = str(s)
     s = s.strip().lower()
     # Strip trailing punctuation / quotes
     s = s.strip(" .,:;!?'\"()[]")
