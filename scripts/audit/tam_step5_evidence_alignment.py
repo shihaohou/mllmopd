@@ -423,6 +423,7 @@ def run_pass1(args, subset: list[dict], rollout_path: Path) -> dict:
 
     rollout_path.parent.mkdir(parents=True, exist_ok=True)
     open_mode = "a" if done else "w"
+    n = len(todo)
     with rollout_path.open(open_mode) as fout:
         for k, rec in enumerate(todo):
             try:
@@ -442,10 +443,13 @@ def run_pass1(args, subset: list[dict], rollout_path: Path) -> dict:
                 done[rec["id"]] = row
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 fout.flush()
-                if (k + 1) % 25 == 0:
-                    print(f"  [{k+1}/{len(todo)}] rolled out", file=sys.stderr)
+                rid_short = str(rec["id"])[:36]
+                print(f"  rollout [{k+1:4d}/{n}] {r['rollout_gen_s']:5.1f}s  "
+                      f"R={r['response_length']:4d}  {rid_short}",
+                      file=sys.stderr, flush=True)
             except Exception as e:  # noqa: BLE001
-                print(f"!! rollout failed on {rec['id']}: {e!r}", file=sys.stderr)
+                print(f"!! rollout failed on {rec['id']}: {e!r}",
+                      file=sys.stderr, flush=True)
             finally:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -486,10 +490,12 @@ def run_pass2_one_model(args, subset: list[dict], rollout_cache: dict,
 
     open_mode = "a" if done else "w"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    n = len(todo)
     with out_path.open(open_mode) as fout:
         for k, rec in enumerate(todo):
             rid = rec["id"]
             rollout = rollout_cache[rid]
+            t0 = time.time()
             try:
                 image, _ = _load_image_for_rec(rec, image_root)
                 result = model_pass_with_tam(
@@ -507,17 +513,20 @@ def run_pass2_one_model(args, subset: list[dict], rollout_cache: dict,
                     **result,
                 }
                 done[rid] = {**row, "_response_maps_arrays": _arrays}
-                # Don't write _per_token_valid (it duplicates tam_valid +
-                # zero-check; recoverable from maps_b64) — but it's small,
-                # keep for QC convenience.
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 fout.flush()
-                if (k + 1) % 10 == 0:
-                    print(f"  [{model_name}] [{k+1}/{len(todo)}] "
-                          f"fwd+tam done", file=sys.stderr)
+                dt = time.time() - t0
+                R = rollout["response_length"]
+                tams = result["_timings"]
+                rid_short = str(rid)[:36]
+                tam_valid = "ok" if result["tam_valid"] else "INVALID"
+                print(f"  {model_name} [{k+1:4d}/{n}] {dt:5.1f}s  "
+                      f"(fwd={tams['fwd_s']:.1f}s tam={tams['tam_s']:.1f}s) "
+                      f"R={R:4d}  {tam_valid}  {rid_short}",
+                      file=sys.stderr, flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"!! pass2 [{model_name}] failed on {rid}: {e!r}",
-                      file=sys.stderr)
+                      file=sys.stderr, flush=True)
             finally:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

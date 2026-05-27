@@ -290,8 +290,10 @@ def run_stage1(args) -> None:
     print(f">>> loading S0 ← {args.s0}", file=sys.stderr)
     s0_proc, s0_model = _build_model(args.s0)
     s0_responses: dict[str, str] = {}
+    n = len(todo)
     with predictions_path.open("a") as fout:
         for k, rec in enumerate(todo):
+            t0 = time.time()
             try:
                 img_path = _resolve_image_path(rec, image_root)
                 image = Image.open(img_path).convert("RGB")
@@ -300,11 +302,15 @@ def run_stage1(args) -> None:
                     args.system_prompt, args.max_new_tokens,
                 )
                 s0_responses[rec["id"]] = s0_resp
+                status = "ok"
             except Exception as e:  # noqa: BLE001
                 print(f"!! S0 gen failed on {rec['id']}: {e!r}", file=sys.stderr)
                 s0_responses[rec["id"]] = ""
-            if (k + 1) % 50 == 0:
-                print(f"  S0 [{k+1}/{len(todo)}]", file=sys.stderr)
+                status = "FAIL"
+            dt = time.time() - t0
+            rid_short = str(rec["id"])[:36]
+            print(f"  S0 [{k+1:4d}/{n}] {dt:5.1f}s  {status}  {rid_short}",
+                  file=sys.stderr, flush=True)
     # Free S0 memory
     try:
         import torch
@@ -321,6 +327,7 @@ def run_stage1(args) -> None:
             rid = rec["id"]
             if rid in done:
                 continue
+            t0 = time.time()
             try:
                 img_path = _resolve_image_path(rec, image_root)
                 image = Image.open(img_path).convert("RGB")
@@ -328,9 +335,11 @@ def run_stage1(args) -> None:
                     s1_proc, s1_model, image, rec["question"],
                     args.system_prompt, args.max_new_tokens,
                 )
+                status = "ok"
             except Exception as e:  # noqa: BLE001
                 print(f"!! S1 gen failed on {rid}: {e!r}", file=sys.stderr)
                 s1_resp = ""
+                status = "FAIL"
 
             s0_resp = s0_responses.get(rid, "")
             gold = rec.get("answer", "")
@@ -356,8 +365,14 @@ def run_stage1(args) -> None:
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             fout.flush()
-            if (k + 1) % 50 == 0:
-                print(f"  S1 [{k+1}/{len(todo)}]", file=sys.stderr)
+            dt = time.time() - t0
+            judge = ("S0+S1+" if s0_correct and s1_correct
+                     else "S0-S1+" if s1_correct
+                     else "S0+S1-" if s0_correct
+                     else "S0-S1-")
+            rid_short = str(rid)[:36]
+            print(f"  S1 [{k+1:4d}/{n}] {dt:5.1f}s  {status}  {judge}  {rid_short}",
+                  file=sys.stderr, flush=True)
 
 
 # ============================================================================
