@@ -95,8 +95,17 @@ N_FAILED="${N_FAILED:-60}"
 N_TEACHER_ADV="${N_TEACHER_ADV:-30}"
 N_DIVERSITY="${N_DIVERSITY:-40}"
 
-MAX_NEW_TOKENS_SEL="${MAX_NEW_TOKENS_SEL:-1024}"
+MAX_NEW_TOKENS_SEL="${MAX_NEW_TOKENS_SEL:-2048}"
 MAX_NEW_TOKENS_TAM="${MAX_NEW_TOKENS_TAM:-4096}"
+
+# Degraded mode (off by default — see docs/step5-…design.md §11).
+# When unset, selector hard-fails on missing opd_target_ids / bucket
+# deficits. Set ALLOW_DEGRADED_MODE=1 for pilot debugging only.
+DEGRADED_ARG=()
+if [ "${ALLOW_DEGRADED_MODE:-0}" = "1" ]; then
+  DEGRADED_ARG=(--allow-degraded-mode)
+  echo ">>> !! ALLOW_DEGRADED_MODE=1 — §6/§8 decision tree will NOT be interpretable"
+fi
 
 # For git rev label in writers
 MLLMOPD_CODE_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -140,15 +149,21 @@ if [ "${PHASE}" = "predict" ] || [ "${PHASE}" = "all" ]; then
         --n-failed "${N_FAILED}" \
         --n-teacher-advantage "${N_TEACHER_ADV}" \
         --n-diversity "${N_DIVERSITY}" \
+        "${DEGRADED_ARG[@]}" \
         "${OPD_TARGET_ARGS[@]}" \
         > "${SHARD_LOG}" 2>&1
       echo "  predict shard ${i} done"
     ) &
     PIDS+=($!)
   done
+  FAIL=0
   for pid in "${PIDS[@]}"; do
-    wait "${pid}" || echo "!! predict shard pid ${pid} exited non-zero"
+    wait "${pid}" || { FAIL=1; echo "!! predict shard pid ${pid} exited non-zero"; }
   done
+  if [ "${FAIL}" -ne 0 ]; then
+    echo "!! HARD FAIL: predict phase had failing shard(s). See ${RUN_DIR}/predict_shard_*.log"
+    exit 11
+  fi
   echo ">>> predict phase done; shard logs at ${RUN_DIR}/predict_shard_*.log"
 fi
 
@@ -157,7 +172,7 @@ fi
 # ============================================================================
 if [ "${PHASE}" = "bucket" ] || [ "${PHASE}" = "all" ]; then
   echo "----- Phase: bucket (single process) -----"
-  PYTHONPATH=src python -m scripts.audit.tam_step5_sample_selector \
+  if ! PYTHONPATH=src python -m scripts.audit.tam_step5_sample_selector \
     "${CAND_ARGS[@]}" \
     --s0 "${MMR1_3B_SFT_CKPT}" \
     --s1 "${S1_CKPT}" \
@@ -169,10 +184,22 @@ if [ "${PHASE}" = "bucket" ] || [ "${PHASE}" = "all" ]; then
     --n-failed "${N_FAILED}" \
     --n-teacher-advantage "${N_TEACHER_ADV}" \
     --n-diversity "${N_DIVERSITY}" \
-    "${OPD_TARGET_ARGS[@]}"
+    "${DEGRADED_ARG[@]}" \
+    "${OPD_TARGET_ARGS[@]}"; then
+    echo "!! HARD FAIL: bucket phase rejected (likely missing opd_target_ids "
+    echo "   or bucket deficit). See selector stderr above. Pass "
+    echo "   ALLOW_DEGRADED_MODE=1 for pilot debugging only."
+    exit 21
+  fi
 
   echo ">>> sample subset written: ${SAMPLES_OUT}"
-  wc -l "${SAMPLES_OUT}"
+  N_SAMPLES=$(wc -l < "${SAMPLES_OUT}")
+  echo "  n_samples = ${N_SAMPLES}"
+  EXPECTED_TOTAL=$((N_IMPROVED + N_FAILED + N_TEACHER_ADV + N_DIVERSITY))
+  if [ "${N_SAMPLES}" -lt "${EXPECTED_TOTAL}" ] && [ "${ALLOW_DEGRADED_MODE:-0}" != "1" ]; then
+    echo "!! HARD FAIL: only ${N_SAMPLES} samples; expected ${EXPECTED_TOTAL}"
+    exit 22
+  fi
 fi
 
 # ============================================================================
@@ -209,14 +236,38 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
     PIDS+=($!)
   done
   echo ">>> waiting for ${#PIDS[@]} tam shards (tail ${RUN_DIR}/shard_*/std*.log)"
+  FAIL=0
   for pid in "${PIDS[@]}"; do
-    wait "${pid}" || echo "!! tam shard pid ${pid} exited non-zero"
+    wait "${pid}" || { FAIL=1; echo "!! tam shard pid ${pid} exited non-zero"; }
   done
+  if [ "${FAIL}" -ne 0 ]; then
+    echo "!! HARD FAIL: tam phase had failing shard(s). See ${RUN_DIR}/shard_*/stderr.log"
+    exit 31
+  fi
 
   echo ">>> merging shard alignment files"
   cat "${RUN_DIR}"/shard_*/alignment.jsonl > "${RUN_DIR}/alignment.jsonl" 2>/dev/null || true
   N_ROWS=$(wc -l < "${RUN_DIR}/alignment.jsonl" 2>/dev/null || echo 0)
   echo "  merged ${N_ROWS} alignment rows"
+
+  # Row-count check — sum per-shard expected = total samples; drops are
+  # allowed when TAM is invalid on any of T/S0/S1 (see Pass 3 drops.txt).
+  N_SAMPLES=$(wc -l < "${SAMPLES_OUT}")
+  N_DROPS=0
+  for i in $(seq 0 $((NUM_GPUS - 1))); do
+    sd="${RUN_DIR}/shard_${i}"
+    if [ -f "${sd}/alignment.drops.txt" ]; then
+      d=$(grep '^n_skipped_tam_invalid=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+      N_DROPS=$((N_DROPS + d))
+    fi
+  done
+  N_EXPECTED=$((N_SAMPLES - N_DROPS))
+  if [ "${N_ROWS}" -lt "${N_EXPECTED}" ]; then
+    echo "!! HARD FAIL: alignment rows=${N_ROWS} but expected=${N_EXPECTED} "
+    echo "   (samples=${N_SAMPLES}, tam_invalid_drops=${N_DROPS})."
+    exit 32
+  fi
+  echo "  row count OK: ${N_ROWS} (samples=${N_SAMPLES} − tam_invalid=${N_DROPS})"
 
   {
     echo "# Step 5 TAM evidence alignment  (commit=${MLLMOPD_CODE_COMMIT})"
@@ -225,15 +276,22 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
     echo "s1      = ${S1_CKPT}"
     echo "samples = ${SAMPLES_OUT}"
     echo "num_shards (NUM_GPUS) = ${NUM_GPUS}"
+    echo "n_samples_input       = ${N_SAMPLES}"
+    echo "n_tam_invalid_drops   = ${N_DROPS}"
     echo "n_alignment_rows      = ${N_ROWS}"
     echo "merged alignment      = ${RUN_DIR}/alignment.jsonl"
+    echo "allow_degraded_mode   = ${ALLOW_DEGRADED_MODE:-0}"
     echo
     echo "per-shard:"
     for i in $(seq 0 $((NUM_GPUS - 1))); do
       sd="${RUN_DIR}/shard_${i}"
       nr=$(wc -l < "${sd}/alignment.jsonl" 2>/dev/null || echo 0)
       nro=$(wc -l < "${sd}/rollout_cache.jsonl" 2>/dev/null || echo 0)
-      echo "  shard ${i}: rollouts=${nro}  alignment=${nr}"
+      drops_line=""
+      if [ -f "${sd}/alignment.drops.txt" ]; then
+        drops_line=" $(tr '\n' ' ' < "${sd}/alignment.drops.txt")"
+      fi
+      echo "  shard ${i}: rollouts=${nro}  alignment=${nr}${drops_line}"
     done
   } > "${RUN_DIR}/summary.txt"
   echo ">>> summary: ${RUN_DIR}/summary.txt"

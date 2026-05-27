@@ -388,7 +388,15 @@ def _merge_shards(base_path: Path, num_shards: int) -> list[dict]:
 
 
 def run_stage2(args) -> None:
-    """Bucket the predictions + stratified pick."""
+    """Bucket the predictions + stratified pick.
+
+    Hard-fail behavior (per docs/step5-evidence-alignment-design.md §11):
+    - If `opd_target_ids` is missing/empty and `n_teacher_advantage > 0`,
+      and `--allow-degraded-mode` is NOT set, refuse to write samples.
+    - If any bucket comes up short of its target and not degraded-mode,
+      refuse to fill from neighbors — abort and ask the user to extend
+      `--candidates` instead.
+    """
     rng = random.Random(args.seed)
 
     predictions_path = Path(args.predictions_out)
@@ -400,11 +408,34 @@ def run_stage2(args) -> None:
     opd_target_ids = _load_opd_target_ids(
         Path(args.opd_target_ids) if args.opd_target_ids else None
     )
+
+    # Prerequisite 1 — Teacher_advantage bucket needs opd_target ids
+    if args.n_teacher_advantage > 0:
+        if not opd_target_ids:
+            msg = ("Teacher_advantage bucket requires --opd-target-ids "
+                   f"pointing to a non-empty JSON; n_teacher_advantage="
+                   f"{args.n_teacher_advantage} but ids loaded = 0.")
+            if not args.allow_degraded_mode:
+                sys.exit("!! HARD FAIL: " + msg
+                         + " Pass --allow-degraded-mode to fall back "
+                         "to Dataset_diversity, but §6/§8 decision tree "
+                         "will not be interpretable.")
+            print(f"!! DEGRADED MODE: {msg}", file=sys.stderr)
+        elif len(opd_target_ids) < args.n_teacher_advantage:
+            msg = (f"opd_target_ids has {len(opd_target_ids)} entries "
+                   f"but n_teacher_advantage={args.n_teacher_advantage}.")
+            if not args.allow_degraded_mode:
+                sys.exit("!! HARD FAIL: " + msg
+                         + " Extend opd_target_ids.json or lower "
+                         "--n-teacher-advantage; --allow-degraded-mode "
+                         "to fall back.")
+            print(f"!! DEGRADED MODE: {msg}", file=sys.stderr)
+
     if opd_target_ids:
         print(f">>> opd_target ids: {len(opd_target_ids)}", file=sys.stderr)
     else:
-        print(">>> no opd_target ids; Teacher_advantage bucket will draw from "
-              "general visual-critical fallback", file=sys.stderr)
+        print(">>> no opd_target ids; Teacher_advantage bucket will be empty",
+              file=sys.stderr)
 
     diversity_benchmarks = {"ChartQA", "MathVista"}
 
@@ -473,9 +504,23 @@ def run_stage2(args) -> None:
             print(f"!! deficit on {b}: needed {n}, got {len(take)}",
                   file=sys.stderr)
 
-    # ----- Re-fill deficits from Dataset_diversity surplus -----
-    deficit_total = sum(deficits.values())
-    if deficit_total > 0:
+    # ----- Bucket-deficit policy -----
+    # Prerequisite 3 (per design §11) — fail hard if any bucket short
+    # unless degraded mode is explicit.
+    if deficits:
+        msg = (f"bucket deficits: {dict(deficits)}. "
+               f"Candidate pool yielded fewer than the target in "
+               f"{len(deficits)} bucket(s).")
+        if not args.allow_degraded_mode:
+            sys.exit("!! HARD FAIL: " + msg + " Extend --candidates or "
+                     "lower bucket targets; --allow-degraded-mode to "
+                     "fill deficits from Dataset_diversity/OPD_failed "
+                     "surplus (decision tree will be unreliable).")
+        # ----- Degraded mode: re-fill from surplus -----
+        print(f"!! DEGRADED MODE: filling {sum(deficits.values())} "
+              f"deficit slot(s) from Dataset_diversity / OPD_failed surplus",
+              file=sys.stderr)
+        deficit_total = sum(deficits.values())
         used_so_far = {r["id"] for r in picked}
         diversity_extras = [r for r in by_bucket["Dataset_diversity"]
                             if r["id"] not in used_so_far]
@@ -483,9 +528,9 @@ def run_stage2(args) -> None:
         for r in diversity_extras[:deficit_total]:
             r2 = dict(r)
             r2["bucket"] = "Dataset_diversity"
+            r2["_degraded_fill"] = True
             picked.append(r2)
         if len(picked) < sum(targets.values()):
-            # Final fallback: any remaining OPD_failed (usually plentiful)
             failed_extras = [r for r in by_bucket["OPD_failed"]
                              if r["id"] not in {x["id"] for x in picked}]
             rng.shuffle(failed_extras)
@@ -493,6 +538,7 @@ def run_stage2(args) -> None:
             for r in failed_extras[:need]:
                 r2 = dict(r)
                 r2["bucket"] = "OPD_failed"
+                r2["_degraded_fill"] = True
                 picked.append(r2)
 
     print(f"\n>>> final stratified pick: n = {len(picked)}", file=sys.stderr)
@@ -510,9 +556,12 @@ def run_stage2(args) -> None:
 
     # Also write a summary
     summary_path = out_path.with_suffix(".summary.txt")
+    n_degraded_fill = sum(1 for r in picked if r.get("_degraded_fill"))
     with summary_path.open("w") as f:
         f.write(f"# Step 5 sample selector  (commit="
                 f"{os.environ.get('MLLMOPD_CODE_COMMIT', 'unknown')})\n")
+        if args.allow_degraded_mode and (deficits or not opd_target_ids):
+            f.write("\n!! DEGRADED MODE — §6/§8 decision tree NOT INTERPRETABLE !!\n\n")
         f.write(f"candidates input: {args.candidates}\n")
         f.write(f"S0 = {args.s0}\n")
         f.write(f"S1 = {args.s1}\n")
@@ -525,10 +574,12 @@ def run_stage2(args) -> None:
         for b, n in cnt.items():
             f.write(f"  {b}: {n}\n")
         if deficits:
-            f.write("\ndeficits (filled from Dataset_diversity):\n")
+            f.write(f"\ndeficits (filled from Dataset_diversity / OPD_failed: "
+                    f"n={n_degraded_fill}):\n")
             for b, n in deficits.items():
                 f.write(f"  {b}: short by {n}\n")
-        f.write(f"\noutput JSONL: {out_path}\n")
+        f.write(f"\nallow_degraded_mode = {args.allow_degraded_mode}\n")
+        f.write(f"output JSONL: {out_path}\n")
 
 
 # ============================================================================
@@ -548,11 +599,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="JSON file mapping benchmark→list of opd_target ids")
     ap.add_argument("--image-root", default=".")
     ap.add_argument("--system-prompt", default=MMR1_SYSTEM_PROMPT)
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
+    ap.add_argument("--max-new-tokens", type=int, default=2048,
+                    help="Selector S0/S1 generation cap. Should ≥ TAM "
+                         "runner's --max-new-tokens to keep bucket "
+                         "labels accurate. Default 2048 (was 1024 in "
+                         "early ship; raised per GPT review on 13d73c1).")
     ap.add_argument("--n-improved", type=int, default=70)
     ap.add_argument("--n-failed", type=int, default=60)
     ap.add_argument("--n-teacher-advantage", type=int, default=30)
     ap.add_argument("--n-diversity", type=int, default=40)
+    ap.add_argument("--allow-degraded-mode", action="store_true",
+                    help="Opt-in fallback: missing opd_target_ids and/or "
+                         "bucket deficits get silently filled. The §6/§8 "
+                         "decision tree will NOT be interpretable in this "
+                         "mode — for pilot / debugging only.")
     ap.add_argument("--seed", type=int, default=1729)
     ap.add_argument("--stage", choices=["1", "2", "both"], default="both",
                     help="1=predict only, 2=bucket only, both=run both")

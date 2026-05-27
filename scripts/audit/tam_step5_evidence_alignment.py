@@ -217,12 +217,19 @@ def model_pass_with_tam(processor, model, rec, image,
     tokens_full_list = full_ids[0, : input_len + response_length].cpu().tolist()
 
     # ----- Run TAM per response token -----
+    # Length-alignment invariant: every returned list MUST have length
+    # response_length. If TAM throws mid-loop, we pad the remainder with
+    # zero-maps + tam_scalars-of-zeros and mark `_per_token_valid[t]=False`.
+    # Pass 3 will refuse to use any sample where any of T/S0/S1 has
+    # `tam_valid=False` (sample-level drop, not token-level).
     t1 = time.time()
     img_scores_list: list = []
     response_maps: list = []
+    per_token_valid: list[bool] = []
+    first_failure_idx: int | None = None
     tam_failure = None
-    try:
-        for i in range(response_length):
+    for i in range(response_length):
+        try:
             m = TAM(
                 tokens=tokens_full_list,
                 vision_shape=vision_shape,
@@ -234,16 +241,28 @@ def model_pass_with_tam(processor, model, rec, image,
                 out_prompt_maps=None,  # Step 5 doesn't store prompt-token maps
             )
             response_maps.append(m)
-    except Exception as e:  # noqa: BLE001
-        tam_failure = f"runtime:{type(e).__name__}:{e!s:.120}"
+            per_token_valid.append(bool(np.asarray(m).sum() > 0))
+        except Exception as e:  # noqa: BLE001
+            if first_failure_idx is None:
+                first_failure_idx = i
+                tam_failure = f"runtime@t={i}:{type(e).__name__}:{e!s:.120}"
+            # Pad with zero map so downstream length invariant holds
+            response_maps.append(np.zeros(vision_shape, dtype=np.float32))
+            per_token_valid.append(False)
     dt_tam = time.time() - t1
 
-    tam_valid = (
-        tam_failure is None
-        and len(response_maps) == response_length
-    )
+    assert len(response_maps) == response_length, \
+        f"length invariant broken: maps={len(response_maps)} vs R={response_length}"
+    assert len(per_token_valid) == response_length
 
-    # Per-token scalars
+    # Sample-level tam_valid: TRUE only if no per-token failure AND at
+    # least one token has a non-degenerate map (handles all-zero
+    # degenerate runs).
+    n_per_token_valid = sum(per_token_valid)
+    tam_valid = (tam_failure is None) and (n_per_token_valid > 0)
+
+    # Per-token scalars (computed on the padded maps; tam_scalars of a
+    # zero-map returns the documented uniform-equivalent defaults).
     response_scalars = [tam_scalars(m) for m in response_maps]
 
     # Cleanup before returning
@@ -266,9 +285,11 @@ def model_pass_with_tam(processor, model, rec, image,
         "tam_effective_patch_frac": [s["tam_effective_patch_frac"] for s in response_scalars],
         "_response_maps_b64":       [_b64_uint8_map(m) for m in response_maps],
         "_response_maps_arrays":    response_maps,  # in-memory only, NOT serialized
-        "_per_token_valid":         [bool(np.asarray(m).sum() > 0) for m in response_maps],
+        "_per_token_valid":         per_token_valid,
+        "n_per_token_valid":        n_per_token_valid,
         "tam_valid":                bool(tam_valid),
         "tam_failure_reason":       tam_failure,
+        "tam_failure_first_idx":    first_failure_idx,
         "vision_shape":             list(vision_shape),
         "n_patches":                n_patches,
         "_timings":                 {"fwd_s": dt_fwd, "tam_s": dt_tam},
@@ -538,24 +559,46 @@ def run_pass3(args, subset: list[dict], rollout_cache: dict,
     image_root = Path(args.image_root)
 
     n_written = 0
+    n_skipped_missing = 0
+    n_skipped_tam_invalid = 0
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as fout:
         for rec in subset:
             rid = rec["id"]
             if rid not in rollout_cache:
+                n_skipped_missing += 1
                 continue
             if not all(rid in per_model[m] for m in ("T", "S0", "S1")):
+                n_skipped_missing += 1
                 continue
             rollout = rollout_cache[rid]
             blocks = {m: per_model[m][rid] for m in ("T", "S0", "S1")}
+
+            # ---- Sample-level drop: any model with tam_valid=False kills
+            # the sample (per design §11: token-level partial failure padded
+            # to length, sample-level dropped — never half-valid rows).
+            invalid_models = [m for m in ("T", "S0", "S1")
+                              if not blocks[m].get("tam_valid", False)]
+            if invalid_models:
+                n_skipped_tam_invalid += 1
+                reasons = ",".join(
+                    f"{m}={blocks[m].get('tam_failure_reason', 'unknown')}"
+                    for m in invalid_models
+                )
+                print(f"  skip {rid}: invalid TAM on {invalid_models}; {reasons}",
+                      file=sys.stderr)
+                continue
 
             response_ids = rollout["response_ids"]
             R = rollout["response_length"]
             response_tokens = tokenizer.convert_ids_to_tokens(response_ids)
 
-            # Resolve token-aligned maps for the three models
+            # Resolve token-aligned maps for the three models. After the
+            # tam_valid drop above, every model's arrays have length R
+            # (model_pass_with_tam enforces the invariant).
             maps_dict: dict[str, list[np.ndarray]] = {}
             valid_dict: dict[str, list[bool]] = {}
+            length_ok = True
             for m_name in ("T", "S0", "S1"):
                 b = blocks[m_name]
                 if "_response_maps_arrays" in b:
@@ -564,14 +607,20 @@ def run_pass3(args, subset: list[dict], rollout_cache: dict,
                     h, w = b["vision_shape"]
                     arrs = [_decode_b64_map(s, h, w)
                             for s in b["_response_maps_b64"]]
-                # Pad / trim to R
                 if len(arrs) != R:
-                    arrs = (arrs + [np.zeros(b["vision_shape"], dtype=np.float32)] * R)[:R]
+                    print(f"!! length-invariant violation on {rid}/{m_name}: "
+                          f"maps={len(arrs)} R={R} — dropping sample",
+                          file=sys.stderr)
+                    length_ok = False
+                    break
+                pv = b.get("_per_token_valid")
+                if pv is None or len(pv) != R:
+                    pv = [bool(np.asarray(a).sum() > 0) for a in arrs]
                 maps_dict[m_name] = arrs
-                valid_dict[m_name] = b.get(
-                    "_per_token_valid",
-                    [bool(a.sum() > 0) for a in arrs],
-                )
+                valid_dict[m_name] = pv
+            if not length_ok:
+                n_skipped_tam_invalid += 1
+                continue
 
             # Per-token alignment
             align_S0_T = compute_alignment_per_token(
@@ -684,8 +733,17 @@ def run_pass3(args, subset: list[dict], rollout_cache: dict,
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_written += 1
 
-    print(f">>> Pass 3: wrote {n_written} alignment rows to {out_path}",
+    print(f">>> Pass 3: wrote {n_written} alignment rows to {out_path}; "
+          f"skipped {n_skipped_missing} (missing per-model output) + "
+          f"{n_skipped_tam_invalid} (TAM invalid)",
           file=sys.stderr)
+    # Write a sidecar drop log for the launcher's row-count check
+    drop_log = out_path.with_suffix(".drops.txt")
+    with drop_log.open("w") as f:
+        f.write(f"n_written={n_written}\n")
+        f.write(f"n_skipped_missing={n_skipped_missing}\n")
+        f.write(f"n_skipped_tam_invalid={n_skipped_tam_invalid}\n")
+        f.write(f"n_expected={len(subset)}\n")
 
 
 # ============================================================================

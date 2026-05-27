@@ -246,10 +246,14 @@ For every token × every model:
 - `tam_entropy`, `tam_entropy_norm` — diffuseness; low = trustworthy map
 - `tam_effective_patch_frac` — exp(entropy) / n_patches
 
-**Reliability filter (post-hoc, not pre-filter):** report all token
-metrics, then re-aggregate restricted to tokens where the teacher map
-satisfies `tam_entropy_norm < 0.95` (teacher concentration above the
-random-uniform baseline). This is published as a sensitivity row.
+**Reliability filter (PRIMARY, not sensitivity):** the headline decision
+restricts to tokens where the teacher map satisfies `tam_entropy_norm_T
+< 0.95` (teacher concentration above the random-uniform baseline).
+All-token aggregates are also reported but flagged as exploratory only —
+without the filter, tokens whose teacher map is uniform get scored
+against meaningless targets and dilute the signal. The 0.95 threshold
+was chosen because Step 0 found `tam_entropy_norm ∈ [0.85, 0.99]` on
+non-content tokens; 0.95 is the elbow in the entropy distribution.
 
 ### 6.3 Headline quantity
 
@@ -262,13 +266,69 @@ random-uniform baseline). This is published as a sensitivity row.
 Reported with paired bootstrap CI (10k resamples, sample-level cluster)
 because tokens within a sample are not independent.
 
-### 6.4 Stratifications (always reported)
+### 6.4 Null calibration of δ (alignment "noise floor")
+
+Hardcoded thresholds like "ΔJS > 0.05" beg the question of whether
+0.05 is large or small relative to model-pair noise. We calibrate the
+practical equivalence margin `δ` empirically per metric via three
+nulls:
+
+```
+Null A — sample-label permutation:
+    For each sample, randomly swap M_S0 ↔ M_S1 (token-wise) and recompute
+    ΔJS/ΔIoU/ΔCos. Repeat 1000×. δ_A = 95th percentile of |Δ_null|.
+
+Null B — cross-sample pairing:
+    Pair (M_T from sample i, M_S0/S1 from sample j ≠ i) and compute the
+    same metrics. δ_B = 95th percentile.
+
+Null C — spatial scramble:
+    Apply a fixed permutation of patch positions to M_S0 and M_S1
+    (preserve TAM concentration, destroy spatial alignment with M_T).
+    δ_C = 95th percentile.
+```
+
+The headline `δ` per metric is `max(δ_A, δ_B, δ_C)` — the most
+conservative noise floor. These calibrations run on the same audit data
+(no extra forward), cost <1 minute, and are emitted as a
+`tables/null_calibration.csv` artifact.
+
+### 6.5 Decision via TOST equivalence test (NOT CI-cross-zero)
+
+`branch (b)` — the most desirable outcome for EA-OPD motivation — used
+to be defined as "CI crosses 0 and mean ≈ 0". That is statistically
+incorrect: it conflates "no evidence of effect" with "evidence of no
+effect" (Type II error masquerading as a finding).
+
+Replaced with two-one-sided-tests (TOST) equivalence:
+
+```
+TOST equivalence on metric M, threshold δ:
+    declare equivalence iff
+        ci_low(ΔM)  > −δ
+    AND ci_high(ΔM) < +δ
+```
+
+Minimum-detectable-effect (MDE) at 95% bootstrap CI:
+
+```
+MDE ≈ 1.96 · bootstrap_sd(ΔM)
+```
+
+If `MDE > δ`, the audit is **underpowered**; we cannot distinguish
+"flat" from "small alignment". Report `inconclusive`, not `branch (b)`.
+
+### 6.6 Stratifications (always reported)
 
 | Axis | Levels |
 |---|---|
 | Bucket | `OPD_improved`, `OPD_failed`, `Teacher_advantage`, `Dataset_diversity` |
-| Token category (v0.1.3) | `content_noun`, `proper_noun`, `visual_attribute`, `visual_number`, `answer_token`, `template_token`, `pronoun`, `spatial_relation`, `meta_cot_token`, `special_token`, `punctuation`, `ocr_text`, `other` |
-| Reliability | all tokens vs `tam_entropy_norm_T < 0.95` |
+| Token category (v0.1.3) | `content_noun`, `proper_noun`, `visual_attribute`, `visual_number`, `answer_token`, `template_token`, `pronoun`, `spatial_relation`, `meta_cot_token`, `special_token`, `punctuation`, `ocr_text`, `other` (13 total) |
+| Reliability | reliability-filtered (PRIMARY) vs all-tokens (exploratory) |
+
+The **headline decision cell** is `OPD_improved bucket × reliability-
+filtered tokens`. All other cells are reported but do not drive the §8
+branch label.
 
 ---
 
@@ -340,18 +400,31 @@ re-running. If size becomes an issue, switch to sidecar npz keyed by
 
 ## 8. Decision tree
 
-After analysis, the per-bucket headline numbers determine the
-follow-up:
+**Primary decision cell:** `OPD_improved` bucket × reliability-filtered
+tokens. The branch label below is computed from this cell only. The
+other buckets / category strata are reported but do not drive the
+decision (consistent with §6.5 — the audit is designed to answer "does
+OPD align evidence on the tokens OPD actually generates and that the
+teacher map can meaningfully grade?").
 
-| Outcome on `OPD_improved` bucket | Interpretation | Next step |
-|---|---|---|
-| **(a)** ΔJS ≪ 0 across all token categories (S1 clearly closer to T) | OPD already implicitly aligns visual evidence | **EA-OPD motivation weak**. Drop the line; main §Method goes to T2-2/v3 from atlas data. |
-| **(b)** ΔJS ≈ 0 ± noise, ΔIoU ≈ 0, accuracy improved nonetheless | OPD trains the output without training the evidence | **Strong EA-OPD motivation**. v3 Sparse Visual-Conditioned and EA-OPD become §Method candidates. |
-| **(c)** ΔJS < 0 on `template / punctuation / answer` but ≈ 0 on `content_noun / visual_attribute` | OPD aligns the easy tokens (already-vision-uniform) but not the hard ones | **Partial — both methods coexist**: v3 cheap-deploy, EA-OPD expensive-research. |
-| **(d)** Teacher TAM reliability < 50% on Q1 prompts (tam_entropy_norm_T ≥ 0.95 dominant) | TAM signal too diffuse to ground EA-OPD | Step 5 stops here; TAM stays as Step 2 motivation only; main §Method = T2-2/v3 only. |
+**Sign convention (positive ΔJS / ΔIoU / ΔCos = OPD aligned).**
 
-All four outcomes are reported. (b)/(c) unlock follow-up design work;
-(a)/(d) save us from designing a method that won't move the needle.
+Let `δ_JS`, `δ_IoU`, `δ_Cos` be the per-metric noise floors from §6.4
+null calibration. Let `MDE_M = 1.96 · bootstrap_sd(ΔM)`.
+
+| Outcome on `OPD_improved` × reliability | Statistical condition | Interpretation | Next step |
+|---|---|---|---|
+| **(a) aligned** | `mean(ΔJS) > δ_JS` AND `ci_low(ΔJS) > 0` (+ same direction for ΔIoU or ΔCos as confirmation) | OPD already implicitly aligns visual evidence | **EA-OPD motivation weak.** Drop the line; main §Method = T2-2/v3 from atlas data. |
+| **(b) flat (equivalent)** | TOST: `ci_low(ΔJS) > −δ_JS` AND `ci_high(ΔJS) < +δ_JS`, AND `MDE_JS ≤ δ_JS` | OPD trains the output but not the evidence — *and the audit is powered enough to say so* | **Strong EA-OPD motivation.** EA-OPD becomes the §Method headline candidate; v3 C_local gate is the cheap-deploy variant. |
+| **(c) split** | (a)-grade alignment on `template_token` / `answer_token` / `punctuation`, (b)-grade equivalence on `content_noun` / `visual_attribute` / `proper_noun` | OPD aligns the easy (already-vision-uniform) tokens but not the visually-anchored ones | **Both methods coexist.** v3 = cheap deploy; EA-OPD = research arm. |
+| **(d) teacher-TAM unreliable** | Pre-condition: <50% of `OPD_improved` tokens pass the reliability filter (`tam_entropy_norm_T < 0.95`) | TAM signal too diffuse on this prompt distribution to ground EA-OPD | **Step 5 stops.** TAM stays as Step 2 motivation only; main §Method = T2-2/v3. |
+| **(e) inconclusive** | TOST fails (CI strays outside [−δ, +δ]) AND `MDE_JS > δ_JS` | Underpowered for the (b) claim; no aligned direction either | **Increase n.** Either rerun with 400 samples or accept the audit cannot decide. |
+
+Each branch label is also computed on the all-tokens (exploratory)
+aggregation and on each non-primary bucket — these go into
+`step5-results.md` as a "decision sensitivity matrix". A branch that
+appears only in the primary cell is reported with that scoping; a
+branch consistent across cells is the strongest finding.
 
 ---
 
@@ -412,10 +485,35 @@ docs/figures/step5/
 
 ---
 
-## 11. What this audit explicitly does NOT do
+## 11. Prerequisites (hard-fail by default)
+
+These conditions are **enforced at runtime** — Step 5 refuses to
+launch unless they hold (override via explicit
+`--allow-degraded-mode` for pilot debugging only):
+
+1. **`opd_target_ids.json` exists and yields ≥ `n_teacher_advantage`
+   ids disjoint from `OPD_improved` and `OPD_failed`.** Without the
+   `Teacher_advantage` bucket, the §8 decision tree is uninterpretable
+   (the bucket is the most direct link between teacher visual advantage
+   and Step 5 alignment). Fallback to `Dataset_diversity` would silently
+   re-weight the audit toward generic visual content.
+2. **Sample selector and main runner share the same `--max-new-tokens`
+   cap** (default 4096 for both). A mismatch — e.g. selector at 1024,
+   runner at 4096 — means the bucket judge may fire on truncated
+   responses while the alignment audit runs on the full response.
+3. **All four bucket targets met (`70 / 60 / 30 / 40`).** If the
+   candidate pool can't yield the target counts, the runner aborts and
+   the user must extend `--candidates`. We do not silently shrink
+   buckets or fill from neighbors.
+4. **Multi-GPU shard merge:** post-cat row count must equal `Σ shard
+   alignment rows`, modulo samples where any of T/S0/S1 returned
+   `tam_valid=False`. The launcher's `analyze` phase refuses to start
+   unless this check passes.
+
+## 12. What this audit explicitly does NOT do
 
 - **No new training**. Three models load weights only.
-- **No method design**. The four decision-tree outcomes branch to
+- **No method design**. The five decision-tree outcomes branch to
   *separate* follow-up tasks.
 - **No causal masking validation**. Already done in Step 2 (commit
   `3d91e1e`), result reused as a prerequisite — see §6.3 of
@@ -425,10 +523,14 @@ docs/figures/step5/
 - **No attention-baseline comparison**. Skipped to save wall clock
   (~3-5× speedup) — attention vs TAM is already established in Step 0
   (Pearson r = 0.032 over 866 tokens, commit `f03864b`).
+- **No prompt-sensitivity audit on the teacher.** Deferred to P1
+  follow-up (per GPT review on commit `13d73c1`).
+- **No S0 rollout robustness check.** Deferred to P1 — main claim
+  stands on S1 rollout per §3.
 
 ---
 
-## 12. References used during design
+## 13. References used during design
 
 - Li et al., *Token Activation Map to Visually Explain Multimodal
   LLMs*, ICCV 2025 (Oral), arXiv 2506.23270.
