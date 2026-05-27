@@ -359,6 +359,14 @@ if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
 fi
 export MLLMOPD_USE_VD_WEIGHTING MLLMOPD_VD_TAU MLLMOPD_VD_BETA
 
+# Rethinking-atlas 2026-05-27: default ENABLE per-token student log_probs
+# sidecar (post P19) for ALL 4 arms — needed for Fig 6 (VD bin) + Fig 7
+# (quadrant) analyses requiring adv = lp_teacher - lp_student. Disk ~2 GB
+# per arm over 230 steps; total cost trivial vs 410 GB ckpt budget.
+# Override with MLLMOPD_DUMP_OPD_ADV=0 if a smoke explicitly doesn't need it.
+MLLMOPD_DUMP_OPD_ADV="${MLLMOPD_DUMP_OPD_ADV:-1}"
+export MLLMOPD_DUMP_OPD_ADV
+
 if [ "${MLLMOPD_USE_VD_WEIGHTING}" = "1" ]; then
   OPD_RUN_NAME_DEFAULT="t2_1_v0_${ARM_TAG}"
 else
@@ -537,7 +545,7 @@ if [ "$(( GLOBAL_BATCH_SIZE % MBS_DP ))" -ne 0 ]; then
   exit 1
 fi
 echo ">>> parallelism: ACTOR_NUM_GPUS_PER_NODE=${ACTOR_NUM_GPUS_PER_NODE}  TP=${TP_SIZE}  DP=${DP_SIZE}  MBS=${MICRO_BATCH_SIZE}  GBS=${GLOBAL_BATCH_SIZE}  ${GLOBAL_BATCH_SIZE}/${MBS_DP}=$(( GLOBAL_BATCH_SIZE / MBS_DP )) micro-batches/opt-step"
-SAVE_INTERVAL="${SAVE_INTERVAL:-50}"  # ~5 ckpts over 250 steps; recoverable on crash
+SAVE_INTERVAL="${SAVE_INTERVAL:-20}"  # ~13 ckpts over 230 steps — Rethinking-style training-dynamics resolution for Fig 1/2/3/4/5
 DEBUG_MODE="${DEBUG_MODE:-0}"
 
 # --- Train actor env override (smoke #14 root cause analysis) ---

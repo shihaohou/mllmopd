@@ -132,7 +132,7 @@ hyperparams:
   rollout_temperature: 1
 
   # Checkpointing
-  save_interval: 50                       # ~5 ckpts over 250 steps
+  save_interval: 20                       # ~13 ckpts over 230 steps — Rethinking-style training-dynamics resolution
 
 # ----------------------------------------------------------------------------
 # Uni-OPD features intentionally DISABLED (vanilla baseline; plan §4)
