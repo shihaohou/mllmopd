@@ -129,7 +129,7 @@ hyperparams:
   global_batch_size: 64                   # = rollout_batch_size * sample_n
   num_epoch: 1                            # locked to 1 in T1-v0 (plan §3)
   rollout_max_prompt_len: 4096
-  rollout_max_response_len: 2048          # Risk #3 mitigation (OOM guard)
+  rollout_max_response_len: 4096          # 2026-05-27 atlas-era bump: same as T1_2 config (must match for cliff dynamics comparability)
   rollout_temperature: 1
 
   # Checkpointing

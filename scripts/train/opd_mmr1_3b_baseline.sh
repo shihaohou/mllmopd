@@ -31,7 +31,7 @@
 #   EPS_CLIP / EPS_CLIP_HIGH (default: 0.2 / 0.28)
 #   OPD_CLIP_RANGE          teacher-student logp clip (default: 10.0)
 #   ROLLOUT_MAX_PROMPT_LEN  (default: 4096)
-#   ROLLOUT_MAX_RESPONSE_LEN (default: 2048; Risk #3 mitigation)
+#   ROLLOUT_MAX_RESPONSE_LEN (default: 4096; atlas-era bump 2026-05-27 — new topology MBS=1, 80GB H800 fits)
 #   ACTOR_NUM_GPUS_PER_NODE (default: 7; teacher already on GPU 0)
 #   ROLLOUT_NUM_GPUS        (default: 7)
 #   TP_SIZE                 (default: 1; 3B fits on one GPU)
@@ -424,7 +424,7 @@ ROLLOUT_MAX_PROMPT_LEN="${ROLLOUT_MAX_PROMPT_LEN:-4096}"
 # below); 3072 single-sample cap is belt-and-suspenders. Most responses
 # under stop string </answer> are far shorter; 3072 only truncates the
 # few real long-CoT outliers. Same caps on both arms — comparison fair.
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-3072}"
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
 
 # Stop string: when the student emits this exact sequence, sglang halts
 # generation. v0 audit on T1-2/T1-3 outputs showed `</answer>` closes
