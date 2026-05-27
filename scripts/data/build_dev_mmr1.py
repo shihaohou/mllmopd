@@ -117,7 +117,21 @@ def _resolve_mmr1_path(cli_value: str) -> str:
 
 def _load_opd_target_ids(path: Path) -> set[str]:
     """Accept either a JSON list of ids OR a {benchmark: [ids]} dict — matches
-    the dual-form handling in prep_opd_train_data.py."""
+    the dual-form handling in prep_opd_train_data.py.
+
+    Returns an empty set (with a warning) when the file does not exist.
+    The ids are only used to label contamination-hit attribution in the
+    dedup report — dev_mmr1 sampling itself does not depend on them.
+    """
+    if not path.exists():
+        print(
+            f"WARNING: --opd-target-ids {path} does not exist; "
+            f"continuing with empty opd_target set. The dedup report's "
+            f"'n_opd_target' attribution column will read 0. "
+            f"Sampling itself is unaffected.",
+            file=sys.stderr,
+        )
+        return set()
     text = path.read_text()
     parsed = json.loads(text)
     if isinstance(parsed, list):
