@@ -363,8 +363,15 @@ def run_stage1(args) -> None:
 # ============================================================================
 # Stage 2 — bucket assignment + stratified sampling
 # ============================================================================
-def _merge_shards(base_path: Path, num_shards: int) -> list[dict]:
-    """Merge per-shard predictions files into a unified list."""
+def _merge_shards(base_path: Path, num_shards: int,
+                  allow_degraded: bool = False) -> list[dict]:
+    """Merge per-shard predictions files into a unified list.
+
+    Hard-fail (unless `allow_degraded`) if any shard predictions file
+    is missing — a silent gap would let Stage 2 bucket on a partial
+    candidate pool, leading to bucket pool mismatch with what predict
+    was supposed to cover. Per design §11 item 4 (extended).
+    """
     out: list[dict] = []
     seen: set[str] = set()
     if num_shards <= 1:
@@ -375,15 +382,25 @@ def _merge_shards(base_path: Path, num_shards: int) -> list[dict]:
                     seen.add(rec["id"])
                     out.append(rec)
         return out
+    missing: list[Path] = []
     for i in range(num_shards):
         sp = base_path.with_suffix(f".shard_{i}.jsonl")
         if not sp.exists():
-            print(f">>> WARNING: missing shard predictions {sp}", file=sys.stderr)
+            missing.append(sp)
             continue
         for rec in _load_jsonl(sp):
             if rec["id"] not in seen:
                 seen.add(rec["id"])
                 out.append(rec)
+    if missing:
+        msg = (f"_merge_shards: {len(missing)}/{num_shards} shard prediction "
+               f"files missing: {[str(p) for p in missing[:3]]}"
+               + ("..." if len(missing) > 3 else ""))
+        if not allow_degraded:
+            sys.exit("!! HARD FAIL: " + msg + ". Either rerun PHASE=predict for "
+                     "the missing shards, or pass --allow-degraded-mode to "
+                     "proceed on the partial pool (decision tree NOT interpretable).")
+        print(f"!! DEGRADED MODE: {msg}", file=sys.stderr)
     return out
 
 
@@ -400,7 +417,8 @@ def run_stage2(args) -> None:
     rng = random.Random(args.seed)
 
     predictions_path = Path(args.predictions_out)
-    preds = _merge_shards(predictions_path, args.num_shards)
+    preds = _merge_shards(predictions_path, args.num_shards,
+                          allow_degraded=args.allow_degraded_mode)
     if not preds:
         sys.exit(f"!! no predictions found at {predictions_path}* — run Stage 1 first")
     print(f">>> loaded {len(preds)} judged candidates", file=sys.stderr)

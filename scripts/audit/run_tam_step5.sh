@@ -95,8 +95,22 @@ N_FAILED="${N_FAILED:-60}"
 N_TEACHER_ADV="${N_TEACHER_ADV:-30}"
 N_DIVERSITY="${N_DIVERSITY:-40}"
 
-MAX_NEW_TOKENS_SEL="${MAX_NEW_TOKENS_SEL:-2048}"
 MAX_NEW_TOKENS_TAM="${MAX_NEW_TOKENS_TAM:-4096}"
+# Selector cap follows TAM cap by default to keep bucket judgments
+# anchored to the same response horizon. Prereq §11 item 2.
+MAX_NEW_TOKENS_SEL="${MAX_NEW_TOKENS_SEL:-${MAX_NEW_TOKENS_TAM}}"
+
+if [ "${MAX_NEW_TOKENS_SEL}" -ne "${MAX_NEW_TOKENS_TAM}" ]; then
+  if [ "${ALLOW_DEGRADED_MODE:-0}" != "1" ]; then
+    echo "!! HARD FAIL: MAX_NEW_TOKENS_SEL=${MAX_NEW_TOKENS_SEL} != "\
+"MAX_NEW_TOKENS_TAM=${MAX_NEW_TOKENS_TAM}. Bucket judge would fire on "\
+"truncated responses while the alignment audit runs on the full response. "\
+"Either align the two or set ALLOW_DEGRADED_MODE=1 (decision tree NOT interpretable)."
+    exit 23
+  fi
+  echo ">>> !! DEGRADED MODE: SEL/TAM token caps differ "\
+"(SEL=${MAX_NEW_TOKENS_SEL}, TAM=${MAX_NEW_TOKENS_TAM})"
+fi
 
 # Degraded mode (off by default — see docs/step5-…design.md §11).
 # When unset, selector hard-fails on missing opd_target_ids / bucket
@@ -250,24 +264,48 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
   N_ROWS=$(wc -l < "${RUN_DIR}/alignment.jsonl" 2>/dev/null || echo 0)
   echo "  merged ${N_ROWS} alignment rows"
 
-  # Row-count check — sum per-shard expected = total samples; drops are
-  # allowed when TAM is invalid on any of T/S0/S1 (see Pass 3 drops.txt).
+  # Strict row-count check — per design §11 item 4: alignment rows must
+  # EQUAL `samples − tam_invalid_drops`. We verify per-shard sidecar
+  # accounting (n_written + n_missing + n_invalid == n_expected) AND
+  # the merged total matches the sum of per-shard n_written.
   N_SAMPLES=$(wc -l < "${SAMPLES_OUT}")
-  N_DROPS=0
+  SUM_EXPECTED=0
+  SUM_WRITTEN=0
+  SUM_MISSING=0
+  SUM_INVALID=0
   for i in $(seq 0 $((NUM_GPUS - 1))); do
     sd="${RUN_DIR}/shard_${i}"
-    if [ -f "${sd}/alignment.drops.txt" ]; then
-      d=$(grep '^n_skipped_tam_invalid=' "${sd}/alignment.drops.txt" | cut -d= -f2)
-      N_DROPS=$((N_DROPS + d))
+    if [ ! -f "${sd}/alignment.drops.txt" ]; then
+      echo "!! HARD FAIL: shard ${i} missing alignment.drops.txt (shard "\
+"crashed silently or didn't reach Pass 3). See ${sd}/stderr.log"
+      exit 33
     fi
+    ne=$(grep '^n_expected=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+    nw=$(grep '^n_written=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+    nm=$(grep '^n_skipped_missing=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+    nv=$(grep '^n_skipped_tam_invalid=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+    if [ "$((nw + nm + nv))" -ne "${ne}" ]; then
+      echo "!! HARD FAIL: shard ${i} accounting mismatch: "\
+"written=${nw} + missing=${nm} + invalid=${nv} != expected=${ne}"
+      exit 34
+    fi
+    SUM_EXPECTED=$((SUM_EXPECTED + ne))
+    SUM_WRITTEN=$((SUM_WRITTEN + nw))
+    SUM_MISSING=$((SUM_MISSING + nm))
+    SUM_INVALID=$((SUM_INVALID + nv))
   done
-  N_EXPECTED=$((N_SAMPLES - N_DROPS))
-  if [ "${N_ROWS}" -lt "${N_EXPECTED}" ]; then
-    echo "!! HARD FAIL: alignment rows=${N_ROWS} but expected=${N_EXPECTED} "
-    echo "   (samples=${N_SAMPLES}, tam_invalid_drops=${N_DROPS})."
+  if [ "${SUM_EXPECTED}" -ne "${N_SAMPLES}" ]; then
+    echo "!! HARD FAIL: total per-shard expected=${SUM_EXPECTED} != "\
+"samples_input=${N_SAMPLES}"
+    exit 35
+  fi
+  if [ "${N_ROWS}" -ne "${SUM_WRITTEN}" ]; then
+    echo "!! HARD FAIL: merged alignment rows=${N_ROWS} != "\
+"Σ per-shard n_written=${SUM_WRITTEN} (stale or duplicate rows?)"
     exit 32
   fi
-  echo "  row count OK: ${N_ROWS} (samples=${N_SAMPLES} − tam_invalid=${N_DROPS})"
+  echo "  row count OK (strict): ${N_ROWS}=${SUM_WRITTEN}, "\
+"samples=${N_SAMPLES}, tam_invalid=${SUM_INVALID}, missing=${SUM_MISSING}"
 
   {
     echo "# Step 5 TAM evidence alignment  (commit=${MLLMOPD_CODE_COMMIT})"

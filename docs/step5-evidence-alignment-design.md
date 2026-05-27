@@ -53,7 +53,7 @@ enough that vanilla OPD is doing the alignment work implicitly.
 
 | ID | Question | How we measure |
 |---|---|---|
-| **Q1** | Does vanilla OPD bring the student's per-token TAM closer to the teacher's? | paired Δ JS(S1,T) − JS(S0,T) over all response tokens, stratified by category |
+| **Q1** | Does vanilla OPD bring the student's per-token TAM closer to the teacher's? | paired Δ = JS(S0,T) − JS(S1,T) over all response tokens (positive = S1 closer to T), stratified by category — see §6.3 |
 | **Q2** | On which token categories is the alignment gap largest / smallest? | per-category bootstrap on the v0.1.3 classifier (content_noun, visual_attribute, proper_noun, answer, numeric, template, punctuation, …) |
 | **Q3** *(deferred)* | Does the teacher's TAM on a student rollout differ from the teacher's TAM on its own rollout? | GPT supplementary; **not in Step 5 scope** — requires a separate teacher rollout pass |
 
@@ -246,7 +246,7 @@ For every token × every model:
 - `tam_entropy`, `tam_entropy_norm` — diffuseness; low = trustworthy map
 - `tam_effective_patch_frac` — exp(entropy) / n_patches
 
-**Reliability filter (PRIMARY, not sensitivity):** the headline decision
+**Reliability filter (drives the decision; not just sensitivity):** the headline decision
 restricts to tokens where the teacher map satisfies `tam_entropy_norm_T
 < 0.95` (teacher concentration above the random-uniform baseline).
 All-token aggregates are also reported but flagged as exploratory only —
@@ -324,7 +324,7 @@ If `MDE > δ`, the audit is **underpowered**; we cannot distinguish
 |---|---|
 | Bucket | `OPD_improved`, `OPD_failed`, `Teacher_advantage`, `Dataset_diversity` |
 | Token category (v0.1.3) | `content_noun`, `proper_noun`, `visual_attribute`, `visual_number`, `answer_token`, `template_token`, `pronoun`, `spatial_relation`, `meta_cot_token`, `special_token`, `punctuation`, `ocr_text`, `other` (13 total) |
-| Reliability | reliability-filtered (PRIMARY) vs all-tokens (exploratory) |
+| Reliability | reliability-filtered (drives §8 decision) vs all-tokens (exploratory) |
 
 The **headline decision cell** is `OPD_improved bucket × reliability-
 filtered tokens`. All other cells are reported but do not drive the §8

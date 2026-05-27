@@ -205,9 +205,20 @@ C_LOCAL_CATEGORIES = ("content_noun", "visual_attribute", "proper_noun")
 
 
 def _metric_block(vals: list[float]) -> dict:
+    """Returns {mean, ci_low, ci_high, sd, mde_95}.
+
+    MDE_95 uses bootstrap percentile half-width (max distance from mean
+    to CI endpoint), which is more robust to skewed bootstrap
+    distributions than 1.96·sd. Per design §6.5 (updated per GPT review
+    of c2066f5 — bootstrap_sd can underestimate when the per-sample
+    distribution is skewed).
+    """
     m, lo, hi, sd = cluster_bootstrap_ci(vals)
-    return {"mean": m, "ci_low": lo, "ci_high": hi, "sd": sd,
-            "mde_95": 1.96 * sd if np.isfinite(sd) else float("nan")}
+    if np.isfinite(m) and np.isfinite(lo) and np.isfinite(hi):
+        mde = max(abs(m - lo), abs(hi - m))
+    else:
+        mde = float("nan")
+    return {"mean": m, "ci_low": lo, "ci_high": hi, "sd": sd, "mde_95": mde}
 
 
 def aggregate_overall(rows: list[dict], reliability: bool = False) -> dict:
@@ -280,9 +291,227 @@ def aggregate_per_category(rows: list[dict], reliability: bool = False,
     return out
 
 
-def calibrate_deltas(rows: list[dict]) -> dict:
-    """Compute the null δ per metric across the full (reliability-filtered)
-    OPD_improved bucket. This is the primary decision threshold per §6.4."""
+def _decode_b64_map_raw(b64_str: str, h: int, w: int) -> np.ndarray:
+    """Decode a uint8 b64 map back to [0,1] float32 H×W."""
+    import base64 as _b64
+    raw = _b64.b64decode(b64_str)
+    return np.frombuffer(raw, dtype=np.uint8).reshape(h, w).astype(np.float32) / 255.0
+
+
+# Map-level metric helpers (mirror of scripts/audit/tam_step5_evidence_alignment.py
+# — re-defined here so the analyzer can compute Null B/C without importing the
+# runner module). Numerically identical: same sum-normalize for JS, same
+# argpartition for IoU.
+_EPS = 1e-12
+
+
+def _js_div(m1: np.ndarray, m2: np.ndarray) -> float:
+    p = m1.flatten().astype(np.float64)
+    q = m2.flatten().astype(np.float64)
+    p = np.clip(p, 0.0, None)
+    q = np.clip(q, 0.0, None)
+    ps = p.sum()
+    qs = q.sum()
+    if ps < _EPS:
+        p = np.full_like(p, 1.0 / p.size)
+    else:
+        p = p / ps
+    if qs < _EPS:
+        q = np.full_like(q, 1.0 / q.size)
+    else:
+        q = q / qs
+    avg = 0.5 * (p + q)
+
+    def _kl(a, b):
+        a = np.clip(a, _EPS, 1.0)
+        b = np.clip(b, _EPS, 1.0)
+        return float((a * (np.log(a) - np.log(b))).sum())
+
+    return 0.5 * _kl(p, avg) + 0.5 * _kl(q, avg)
+
+
+def _iou_topk(m1: np.ndarray, m2: np.ndarray, frac: float = 0.20) -> float:
+    flat1 = m1.flatten()
+    flat2 = m2.flatten()
+    n = flat1.size
+    k = max(1, int(round(n * frac)))
+    idx1 = set(np.argpartition(-flat1, k - 1)[:k].tolist())
+    idx2 = set(np.argpartition(-flat2, k - 1)[:k].tolist())
+    inter = idx1 & idx2
+    union = idx1 | idx2
+    if not union:
+        return 0.0
+    return len(inter) / len(union)
+
+
+def _load_primary_sample_maps(rows: list[dict],
+                              entropy_thresh: float = 0.95) -> list[dict]:
+    """Decode + reliability-filter maps for the OPD_improved primary cell.
+
+    Returns a list of per-sample dicts: {T_maps, S0_maps, S1_maps,
+    keep_idx}. Used by Null B (cross-sample pairing) and Null C
+    (spatial scramble). Only emitted for rows in OPD_improved bucket
+    that survive sample-level validity + at least one reliable token.
+    """
+    out: list[dict] = []
+    for r in rows:
+        if r.get("bucket") != "OPD_improved":
+            continue
+        h, w = r.get("map_h"), r.get("map_w")
+        maps_b64 = r.get("maps_b64", {})
+        if not (h and w and maps_b64):
+            continue
+        T_b64 = maps_b64.get("T", [])
+        S0_b64 = maps_b64.get("S0", [])
+        S1_b64 = maps_b64.get("S1", [])
+        R = r.get("response_length", 0)
+        if min(len(T_b64), len(S0_b64), len(S1_b64)) < R:
+            continue
+        valid_T = r.get("tam_valid_T", [False] * R)
+        valid_S0 = r.get("tam_valid_S0", [False] * R)
+        valid_S1 = r.get("tam_valid_S1", [False] * R)
+        ent_T = r.get("T", {}).get("tam_entropy_norm", [None] * R)
+        # Keep only tokens passing reliability + 3-model validity
+        keep: list[int] = []
+        for t in range(R):
+            if not (valid_T[t] and valid_S0[t] and valid_S1[t]):
+                continue
+            e = ent_T[t] if t < len(ent_T) else None
+            if e is None or e >= entropy_thresh:
+                continue
+            keep.append(t)
+        if not keep:
+            continue
+        # Decode only the kept tokens to save memory
+        T_maps = [_decode_b64_map_raw(T_b64[t], h, w) for t in keep]
+        S0_maps = [_decode_b64_map_raw(S0_b64[t], h, w) for t in keep]
+        S1_maps = [_decode_b64_map_raw(S1_b64[t], h, w) for t in keep]
+        out.append({
+            "id": r.get("id"),
+            "T": T_maps, "S0": S0_maps, "S1": S1_maps,
+            "n_tokens": len(keep),
+        })
+    return out
+
+
+def _pair_delta_means(T_maps, S0_partner_maps, S1_partner_maps) -> dict | None:
+    """Mean per-token (Δ_js, Δ_iou) on a paired set of maps (length-aligned
+    by min). Used by Null B."""
+    R = min(len(T_maps), len(S0_partner_maps), len(S1_partner_maps))
+    if R == 0:
+        return None
+    djs, diou = [], []
+    for t in range(R):
+        Tm = T_maps[t]
+        js_s0 = _js_div(S0_partner_maps[t], Tm)
+        js_s1 = _js_div(S1_partner_maps[t], Tm)
+        djs.append(js_s0 - js_s1)
+        iou_s0 = _iou_topk(S0_partner_maps[t], Tm)
+        iou_s1 = _iou_topk(S1_partner_maps[t], Tm)
+        diou.append(iou_s1 - iou_s0)
+    if not djs:
+        return None
+    return {"delta_js": float(np.mean(djs)),
+            "delta_iou": float(np.mean(diou))}
+
+
+def calibrate_null_b_cross_sample(samples_with_maps: list[dict],
+                                  n_iter: int = 100,
+                                  alpha: float = 0.05,
+                                  seed: int = 8888) -> dict:
+    """Null B — cross-sample pairing. For each iter, randomly permute
+    S0 and S1 partner indices (independently) so that T_i is paired
+    with S0_{perm0[i]} and S1_{perm1[i]} (j ≠ i where possible).
+    Compute the per-sample Δ on the mis-paired triple, then the mean
+    over samples. The null δ = (1−alpha) percentile of |Δ_null_mean|.
+
+    Cost-controlled: n_iter=100 with full reliable-token coverage.
+    """
+    if len(samples_with_maps) < 2:
+        return {k: float("nan") for k in ("delta_js", "delta_iou")}
+    rng = np.random.default_rng(seed)
+    n = len(samples_with_maps)
+    null_djs, null_diou = [], []
+    for _ in range(n_iter):
+        perm_s0 = rng.permutation(n)
+        perm_s1 = rng.permutation(n)
+        # Force j ≠ i by single-step rotation if collision
+        for i in range(n):
+            if perm_s0[i] == i:
+                perm_s0[i] = (i + 1) % n
+            if perm_s1[i] == i:
+                perm_s1[i] = (i + 1) % n
+        per_sample_djs, per_sample_diou = [], []
+        for i in range(n):
+            T = samples_with_maps[i]["T"]
+            S0p = samples_with_maps[perm_s0[i]]["S0"]
+            S1p = samples_with_maps[perm_s1[i]]["S1"]
+            res = _pair_delta_means(T, S0p, S1p)
+            if res is not None:
+                per_sample_djs.append(res["delta_js"])
+                per_sample_diou.append(res["delta_iou"])
+        if per_sample_djs:
+            null_djs.append(float(np.mean(per_sample_djs)))
+            null_diou.append(float(np.mean(per_sample_diou)))
+    return {
+        "delta_js": float(np.quantile(np.abs(null_djs), 1 - alpha)) if null_djs else float("nan"),
+        "delta_iou": float(np.quantile(np.abs(null_diou), 1 - alpha)) if null_diou else float("nan"),
+    }
+
+
+def calibrate_null_c_spatial_scramble(samples_with_maps: list[dict],
+                                      n_iter: int = 100,
+                                      alpha: float = 0.05,
+                                      seed: int = 9999) -> dict:
+    """Null C — spatial scramble. For each iter, permute the patches
+    within each S0 and S1 map (preserves TAM concentration, destroys
+    spatial alignment with T). Recompute Δ on the scrambled S0/S1
+    vs the original T."""
+    if not samples_with_maps:
+        return {k: float("nan") for k in ("delta_js", "delta_iou")}
+    rng = np.random.default_rng(seed)
+    null_djs, null_diou = [], []
+    for _ in range(n_iter):
+        per_sample_djs, per_sample_diou = [], []
+        for s in samples_with_maps:
+            R = s["n_tokens"]
+            djs, diou = [], []
+            for t in range(R):
+                T = s["T"][t]
+                S0m, S1m = s["S0"][t], s["S1"][t]
+                shape = S0m.shape
+                n_pix = shape[0] * shape[1]
+                perm0 = rng.permutation(n_pix)
+                perm1 = rng.permutation(n_pix)
+                S0_scr = S0m.flatten()[perm0].reshape(shape)
+                S1_scr = S1m.flatten()[perm1].reshape(shape)
+                djs.append(_js_div(S0_scr, T) - _js_div(S1_scr, T))
+                diou.append(_iou_topk(S1_scr, T) - _iou_topk(S0_scr, T))
+            if djs:
+                per_sample_djs.append(float(np.mean(djs)))
+                per_sample_diou.append(float(np.mean(diou)))
+        if per_sample_djs:
+            null_djs.append(float(np.mean(per_sample_djs)))
+            null_diou.append(float(np.mean(per_sample_diou)))
+    return {
+        "delta_js": float(np.quantile(np.abs(null_djs), 1 - alpha)) if null_djs else float("nan"),
+        "delta_iou": float(np.quantile(np.abs(null_diou), 1 - alpha)) if null_diou else float("nan"),
+    }
+
+
+def calibrate_deltas(rows: list[dict],
+                     n_iter_b: int = 100,
+                     n_iter_c: int = 100) -> dict:
+    """Compute null δ per metric across the full (reliability-filtered)
+    OPD_improved bucket. Headline δ = max(δ_A, δ_B, δ_C) per design §6.4.
+
+    - Null A: sign-flip permutation on per-sample Δ (cheap, always runs).
+    - Null B: cross-sample T↔S map pairing (loads maps; ~minutes).
+    - Null C: spatial scramble of S0/S1 patches (loads maps; ~minutes).
+
+    Returns a dict with per-metric `delta` (max over A/B/C), plus
+    `delta_A`, `delta_B`, `delta_C` for diagnostic.
+    """
     deltas: dict = {}
     primary_samples = []
     for r in rows:
@@ -292,10 +521,38 @@ def calibrate_deltas(rows: list[dict]) -> dict:
         if s is None:
             continue
         primary_samples.append(s)
+
+    # Null A — cheap, computed on the per-sample mean Δ already in hand
+    null_A: dict = {}
     for k in ("delta_js", "delta_iou", "delta_cos"):
         vals = [s[k] for s in primary_samples]
-        deltas[k] = calibrate_null_threshold(vals)
+        null_A[k] = calibrate_null_threshold(vals)
+
+    # Null B and Null C — need map decoding from the primary rows
+    print(f"  [delta calibration] decoding maps for {len(primary_samples)} samples...",
+          file=sys.stderr)
+    samples_with_maps = _load_primary_sample_maps(rows, entropy_thresh=0.95)
+    print(f"  [delta calibration] running Null B (cross-sample) n_iter={n_iter_b}...",
+          file=sys.stderr)
+    null_B = calibrate_null_b_cross_sample(samples_with_maps, n_iter=n_iter_b)
+    print(f"  [delta calibration] running Null C (spatial scramble) n_iter={n_iter_c}...",
+          file=sys.stderr)
+    null_C = calibrate_null_c_spatial_scramble(samples_with_maps, n_iter=n_iter_c)
+
+    # Headline δ = max(A, B, C); Cos has no B/C (no map computation) so falls back to A
+    for k in ("delta_js", "delta_iou"):
+        vals = [null_A[k], null_B[k], null_C[k]]
+        vals_finite = [v for v in vals if np.isfinite(v)]
+        deltas[k] = max(vals_finite) if vals_finite else float("nan")
+    # Cos: only A available
+    deltas["delta_cos"] = null_A["delta_cos"]
+
+    # Diagnostic breakdowns
+    deltas["_null_A"] = null_A
+    deltas["_null_B"] = null_B
+    deltas["_null_C"] = null_C
     deltas["_n_samples_for_calibration"] = len(primary_samples)
+    deltas["_n_samples_with_maps"] = len(samples_with_maps)
     return deltas
 
 
@@ -513,16 +770,24 @@ def write_category_csv(per_category: dict, per_category_rel: dict,
 def write_calibration_csv(deltas: dict, teacher_reliability: tuple[float, int, int],
                           path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    null_A = deltas.get("_null_A", {})
+    null_B = deltas.get("_null_B", {})
+    null_C = deltas.get("_null_C", {})
     with path.open("w") as f:
-        f.write("metric,null_delta\n")
+        f.write("metric,null_A,null_B,null_C,delta_headline\n")
         for k in ("delta_js", "delta_iou", "delta_cos"):
-            f.write(f"{k},{deltas.get(k, float('nan')):.6f}\n")
-        f.write(f"_n_samples_for_calibration,{deltas.get('_n_samples_for_calibration', 0)}\n")
+            f.write(f"{k},"
+                    f"{null_A.get(k, float('nan')):.6f},"
+                    f"{null_B.get(k, float('nan')):.6f},"
+                    f"{null_C.get(k, float('nan')):.6f},"
+                    f"{deltas.get(k, float('nan')):.6f}\n")
+        f.write(f"_n_samples_for_calibration,{deltas.get('_n_samples_for_calibration', 0)},,,\n")
+        f.write(f"_n_samples_with_maps,{deltas.get('_n_samples_with_maps', 0)},,,\n")
         rel_rate, n_rel, n_tot = teacher_reliability
-        f.write(f"teacher_reliability_rate,{rel_rate:.4f}\n")
-        f.write(f"teacher_reliable_tokens,{n_rel}\n")
-        f.write(f"teacher_total_tokens,{n_tot}\n")
-        f.write(f"random_iou_baseline_top20,{RANDOM_IOU_BASELINE_TOP20:.4f}\n")
+        f.write(f"teacher_reliability_rate,{rel_rate:.4f},,,\n")
+        f.write(f"teacher_reliable_tokens,{n_rel},,,\n")
+        f.write(f"teacher_total_tokens,{n_tot},,,\n")
+        f.write(f"random_iou_baseline_top20,{RANDOM_IOU_BASELINE_TOP20:.4f},,,\n")
 
 
 def compute_teacher_reliability_rate(rows: list[dict],
@@ -606,14 +871,15 @@ def decide_branch(per_bucket_rel: dict,
     iou_st = metric_status["delta_iou"]
     cos_st = metric_status["delta_cos"]
 
-    # (a) aligned — JS strongly positive, with confirmation from at least one secondary
-    if js_st == "aligned" and (iou_st == "aligned" or cos_st == "aligned"):
+    # (a) aligned — JS AND IoU both aligned (drop raw-cos confirmation per
+    # GPT review of c2066f5: raw cosine on non-mean-centered maps is
+    # prone to false positives from globally-active maps).
+    if js_st == "aligned" and iou_st == "aligned":
         return {
             "branch": "aligned",
             "label": "(a) OPD already implicitly aligns visual evidence — drop EA-OPD line.",
             "metric_status": metric_status,
-            "reasoning": "ΔJS > δ_JS with ci_low > 0 AND at least one of "
-                         "ΔIoU/ΔCos in the same direction.",
+            "reasoning": "Both ΔJS and ΔIoU aligned (mean > δ AND ci_low > 0).",
             "used_cell": "OPD_improved x reliability",
             "deltas": deltas,
             "teacher_reliability_rate": rel_rate,
@@ -709,13 +975,26 @@ def write_results_md(overall: dict, overall_rel: dict,
                 "full decision tree.)\n\n")
 
         # ----- Null calibration + teacher reliability -----
+        null_A = deltas.get("_null_A", {})
+        null_B = deltas.get("_null_B", {})
+        null_C = deltas.get("_null_C", {})
         f.write("## 1. Null calibration + teacher TAM reliability\n\n")
-        f.write(f"Null thresholds δ (sign-flip permutation, 95th percentile of |Δ_null|; "
-                f"n_samples for calibration = {deltas.get('_n_samples_for_calibration', 0)} on OPD_improved × reliability):\n\n")
-        f.write("| metric | δ_null |\n|---|---|\n")
+        f.write(f"Headline null thresholds δ = max(δ_A, δ_B, δ_C) per design §6.4. "
+                f"n_samples for calibration = "
+                f"{deltas.get('_n_samples_for_calibration', 0)} on OPD_improved × reliability "
+                f"({deltas.get('_n_samples_with_maps', 0)} of those had decoded maps for "
+                f"Null B/C).\n\n")
+        f.write("| metric | δ_A (sign-flip) | δ_B (cross-sample) | δ_C (spatial scramble) | **δ_headline (max)** |\n")
+        f.write("|---|---|---|---|---|\n")
         for k in ("delta_js", "delta_iou", "delta_cos"):
-            f.write(f"| {k} | {deltas.get(k, float('nan')):.4f} |\n")
-        f.write(f"\nTeacher TAM reliability rate on `OPD_improved` "
+            f.write(f"| {k} | "
+                    f"{null_A.get(k, float('nan')):.4f} | "
+                    f"{null_B.get(k, float('nan')):.4f} | "
+                    f"{null_C.get(k, float('nan')):.4f} | "
+                    f"**{deltas.get(k, float('nan')):.4f}** |\n")
+        f.write("\n(Null B/C are not computed for `delta_cos` because the map-level "
+                "decomposition is only meaningful for JS/IoU — Cos δ falls back to Null A.)\n\n")
+        f.write(f"Teacher TAM reliability rate on `OPD_improved` "
                 f"(entropy_norm_T < 0.95): **{rel_rate:.3f}** "
                 f"({n_rel}/{n_tot} tokens).\n\n")
         f.write(f"Random IoU baseline (top-20%, independent patch sets): "
@@ -730,13 +1009,14 @@ def write_results_md(overall: dict, overall_rel: dict,
                 f"{_fmt(overall['delta_js'])} | "
                 f"{_fmt(overall['delta_iou'])} | "
                 f"{_fmt(overall['delta_cos'])} |\n")
-        f.write(f"| reliability (entropy_norm_T < 0.95) **PRIMARY** | {overall_rel['n_samples']} | "
+        f.write(f"| reliability (entropy_norm_T < 0.95) — decision input | {overall_rel['n_samples']} | "
                 f"{_fmt(overall_rel['delta_js'])} | "
                 f"{_fmt(overall_rel['delta_iou'])} | "
                 f"{_fmt(overall_rel['delta_cos'])} |\n\n")
 
         # ----- By bucket (with reliability variant)  -----
-        f.write("## 3. By bucket (reliability-filtered PRIMARY, all-tokens for sanity)\n\n")
+        f.write("## 3. By bucket — reliability-filtered drives §8 decision; "
+                "all-tokens row reported for sanity\n\n")
         f.write("| Bucket | Filter | n | ΔJS | ΔIoU | ΔCos |\n")
         f.write("|---|---|---|---|---|---|\n")
         for b in ("OPD_improved", "OPD_failed", "Teacher_advantage", "Dataset_diversity"):
@@ -745,7 +1025,7 @@ def write_results_md(overall: dict, overall_rel: dict,
                 if b not in src:
                     continue
                 bk = src[b]
-                marker = " **PRIMARY**" if (b == "OPD_improved" and filt_name == "reliability") else ""
+                marker = " **(decision cell)**" if (b == "OPD_improved" and filt_name == "reliability") else ""
                 f.write(f"| {b}{marker} | {filt_name} | {bk['n_samples']} | "
                         f"{_fmt(bk['delta_js'])} | {_fmt(bk['delta_iou'])} | "
                         f"{_fmt(bk['delta_cos'])} |\n")
@@ -816,7 +1096,7 @@ def main(argv: list[str] | None = None) -> int:
     per_category = aggregate_per_category(rows, reliability=False)
     per_category_rel = aggregate_per_category(rows, reliability=True)
 
-    # --- Null calibration on the PRIMARY cell ---
+    # --- Null calibration on the PRIMARY cell (max of A/B/C per §6.4) ---
     print(">>> calibrating null thresholds δ on OPD_improved × reliability",
           file=sys.stderr)
     deltas = calibrate_deltas(rows)
@@ -828,6 +1108,21 @@ def main(argv: list[str] | None = None) -> int:
           f"δ_Cos={deltas.get('delta_cos', float('nan')):.4f}  "
           f"reliability_rate={teacher_reliability[0]:.3f}",
           file=sys.stderr)
+    if "_null_A" in deltas:
+        print(f"    null breakdown (JS):  "
+              f"A={deltas['_null_A'].get('delta_js', float('nan')):.4f}  "
+              f"B={deltas['_null_B'].get('delta_js', float('nan')):.4f}  "
+              f"C={deltas['_null_C'].get('delta_js', float('nan')):.4f}",
+              file=sys.stderr)
+
+    # Per-category aggregation restricted to OPD_improved rows for the
+    # decision tree (fixes the branch-(c) scope bug noted in GPT review
+    # of c2066f5). The all-rows per_category_rel is still kept for the
+    # report's exploratory table.
+    primary_rows = [r for r in rows if r.get("bucket") == "OPD_improved"]
+    per_category_primary_rel = aggregate_per_category(
+        primary_rows, reliability=True,
+    )
 
     # --- Tables ---
     write_overall_csv(overall, overall_rel,
@@ -854,8 +1149,9 @@ def main(argv: list[str] | None = None) -> int:
         for p in picks:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
 
-    # --- Decision via TOST on the primary cell ---
-    decision = decide_branch(per_bucket_rel, per_category_rel,
+    # --- Decision via TOST on the primary cell. branch (c) per-category
+    #     comparison uses OPD_improved-only aggregation (per design §8). ---
+    decision = decide_branch(per_bucket_rel, per_category_primary_rel,
                              deltas, teacher_reliability)
     write_results_md(overall, overall_rel,
                      per_bucket, per_bucket_rel,
