@@ -14,8 +14,10 @@
 #   MLLMOPD_KEEP_PROXY=0 (default): unset http_proxy/https_proxy
 #     → internal HTTP works (no proxy in the way)
 #     → wandb cannot reach api.wandb.ai → offline only
-#   MLLMOPD_KEEP_PROXY=1: keep proxy + set no_proxy=10.0.0.0/8,...
-#     → internal HTTP bypasses proxy via no_proxy
+#   MLLMOPD_KEEP_PROXY=1: keep proxy + set no_proxy=<precise host list>
+#     → internal HTTP bypasses proxy via no_proxy (must be exact hosts,
+#       NOT CIDR — Python `requests` ignores CIDR no_proxy entries; see
+#       memory/feedback_requests_no_proxy_cidr.md)
 #     → wandb can reach api.wandb.ai via proxy
 #
 # This script tests BOTH modes and prints a clear verdict.
@@ -38,7 +40,14 @@ ORIG_HTTPS_PROXY="${https_proxy:-}"
 ORIG_NO_PROXY_LOWER="${no_proxy:-}"
 ORIG_NO_PROXY_UPPER="${NO_PROXY:-}"
 
-INTRANET_NO_PROXY="localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+# Precise host list — NOT CIDR. curl honors CIDR no_proxy but Python
+# `requests` (used by sglang `_init_external` + RolloutManager) does not,
+# so a CIDR no_proxy makes the curl probe pass while training still hangs
+# on a squid 502. Default lists the current 3-box atlas-era pool (A800
+# teacher + 2 H800 trainers). Override via INTRANET_NO_PROXY env if your
+# box pair rotates. See memory/feedback_requests_no_proxy_cidr.md +
+# project_xbox_topology_v2_atlas.md.
+INTRANET_NO_PROXY="${INTRANET_NO_PROXY:-localhost,127.0.0.1,10.82.121.12,10.48.91.210,10.86.16.16}"
 
 echo "================================================================"
 echo "wandb online connectivity probe — both proxy modes"
@@ -150,7 +159,8 @@ echo ""
 
 if [ $mode_b_internal = 1 ] && [ $mode_b_wandb = 1 ]; then
     echo "  → RECOMMENDED: run trainer with MLLMOPD_KEEP_PROXY=1"
-    echo "    (proxy kept for wandb, no_proxy bypasses 10.x for sglang/Ray)"
+    echo "    (proxy kept for wandb, no_proxy bypasses precise internal hosts"
+    echo "     for sglang/Ray; Python requests does NOT honor CIDR no_proxy)"
     echo ""
     echo "  Add to your launch env:"
     echo "    export MLLMOPD_KEEP_PROXY=1"
@@ -159,6 +169,9 @@ if [ $mode_b_internal = 1 ] && [ $mode_b_wandb = 1 ]; then
     echo "    export no_proxy=${INTRANET_NO_PROXY}"
     echo "    export NO_PROXY=${INTRANET_NO_PROXY}"
     echo "    [ -n \"\$WANDB_API_KEY\" ] || echo '!! also set WANDB_API_KEY'"
+    echo ""
+    echo "  ⚠ Update INTRANET_NO_PROXY env if your box pair rotates — must list"
+    echo "    every teacher/rollout/trainer host EXACTLY (no CIDR)."
     exit 0
 elif [ $mode_a_internal = 1 ] && [ $mode_a_wandb = 0 ]; then
     echo "  → wandb cannot reach api.wandb.ai via direct (no proxy);"
