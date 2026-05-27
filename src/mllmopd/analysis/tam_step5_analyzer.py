@@ -38,6 +38,20 @@ import numpy as np
 
 
 # ============================================================================
+# Module-level constants — must precede any function that uses them as default
+# ============================================================================
+# Reliability filter threshold for `tam_entropy_norm_T < threshold`. v0.1.3
+# TAM on long-CoT MMR1 outputs has entropy saturated at 0.99+ (smoke
+# 2026-05-28 on 4355 tokens: min=0.9936, p25=0.9964, median=0.9974,
+# p75=0.9982, p90=0.9988, max=0.9996). The Step 0 / Step 2 calibration
+# (0.85-0.99, threshold = 0.95) was on v0.1.2 + 3B + short prompt (R ≈ 80)
+# and is NOT applicable to the long-CoT 7B-teacher regime — 0.95 filters
+# out every token. Default raised to 0.998 (≈ p75 of v0.1.3 distribution
+# on this regime), overridable via --reliability-thresh.
+RELIABILITY_THRESH_DEFAULT = 0.998
+
+
+# ============================================================================
 # Data loading
 # ============================================================================
 def load_alignment(path: Path) -> list[dict]:
@@ -121,15 +135,8 @@ def _per_sample_means(rec: dict, *,
 # (Reported alongside raw IoU for chance correction.)
 RANDOM_IOU_BASELINE_TOP20 = 0.20 / (2 - 0.20)  # = 0.1111...
 
-# Reliability filter threshold for `tam_entropy_norm_T < threshold`. v0.1.3
-# TAM on long-CoT MMR1 outputs has entropy saturated at 0.99+ (smoke
-# 2026-05-28 on 4355 tokens: min=0.9936, p25=0.9964, median=0.9974,
-# p75=0.9982, p90=0.9988, max=0.9996). The Step 0 / Step 2 calibration
-# (0.85-0.99, threshold = 0.95) was on v0.1.2 + 3B + short prompt (R ≈ 80)
-# and is NOT applicable to the long-CoT 7B-teacher regime — 0.95 filters
-# out every token. Default raised to 0.998 (≈ p75 of v0.1.3 distribution
-# on this regime), overridable via --reliability-thresh.
-RELIABILITY_THRESH_DEFAULT = 0.998
+# RELIABILITY_THRESH_DEFAULT defined near module top (must precede
+# `_per_sample_means` default).
 
 
 def cluster_bootstrap_ci(per_sample_values: list[float], n_iter: int = 10000,
