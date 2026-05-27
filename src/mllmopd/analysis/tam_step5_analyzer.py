@@ -388,10 +388,30 @@ def _load_primary_sample_maps(rows: list[dict],
         S1_maps = [_decode_b64_map_raw(S1_b64[t], h, w) for t in keep]
         out.append({
             "id": r.get("id"),
+            "shape": (int(h), int(w)),         # NEW — Null B partner filter
             "T": T_maps, "S0": S0_maps, "S1": S1_maps,
             "n_tokens": len(keep),
         })
     return out
+
+
+def _random_derangement(n: int, rng: np.random.Generator,
+                        max_retries: int = 64) -> np.ndarray | None:
+    """Return a random derangement of [0, n) — a permutation with no fixed
+    points (perm[i] != i for all i). For n ∈ {0,1} return None.
+
+    Retries up to `max_retries` (the probability of a random permutation
+    being a derangement is ≈ 1/e ≈ 0.37, so 64 retries is essentially
+    guaranteed).
+    """
+    if n < 2:
+        return None
+    for _ in range(max_retries):
+        p = rng.permutation(n)
+        if not np.any(p == np.arange(n)):
+            return p
+    # Fallback: cycle shift (worst case n=2, always works)
+    return (np.arange(n) + 1) % n
 
 
 def _pair_delta_means(T_maps, S0_partner_maps, S1_partner_maps) -> dict | None:
@@ -419,43 +439,70 @@ def calibrate_null_b_cross_sample(samples_with_maps: list[dict],
                                   n_iter: int = 100,
                                   alpha: float = 0.05,
                                   seed: int = 8888) -> dict:
-    """Null B — cross-sample pairing. For each iter, randomly permute
-    S0 and S1 partner indices (independently) so that T_i is paired
-    with S0_{perm0[i]} and S1_{perm1[i]} (j ≠ i where possible).
-    Compute the per-sample Δ on the mis-paired triple, then the mean
-    over samples. The null δ = (1−alpha) percentile of |Δ_null_mean|.
+    """Null B — cross-sample pairing.
 
-    Cost-controlled: n_iter=100 with full reliable-token coverage.
+    For each iter, partition samples by `shape = (map_h, map_w)` (Qwen-VL
+    dynamic vision grid produces variable patch grids per image), then
+    within each same-shape group of size ≥ 2 generate a random
+    *derangement* (perm[i] != i for all i) so that T_i is paired with
+    S0_{perm[i]} and S1_{perm[i]} for j ≠ i. Compute the per-sample Δ
+    on the mis-paired triple, then the mean over samples.
+    `δ = (1 - alpha)` percentile of `|Δ_null_mean|`.
+
+    Cost-controlled: n_iter=100 with full reliable-token coverage by
+    default; per-shape grouping is the launch-blocker shape guard.
     """
     if len(samples_with_maps) < 2:
         return {k: float("nan") for k in ("delta_js", "delta_iou")}
+
+    # Group by (map_h, map_w) — only cross-pair within group.
+    groups: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for idx, s in enumerate(samples_with_maps):
+        groups[s.get("shape", (0, 0))].append(idx)
+    usable_groups = [g for g in groups.values() if len(g) >= 2]
+    if not usable_groups:
+        return {k: float("nan") for k in ("delta_js", "delta_iou")}
+
+    # Diagnostic: report shape distribution + how many samples actually
+    # participate in Null B.
+    n_in_groups = sum(len(g) for g in usable_groups)
+    n_total = len(samples_with_maps)
+    if n_in_groups < n_total:
+        import sys as _sys
+        print(f"    [null B] {n_total - n_in_groups}/{n_total} samples "
+              f"in singleton shape groups; Null B uses {n_in_groups} samples "
+              f"across {len(usable_groups)} same-shape groups.",
+              file=_sys.stderr)
+
     rng = np.random.default_rng(seed)
-    n = len(samples_with_maps)
     null_djs, null_diou = [], []
     for _ in range(n_iter):
-        perm_s0 = rng.permutation(n)
-        perm_s1 = rng.permutation(n)
-        # Force j ≠ i by single-step rotation if collision
-        for i in range(n):
-            if perm_s0[i] == i:
-                perm_s0[i] = (i + 1) % n
-            if perm_s1[i] == i:
-                perm_s1[i] = (i + 1) % n
         per_sample_djs, per_sample_diou = [], []
-        for i in range(n):
-            T = samples_with_maps[i]["T"]
-            S0p = samples_with_maps[perm_s0[i]]["S0"]
-            S1p = samples_with_maps[perm_s1[i]]["S1"]
-            res = _pair_delta_means(T, S0p, S1p)
-            if res is not None:
-                per_sample_djs.append(res["delta_js"])
-                per_sample_diou.append(res["delta_iou"])
+        for group in usable_groups:
+            n_g = len(group)
+            perm_s0 = _random_derangement(n_g, rng)
+            perm_s1 = _random_derangement(n_g, rng)
+            if perm_s0 is None or perm_s1 is None:
+                continue
+            for k, i in enumerate(group):
+                j_s0 = group[perm_s0[k]]
+                j_s1 = group[perm_s1[k]]
+                T = samples_with_maps[i]["T"]
+                S0p = samples_with_maps[j_s0]["S0"]
+                S1p = samples_with_maps[j_s1]["S1"]
+                res = _pair_delta_means(T, S0p, S1p)
+                if res is not None:
+                    per_sample_djs.append(res["delta_js"])
+                    per_sample_diou.append(res["delta_iou"])
         if per_sample_djs:
             null_djs.append(float(np.mean(per_sample_djs)))
             null_diou.append(float(np.mean(per_sample_diou)))
     return {
         "delta_js": float(np.quantile(np.abs(null_djs), 1 - alpha)) if null_djs else float("nan"),
         "delta_iou": float(np.quantile(np.abs(null_diou), 1 - alpha)) if null_diou else float("nan"),
+        "_n_usable_samples": n_in_groups,
+        "_n_singleton_excluded": n_total - n_in_groups,
+        "_n_groups": len(usable_groups),
     }
 
 
@@ -767,6 +814,22 @@ def write_category_csv(per_category: dict, per_category_rel: dict,
                             f"{mb['ci_high']:.6f},{mb['sd']:.6f},{mb['mde_95']:.6f}\n")
 
 
+def _write_primary_category_csv(per_category_primary_rel: dict,
+                                path: Path) -> None:
+    """OPD_improved × reliability per_category breakdown — the actual
+    branch (c) decision input. Separate from per_category.csv to avoid
+    confusion."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        f.write("category,n_samples,n_tokens,metric,mean,ci_low,ci_high,sd,mde_95\n")
+        for c, bk in per_category_primary_rel.items():
+            for k in ("delta_js", "delta_iou", "delta_cos"):
+                mb = bk[k]
+                f.write(f"{c},{bk['n_samples']},{bk['n_tokens_total']},"
+                        f"{k},{mb['mean']:.6f},{mb['ci_low']:.6f},"
+                        f"{mb['ci_high']:.6f},{mb['sd']:.6f},{mb['mde_95']:.6f}\n")
+
+
 def write_calibration_csv(deltas: dict, teacher_reliability: tuple[float, int, int],
                           path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -860,6 +923,25 @@ def decide_branch(per_bucket_rel: dict,
             "teacher_reliability_rate": rel_rate,
         }
 
+    # Min-n guard per GPT review of 6a081aa — bootstrap CI / TOST are
+    # unstable below ~10 samples; refuse to drive the decision tree on
+    # a tiny primary cell.
+    MIN_PRIMARY_N = 10
+    if primary["n_samples"] < MIN_PRIMARY_N:
+        return {
+            "branch": "inconclusive",
+            "label": (f"(e) underpowered — OPD_improved × reliability "
+                      f"n={primary['n_samples']} < {MIN_PRIMARY_N}."),
+            "metric_status": {},
+            "reasoning": (f"Primary cell has only {primary['n_samples']} samples; "
+                          f"TOST / bootstrap unreliable below n={MIN_PRIMARY_N}. "
+                          "Extend the candidate pool or accept the audit cannot decide."),
+            "used_cell": "OPD_improved x reliability",
+            "deltas": deltas,
+            "teacher_reliability_rate": rel_rate,
+            "min_primary_n_required": MIN_PRIMARY_N,
+        }
+
     # TOST per metric
     metric_status: dict = {}
     for k in ("delta_js", "delta_iou", "delta_cos"):
@@ -946,6 +1028,7 @@ def decide_branch(per_bucket_rel: dict,
 def write_results_md(overall: dict, overall_rel: dict,
                      per_bucket: dict, per_bucket_rel: dict,
                      per_category: dict, per_category_rel: dict,
+                     per_category_primary_rel: dict,
                      picks: list[dict], decision: dict,
                      deltas: dict, teacher_reliability: tuple[float, int, int],
                      out_path: Path) -> None:
@@ -1032,7 +1115,22 @@ def write_results_md(overall: dict, overall_rel: dict,
         f.write("\n")
 
         # ----- By category (reliability-filtered shown first) -----
-        f.write("## 4. By token category — reliability-filtered (decision-driving)\n\n")
+        # ----- Branch-(c) decision input: OPD_improved × reliability × category -----
+        f.write("## 4. By token category — **OPD_improved × reliability** "
+                "(branch (c) decision input)\n\n")
+        f.write("| Category | n_samples | n_tokens | ΔJS | ΔIoU | ΔCos |\n")
+        f.write("|---|---|---|---|---|---|\n")
+        for c in ALL_TOKEN_CATEGORIES:
+            if c not in per_category_primary_rel:
+                continue
+            bk = per_category_primary_rel[c]
+            marker = " (C_local)" if c in C_LOCAL_CATEGORIES else ""
+            f.write(f"| {c}{marker} | {bk['n_samples']} | {bk['n_tokens_total']} | "
+                    f"{_fmt(bk['delta_js'])} | {_fmt(bk['delta_iou'])} | "
+                    f"{_fmt(bk['delta_cos'])} |\n")
+        f.write("\n")
+
+        f.write("### 4b. By token category — all-buckets × reliability (exploratory)\n\n")
         f.write("| Category | n_samples | n_tokens | ΔJS | ΔIoU | ΔCos |\n")
         f.write("|---|---|---|---|---|---|\n")
         for c in ALL_TOKEN_CATEGORIES:
@@ -1044,7 +1142,7 @@ def write_results_md(overall: dict, overall_rel: dict,
                     f"{_fmt(bk['delta_js'])} | {_fmt(bk['delta_iou'])} | "
                     f"{_fmt(bk['delta_cos'])} |\n")
         f.write("\n")
-        f.write("### 4b. By token category — all tokens (exploratory)\n\n")
+        f.write("### 4c. By token category — all-buckets × all-tokens (exploratory)\n\n")
         f.write("| Category | n_samples | n_tokens | ΔJS | ΔIoU | ΔCos |\n")
         f.write("|---|---|---|---|---|---|\n")
         for c in ALL_TOKEN_CATEGORIES:
@@ -1156,9 +1254,13 @@ def main(argv: list[str] | None = None) -> int:
     write_results_md(overall, overall_rel,
                      per_bucket, per_bucket_rel,
                      per_category, per_category_rel,
+                     per_category_primary_rel,
                      picks, decision,
                      deltas, teacher_reliability,
                      args.out_dir / "step5-results.md")
+    # Sidecar CSV with the primary cell category breakdown (branch (c) input)
+    _write_primary_category_csv(per_category_primary_rel,
+                                args.out_dir / "tables" / "per_category_primary.csv")
 
     # Also emit the decision dict as JSON for downstream tooling
     with (args.out_dir / "decision.json").open("w") as f:

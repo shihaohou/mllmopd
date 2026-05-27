@@ -33,7 +33,8 @@
 #   OPD_TARGET_IDS       — JSON file with opd_target id mapping (default: none)
 #   N_IMPROVED / N_FAILED / N_TEACHER_ADV / N_DIVERSITY
 #                          → 70/60/30/40 (default: 200 total)
-#   MAX_NEW_TOKENS_SEL   — selector S0/S1 generate cap (default 1024)
+#   MAX_NEW_TOKENS_SEL   — selector S0/S1 generate cap (default = MAX_NEW_TOKENS_TAM;
+#                          hard-fail on mismatch unless ALLOW_DEGRADED_MODE=1)
 #   MAX_NEW_TOKENS_TAM   — main runner rollout cap (default 4096)
 #   NUM_GPUS             — data-parallel shard count (default: 8 on H800)
 #   PHASE                — predict | bucket | tam | analyze | all (default all)
@@ -284,6 +285,14 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
     nw=$(grep '^n_written=' "${sd}/alignment.drops.txt" | cut -d= -f2)
     nm=$(grep '^n_skipped_missing=' "${sd}/alignment.drops.txt" | cut -d= -f2)
     nv=$(grep '^n_skipped_tam_invalid=' "${sd}/alignment.drops.txt" | cut -d= -f2)
+    # Guard against malformed sidecar (empty / non-numeric).
+    for v in "${ne}" "${nw}" "${nm}" "${nv}"; do
+      if ! [[ "${v}" =~ ^[0-9]+$ ]]; then
+        echo "!! HARD FAIL: shard ${i} malformed alignment.drops.txt — "\
+"ne=${ne} nw=${nw} nm=${nm} nv=${nv}"
+        exit 34
+      fi
+    done
     if [ "$((nw + nm + nv))" -ne "${ne}" ]; then
       echo "!! HARD FAIL: shard ${i} accounting mismatch: "\
 "written=${nw} + missing=${nm} + invalid=${nv} != expected=${ne}"
@@ -315,7 +324,8 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
     echo "samples = ${SAMPLES_OUT}"
     echo "num_shards (NUM_GPUS) = ${NUM_GPUS}"
     echo "n_samples_input       = ${N_SAMPLES}"
-    echo "n_tam_invalid_drops   = ${N_DROPS}"
+    echo "n_tam_invalid_drops   = ${SUM_INVALID}"
+    echo "n_missing_drops       = ${SUM_MISSING}"
     echo "n_alignment_rows      = ${N_ROWS}"
     echo "merged alignment      = ${RUN_DIR}/alignment.jsonl"
     echo "allow_degraded_mode   = ${ALLOW_DEGRADED_MODE:-0}"

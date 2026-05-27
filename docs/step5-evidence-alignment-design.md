@@ -129,8 +129,13 @@ PASS-2: stratified pick:
 | `Dataset_diversity` | 40 | ChartQA + MathVista samples with strong visual content (chart / geometry), disjoint | qualitative reasonability check |
 | **Total** | **200** | | |
 
-If any bucket comes up short (e.g. opd_target only yields 22 disjoint),
-the deficit moves to `Dataset_diversity` to preserve n=200.
+**Hard-fail on deficit (per §11 item 3).** If any bucket cannot meet
+its target, the selector aborts with a non-zero exit code and the user
+must extend `--candidates` or lower the bucket target. Silent fallback
+to `Dataset_diversity` would poison the §8 decision tree. Pilot /
+debugging runs can opt in with `--allow-degraded-mode`; the
+`step5-results.md` then carries a "decision tree NOT interpretable"
+banner.
 
 ### 4.3 Output
 
@@ -309,13 +314,18 @@ TOST equivalence on metric M, threshold δ:
     AND ci_high(ΔM) < +δ
 ```
 
-Minimum-detectable-effect (MDE) at 95% bootstrap CI:
+Minimum-detectable-effect (MDE) at the 95% bootstrap CI — bootstrap
+percentile half-width, robust to skewed bootstrap distributions:
 
 ```
-MDE ≈ 1.96 · bootstrap_sd(ΔM)
+MDE_95 = max(|mean − ci_low|, |ci_high − mean|)
 ```
 
-If `MDE > δ`, the audit is **underpowered**; we cannot distinguish
+(Earlier versions used `1.96·bootstrap_sd`; replaced per GPT review of
+commit `6a081aa` because skewed bootstraps can let `1.96·sd`
+under-estimate the CI half-width.)
+
+If `MDE_95 > δ`, the audit is **underpowered**; we cannot distinguish
 "flat" from "small alignment". Report `inconclusive`, not `branch (b)`.
 
 ### 6.6 Stratifications (always reported)
@@ -410,15 +420,17 @@ teacher map can meaningfully grade?").
 **Sign convention (positive ΔJS / ΔIoU / ΔCos = OPD aligned).**
 
 Let `δ_JS`, `δ_IoU`, `δ_Cos` be the per-metric noise floors from §6.4
-null calibration. Let `MDE_M = 1.96 · bootstrap_sd(ΔM)`.
+null calibration. Let
+`MDE_M = max(|mean − ci_low|, |ci_high − mean|)` (bootstrap percentile
+half-width — see §6.5).
 
 | Outcome on `OPD_improved` × reliability | Statistical condition | Interpretation | Next step |
 |---|---|---|---|
-| **(a) aligned** | `mean(ΔJS) > δ_JS` AND `ci_low(ΔJS) > 0` (+ same direction for ΔIoU or ΔCos as confirmation) | OPD already implicitly aligns visual evidence | **EA-OPD motivation weak.** Drop the line; main §Method = T2-2/v3 from atlas data. |
+| **(a) aligned** | `mean(ΔJS) > δ_JS` AND `ci_low(ΔJS) > 0` AND ΔIoU also aligned (same condition). Raw Cos is reported as diagnostic only — not used for confirmation because non-mean-centered cosine is prone to false positives from globally-active maps. | OPD already implicitly aligns visual evidence | **EA-OPD motivation weak.** Drop the line; main §Method = T2-2/v3 from atlas data. |
 | **(b) flat (equivalent)** | TOST: `ci_low(ΔJS) > −δ_JS` AND `ci_high(ΔJS) < +δ_JS`, AND `MDE_JS ≤ δ_JS` | OPD trains the output but not the evidence — *and the audit is powered enough to say so* | **Strong EA-OPD motivation.** EA-OPD becomes the §Method headline candidate; v3 C_local gate is the cheap-deploy variant. |
 | **(c) split** | (a)-grade alignment on `template_token` / `answer_token` / `punctuation`, (b)-grade equivalence on `content_noun` / `visual_attribute` / `proper_noun` | OPD aligns the easy (already-vision-uniform) tokens but not the visually-anchored ones | **Both methods coexist.** v3 = cheap deploy; EA-OPD = research arm. |
 | **(d) teacher-TAM unreliable** | Pre-condition: <50% of `OPD_improved` tokens pass the reliability filter (`tam_entropy_norm_T < 0.95`) | TAM signal too diffuse on this prompt distribution to ground EA-OPD | **Step 5 stops.** TAM stays as Step 2 motivation only; main §Method = T2-2/v3. |
-| **(e) inconclusive** | TOST fails (CI strays outside [−δ, +δ]) AND `MDE_JS > δ_JS` | Underpowered for the (b) claim; no aligned direction either | **Increase n.** Either rerun with 400 samples or accept the audit cannot decide. |
+| **(e) inconclusive / underpowered** | (i) TOST fails (CI strays outside [−δ, +δ]) AND `MDE_JS > δ_JS`; OR (ii) primary cell has `n_samples < 10` (min-n guard) | Underpowered for the (b) claim; no aligned direction either | **Increase n.** Either rerun with 400 samples or accept the audit cannot decide. |
 
 Each branch label is also computed on the all-tokens (exploratory)
 aggregation and on each non-primary bucket — these go into
