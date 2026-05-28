@@ -1231,6 +1231,19 @@ def main(argv: list[str] | None = None) -> int:
                           f"TAM on long-CoT 7B teacher (smoke 2026-05-28: "
                           f"min=0.9936, p25=0.9964, p75=0.9982). Step 0/2 used "
                           f"0.95 on v0.1.2 + short prompt — NOT applicable here."))
+    ap.add_argument("--qualitative-k-per-bucket", type=int, default=3,
+                    help="How many samples per bucket to pick for "
+                         "qualitative overlays (default 3 → 12 cases × 4 "
+                         "tokens = 48 PNGs).")
+    ap.add_argument("--qualitative-tokens-per-case", type=int, default=4,
+                    help="How many top-concentrated C_local tokens to "
+                         "select per case (default 4).")
+    ap.add_argument("--picks-only", action="store_true",
+                    help="Skip aggregation + null calibration + figures; only "
+                         "re-pick `qualitative_cases.jsonl` from a fresh sort. "
+                         "Use to regenerate picks (e.g. with bigger k or "
+                         "tokens_per_case) without paying the ~8 min "
+                         "calibration cost.")
     args = ap.parse_args(argv)
     THRESH = args.reliability_thresh
     print(f">>> reliability_thresh = {THRESH:.4f} "
@@ -1244,6 +1257,29 @@ def main(argv: list[str] | None = None) -> int:
           file=sys.stderr)
     if not rows:
         sys.exit("!! no rows — abort")
+
+    # --- Fast path: --picks-only just regenerates qualitative_cases.jsonl ---
+    if args.picks_only:
+        print(f">>> --picks-only: regenerating qualitative_cases.jsonl "
+              f"(k_per_bucket={args.qualitative_k_per_bucket}, "
+              f"tokens_per_case={args.qualitative_tokens_per_case}); "
+              f"skipping aggregation + null calibration + figures",
+              file=sys.stderr)
+        picks = pick_qualitative(
+            rows,
+            k_per_bucket=args.qualitative_k_per_bucket,
+            tokens_per_case=args.qualitative_tokens_per_case,
+            reliability_thresh=THRESH,
+        )
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = args.out_dir / "qualitative_cases.jsonl"
+        with out_path.open("w") as f:
+            for p in picks:
+                f.write(json.dumps(p, ensure_ascii=False) + "\n")
+        n_token_total = sum(len(p["tok_indices"]) for p in picks)
+        print(f">>> wrote {len(picks)} picks ({n_token_total} tokens total) "
+              f"to {out_path}", file=sys.stderr)
+        return 0
 
     # --- Aggregate (both filters, all axes) ---
     print(">>> computing overall (all tokens)", file=sys.stderr)
@@ -1305,7 +1341,9 @@ def main(argv: list[str] | None = None) -> int:
                       args.out_dir / "fig3_per_token_category.png")
 
     # --- Qualitative picks ---
-    picks = pick_qualitative(rows, k_per_bucket=3, tokens_per_case=4,
+    picks = pick_qualitative(rows,
+                             k_per_bucket=args.qualitative_k_per_bucket,
+                             tokens_per_case=args.qualitative_tokens_per_case,
                              reliability_thresh=THRESH)
     with (args.out_dir / "qualitative_cases.jsonl").open("w") as f:
         for p in picks:

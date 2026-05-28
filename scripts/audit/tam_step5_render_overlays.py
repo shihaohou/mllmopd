@@ -225,10 +225,11 @@ def render_pick(pick: dict, row: dict, image_root: Path, out_dir: Path,
         caption = (
             f"{pick['id']} | bucket={bucket} | t={t} "
             f"tok={token_txt!r} cat={token_cat} | "
-            f"S0/T: JS={_fmt(js_s0)} IoU={_fmt(iou_s0)} | "
-            f"S1/T: JS={_fmt(js_s1)} IoU={_fmt(iou_s1)} | "
             f"S0_correct={pick.get('s0_correct')} "
-            f"S1_correct={pick.get('s1_correct')}"
+            f"S1_correct={pick.get('s1_correct')} | "
+            f"S0(base)→T: JS={_fmt(js_s0)} IoU={_fmt(iou_s0)} | "
+            f"S1(OPD)→T: JS={_fmt(js_s1)} IoU={_fmt(iou_s1)} | "
+            f"T=MMR1-7B-RL teacher | S0=MMR1-3B-SFT base | S1=T1-Full OPD"
         )
 
         try:
