@@ -775,10 +775,16 @@ def pick_qualitative(rows: list[dict], k_per_bucket: int = 3,
                 if cat not in c_local:
                     continue
                 ent = r["T"]["tam_entropy_norm"][t]
-                if ent is None or ent > 0.92:
+                if ent is None:
                     continue
                 candidates.append((t, cat, ent))
-            candidates.sort(key=lambda x: x[2])    # most concentrated first
+            # Rank by entropy ascending (most concentrated first) and take
+            # top-K. No absolute threshold — v0.1.3 long-CoT TAM has
+            # entropy saturated at 0.99+, so a hardcoded 0.92 cutoff (from
+            # Step 0 / short-prompt era) would always reject every token.
+            # Per-sample ranking instead picks the locally-most-concentrated
+            # tokens regardless of distribution shift.
+            candidates.sort(key=lambda x: x[2])
             tok_indices = [t for t, _, _ in candidates[:tokens_per_case]]
             picks.append({
                 "id":     r["id"],
