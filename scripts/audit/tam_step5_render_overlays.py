@@ -45,14 +45,24 @@ def _decode_b64_map(b64: str, h: int, w: int) -> np.ndarray:
     return arr.reshape(h, w)
 
 
+def _resampling():
+    """Return (BILINEAR, LANCZOS) constants compatible with Pillow 9-10+."""
+    from PIL import Image
+    try:
+        return Image.Resampling.BILINEAR, Image.Resampling.LANCZOS
+    except AttributeError:  # Pillow < 9.1
+        return Image.BILINEAR, Image.LANCZOS
+
+
 def _overlay_pil(image_rgb, map_uint8_HW: np.ndarray, alpha: float = 0.5):
     """Pillow + JET colormap → blended overlay. Returns PIL.Image RGB."""
     from PIL import Image
     from matplotlib import cm
 
+    BILINEAR, _ = _resampling()
     W_img, H_img = image_rgb.size
     map_pil = Image.fromarray(map_uint8_HW, mode="L").resize(
-        (W_img, H_img), resample=Image.BILINEAR,
+        (W_img, H_img), resample=BILINEAR,
     )
     map_np = np.array(map_pil).astype(np.float32) / 255.0
     jet_rgba = cm.get_cmap("jet")(map_np)
@@ -103,10 +113,36 @@ def _stream_lookup(alignment_path: Path, wanted_ids: set[str]) -> dict:
     return out
 
 
+def _layout(target_h: int) -> dict:
+    """Derive font / padding / caption sizes from `target_h`.
+
+    Calibrated so target_h=256 reproduces the original layout (thumbnail
+    quality) and target_h=768 yields slide-ready PNGs (~3x font/pad).
+    Scale is clamped at 4× so 4K renders stay readable, not chunky.
+    """
+    scale = max(1.0, min(4.0, target_h / 256.0))
+    font_main = max(14, int(14 * scale))
+    font_small = max(11, int(11 * scale))
+    return {
+        "target_h":    target_h,
+        "pad":         max(8, int(8 * scale)),
+        "label_h":     max(20, int(font_main * 1.5)),
+        "caption_h":   max(60, int(font_small * 6.0)),  # ~3 wrapped lines
+        "font_main":   font_main,
+        "font_small":  font_small,
+        "line_h":      int(font_small * 1.4),
+        "px_per_char": max(6, int(font_small * 0.55)),
+        "max_cap_lines": 3,
+    }
+
+
 def _compose_triplet(image, maps_T, maps_S0, maps_S1, alpha: float,
-                     caption: str):
+                     caption: str, target_h: int = 768):
     """Compose [orig, T, S0, S1] horizontal panel with caption strip."""
     from PIL import Image, ImageDraw, ImageFont
+
+    _, LANCZOS = _resampling()
+    lay = _layout(target_h)
 
     overlays = [
         ("orig", image),
@@ -115,27 +151,31 @@ def _compose_triplet(image, maps_T, maps_S0, maps_S1, alpha: float,
         ("S1", _overlay_pil(image, maps_S1, alpha=alpha)),
     ]
 
-    # Resize all panels to a common height for clean horizontal stacking
-    target_h = 256
+    # Resize all panels to a common height for clean horizontal stacking.
+    # LANCZOS over BILINEAR: source images (MathVista / HallusionBench)
+    # are 400-800px tall; up-sampling to 768 with BILINEAR was the cause
+    # of the "blurry slide PNG" complaint.
     resized = []
     for name, im in overlays:
         w, h = im.size
         new_w = int(w * (target_h / h))
-        resized.append((name, im.resize((new_w, target_h), Image.BILINEAR)))
+        resized.append((name, im.resize((new_w, target_h), LANCZOS)))
 
-    pad = 8
-    label_h = 20
-    caption_h = 60
+    pad = lay["pad"]
+    label_h = lay["label_h"]
+    caption_h = lay["caption_h"]
     total_w = sum(im.size[0] for _, im in resized) + pad * (len(resized) + 1)
     total_h = target_h + label_h + caption_h + pad * 3
 
     canvas = Image.new("RGB", (total_w, total_h), (255, 255, 255))
     try:
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            lay["font_main"],
         )
         font_small = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            lay["font_small"],
         )
     except Exception:  # noqa: BLE001
         font = ImageFont.load_default()
@@ -143,15 +183,15 @@ def _compose_triplet(image, maps_T, maps_S0, maps_S1, alpha: float,
 
     draw = ImageDraw.Draw(canvas)
     x = pad
+    label_y = max(2, (label_h - lay["font_main"]) // 2)
     for name, im in resized:
         canvas.paste(im, (x, label_h + pad))
-        draw.text((x + 6, 2), name, fill=(0, 0, 0), font=font)
+        draw.text((x + pad // 2, label_y), name, fill=(0, 0, 0), font=font)
         x += im.size[0] + pad
 
     # Caption strip below the row
     cap_y = label_h + pad + target_h + pad
-    # Word-wrap caption manually
-    max_chars_per_line = total_w // 7  # rough px → chars
+    max_chars_per_line = max(40, total_w // lay["px_per_char"])
     words = caption.split()
     lines: list[str] = []
     cur = ""
@@ -163,8 +203,9 @@ def _compose_triplet(image, maps_T, maps_S0, maps_S1, alpha: float,
             cur = w if not cur else cur + " " + w
     if cur:
         lines.append(cur)
-    for i, line in enumerate(lines[:3]):
-        draw.text((pad, cap_y + i * 16), line, fill=(0, 0, 0), font=font_small)
+    for i, line in enumerate(lines[:lay["max_cap_lines"]]):
+        draw.text((pad, cap_y + i * lay["line_h"]),
+                  line, fill=(0, 0, 0), font=font_small)
     return canvas
 
 
@@ -301,7 +342,7 @@ def _safe_at(lst, t):
 
 
 def render_pick(pick: dict, row: dict, image_root: Path, out_dir: Path,
-                alpha: float) -> tuple[int, str]:
+                alpha: float, target_h: int = 768) -> tuple[int, str]:
     """Render all tok_indices in a single pick. Returns (n_rendered, msg)."""
     if row is None:
         return 0, f"no alignment row for id={pick['id']}"
@@ -369,7 +410,8 @@ def render_pick(pick: dict, row: dict, image_root: Path, out_dir: Path,
         )
 
         try:
-            panel = _compose_triplet(image, M_T, M_S0, M_S1, alpha, caption)
+            panel = _compose_triplet(image, M_T, M_S0, M_S1, alpha, caption,
+                                     target_h=target_h)
             out_path = sample_dir / f"{t:04d}_{_safe_name(token_txt)}.png"
             panel.save(out_path, "PNG")
             n_rendered += 1
@@ -390,6 +432,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--image-root", type=Path, default=Path("."))
     ap.add_argument("--alpha", type=float, default=0.5,
                     help="overlay blend: alpha*heatmap + (1-alpha)*image")
+    ap.add_argument("--target-h", type=int, default=768,
+                    help=("Panel height in px (default 768, slide-ready). "
+                          "Was hardcoded 256 → blurry. Fonts/pad scale "
+                          "proportionally (clamped 4x). Use 256 to reproduce "
+                          "the original thumbnail layout."))
     args = ap.parse_args(argv)
 
     picks: list[dict] = []
@@ -411,7 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     n_total = 0
     for pick in picks:
         n, msg = render_pick(pick, rows.get(pick["id"]),
-                             args.image_root, args.out_dir, args.alpha)
+                             args.image_root, args.out_dir, args.alpha,
+                             target_h=args.target_h)
         n_total += n
         print(f"  {msg}", file=sys.stderr)
 
