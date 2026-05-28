@@ -2,21 +2,35 @@
 
 For each sample in the input JSONL (output of tam_step5_sample_selector):
 
-  Pass 1: S1 generates a greedy rollout `y` (max-new=4096) under the
-          MMR1 system prompt. Cached to rollout_cache.jsonl so the three
-          model passes can reuse it.
+  Pass 1: A source model (S1 by default; S0 under --enable-pass4) generates
+          a greedy rollout `y` (max-new=4096) under the MMR1 system prompt.
+          Cached to rollout_cache.jsonl (R1 = S1 self) or
+          rollout_cache_R0.jsonl (R0 = S0 self) so the three model passes
+          can reuse it.
 
   Pass 2: One model at a time (T, S0, S1) is loaded; teacher-forced
           forward on (prompt + y), then `_tam_core.TAM` produces a
           per-token activation map for every response token. Per-model
-          output is written to `tam_per_model_<X>.jsonl`.
+          output is written to `tam_per_model_<X>.jsonl` (R1) or
+          `tam_per_model_<X>_R0.jsonl` (R0).
 
   Pass 3: Per-token alignment metrics (Top20% IoU, JS, Cosine) are
           computed offline by merging the three per-model files. Written
-          to `alignment.jsonl`. Single-process; cheap.
+          to `alignment.jsonl` (R1) or `alignment_R0.jsonl` (R0).
+          Single-process; cheap.
 
-Design doc:    docs/step5-evidence-alignment-design.md
-Schema bumped: step5_schema_version v0.1
+  Pass 4: Cross-rollout self-trajectory comparison (closes §13.1 gap)
+          is implemented as a separate analysis script,
+          `src/mllmopd/analysis/tam_step5_pass4_compare.py`. It consumes
+          `alignment.jsonl` + `alignment_R0.jsonl` and computes:
+            - Δ_self_traj  = mean_align(S1@R1, T@R1)
+                             − mean_align(S0@R0, T@R0)   per sample
+            - Δ_s0_cross   = mean_align(S0@R0, T@R0)
+                             − mean_align(S0@R1, T@R1)   per sample
+          with cluster bootstrap + TOST equivalence (mirrors decision.json).
+
+Design doc:    docs/step5-evidence-alignment-design.md (§13)
+Schema:        step5_schema_version v0.1 (R1 outputs), v0.2 (R0 + Pass 4 outputs)
 
 Heavy reuse of tam_sanity helpers (classifier v0.1.3, model loader, sysprompt,
 QC, b64 encoding). The forward-path inside `model_pass_with_tam` mirrors the
@@ -26,6 +40,7 @@ SKIPS the generate phase entirely.
 
 Usage::
 
+    # Default (R1 only — preserves the existing branch (b) audit):
     python -m scripts.audit.tam_step5_evidence_alignment \\
         --samples data/audit/tam_step5_samples_v0.jsonl \\
         --teacher "$MMR1_7B_RL_CKPT" \\
@@ -34,6 +49,14 @@ Usage::
         --out-dir "$MLLMOPD_RUNS/audit/tam_step5_$(date +%Y%m%d-%H%M%S)" \\
         --max-new-tokens 4096 \\
         [--shard-id 0 --num-shards 8]   # data-parallel fan-out
+
+    # Pass 4 mode (R0 sequence; can be added to an existing R1 out-dir
+    # — all R0 files use the _R0 suffix and are resume-safe):
+    python -m scripts.audit.tam_step5_evidence_alignment \\
+        --samples ...  --teacher ... --s0 ... --s1 ... \\
+        --out-dir "$EXISTING_R1_OUT_DIR" \\
+        --enable-pass4 \\
+        --pass all_R0          # only the R0 sequence; skips R1
 """
 
 from __future__ import annotations
@@ -83,12 +106,13 @@ def _load_image_for_rec(rec: dict, image_root: Path):
 
 
 # ============================================================================
-# Pass 1 — S1 greedy rollout
+# Pass 1 — greedy rollout (R1 = S1 self, R0 = S0 self)
 # ============================================================================
-def s1_rollout(processor, model, rec, image, args) -> dict:
-    """Greedy generation from S1; returns response_ids + text + length.
+def _greedy_rollout(processor, model, rec, image, args) -> dict:
+    """Greedy generation from a model; returns response_ids + text + length.
 
     Bare generate — no hidden_states / scores / attentions. Memory-safe.
+    Identical generation contract for R1 (source = S1) and R0 (source = S0).
     """
     import torch
     messages = _build_messages(rec["question"], image, args.system_prompt)
@@ -403,22 +427,31 @@ def _load_jsonl(path: Path) -> dict:
     return out
 
 
-def run_pass1(args, subset: list[dict], rollout_path: Path) -> dict:
-    """Pass 1: S1 greedy rollout for every sample. Resumable."""
+def run_pass1(args, subset: list[dict], rollout_path: Path,
+              *, source_name: str, source_path: str) -> dict:
+    """Pass 1: greedy rollout for every sample from the named source model.
+
+    source_name is "S1" for R1 (default) or "S0" for R0 (under
+    --enable-pass4). The rollout file path determines which rollout this
+    is; the source identity is also stamped in each row as
+    `rollout_source = f"{source_name}_greedy"`. Resumable.
+    """
     import torch
 
+    rollout_source = f"{source_name}_greedy"
     done = _load_jsonl(rollout_path)
     if done:
-        print(f">>> Pass 1: resume — {len(done)} rollouts cached in "
-              f"{rollout_path}", file=sys.stderr)
+        print(f">>> Pass 1 [{rollout_source}]: resume — {len(done)} "
+              f"rollouts cached in {rollout_path}", file=sys.stderr)
     todo = [r for r in subset if r["id"] not in done]
     if not todo:
-        print(f">>> Pass 1: all {len(subset)} rollouts cached; skipping",
-              file=sys.stderr)
+        print(f">>> Pass 1 [{rollout_source}]: all {len(subset)} "
+              f"rollouts cached; skipping", file=sys.stderr)
         return done
 
-    print(f">>> Pass 1: loading S1 ← {args.s1}", file=sys.stderr)
-    s1_proc, s1_model = _build_model(args.s1)
+    print(f">>> Pass 1 [{rollout_source}]: loading {source_name} ← "
+          f"{source_path}", file=sys.stderr)
+    src_proc, src_model = _build_model(source_path)
     image_root = Path(args.image_root)
 
     rollout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,9 +461,11 @@ def run_pass1(args, subset: list[dict], rollout_path: Path) -> dict:
         for k, rec in enumerate(todo):
             try:
                 image, img_path = _load_image_for_rec(rec, image_root)
-                r = s1_rollout(s1_proc, s1_model, rec, image, args)
+                r = _greedy_rollout(src_proc, src_model, rec, image, args)
                 row = {
                     "id":             rec["id"],
+                    "rollout_source": rollout_source,
+                    "rollout_model":  source_path,
                     "image_path":     str(img_path),
                     "image_sha256":   _image_sha256(img_path),
                     "response_ids":   r["response_ids"],
@@ -444,20 +479,20 @@ def run_pass1(args, subset: list[dict], rollout_path: Path) -> dict:
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 fout.flush()
                 rid_short = str(rec["id"])[:36]
-                print(f"  rollout [{k+1:4d}/{n}] {r['rollout_gen_s']:5.1f}s  "
-                      f"R={r['response_length']:4d}  {rid_short}",
-                      file=sys.stderr, flush=True)
+                print(f"  rollout[{source_name}] [{k+1:4d}/{n}] "
+                      f"{r['rollout_gen_s']:5.1f}s  R={r['response_length']:4d}  "
+                      f"{rid_short}", file=sys.stderr, flush=True)
             except Exception as e:  # noqa: BLE001
-                print(f"!! rollout failed on {rec['id']}: {e!r}",
+                print(f"!! rollout[{source_name}] failed on {rec['id']}: {e!r}",
                       file=sys.stderr, flush=True)
             finally:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
 
-    # Free S1 — Pass 2 reloads in canonical order
+    # Free source model — Pass 2 reloads in canonical order
     try:
-        del s1_model
+        del src_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:  # noqa: BLE001
@@ -550,11 +585,20 @@ def _decode_b64_map(b64_str: str, h: int, w: int) -> np.ndarray:
 
 def run_pass3(args, subset: list[dict], rollout_cache: dict,
               per_model: dict[str, dict], out_path: Path,
-              processor=None) -> None:
+              processor=None,
+              *,
+              rollout_source: str = "S1_greedy",
+              rollout_model: str | None = None,
+              schema_version: str = "v0.1") -> None:
     """Pass 3: merge per-model outputs + compute alignment metrics.
 
     Uses in-memory map arrays if available (same-process run); otherwise
     decodes from inline b64. Single-process; fast.
+
+    `rollout_source` + `rollout_model` are stamped on every row so
+    downstream analysis (Pass 4 cross-rollout comparison) can tell R0 and
+    R1 alignment files apart. `schema_version` overrides the
+    `step5_schema_version` stamp — bump to "v0.2" for R0 outputs.
     """
     # We need a tokenizer for token_category classification. Use the S1
     # processor (any tokenizer in Qwen2.5-VL family is equivalent at
@@ -664,8 +708,8 @@ def run_pass3(args, subset: list[dict], rollout_cache: dict,
                 "s1_correct":       rec.get("s1_correct"),
 
                 # rollout (the shared sequence)
-                "rollout_source":   "S1_greedy",
-                "rollout_model":    args.s1,
+                "rollout_source":   rollout_source,
+                "rollout_model":    rollout_model if rollout_model is not None else args.s1,
                 "response_ids":     response_ids,
                 "response_text":    rollout["response_text"],
                 "response_length":  R,
@@ -733,7 +777,7 @@ def run_pass3(args, subset: list[dict], rollout_cache: dict,
 
                 # version + commit
                 "tam_preproc_version":    "v0.1.3",
-                "step5_schema_version":   "v0.1",
+                "step5_schema_version":   schema_version,
                 "code_commit_run":        os.environ.get("MLLMOPD_CODE_COMMIT", "unknown"),
                 "tokenizer_vocab_hash":   _tokenizer_vocab_hash(processor),
                 "pos_tagger_version":     classification.get("_pos_tagger_version"),
@@ -773,11 +817,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--shard-id", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--pass", dest="which_pass",
-                    choices=["1", "2T", "2S0", "2S1", "3", "all"],
+                    choices=[
+                        # R1 (default) sequence
+                        "1", "2T", "2S0", "2S1", "3", "all",
+                        # R0 (Pass-4 prerequisite) sequence — only fire
+                        # when --enable-pass4 is also passed
+                        "1R0", "2T_R0", "2S0_R0", "2S1_R0", "3R0",
+                        "all_R0",  # everything in the R0 sequence only
+                        "all_with_R0",  # R1 then R0
+                    ],
                     default="all",
                     help="Restrict to one pass — useful for multi-box "
-                         "orchestration. Default: all four")
+                         "orchestration. Default: all (R1 only). The R0 "
+                         "variants are gated by --enable-pass4.")
+    ap.add_argument("--enable-pass4", action="store_true",
+                    help="Enable Pass-4 prerequisite generation: rollout "
+                         "R0 = S0 self-greedy + Pass 2 on R0 + Pass 3 on R0. "
+                         "Outputs to {rollout_cache,tam_per_model_*,alignment}_R0.* "
+                         "in the same out-dir. Pass 4 comparison itself runs in "
+                         "src/mllmopd/analysis/tam_step5_pass4_compare.py.")
     args = ap.parse_args(argv)
+
+    # Guard: R0-flavored --pass options require --enable-pass4 explicitly,
+    # since they would silently produce R0 outputs otherwise.
+    r0_pass_options = {"1R0", "2T_R0", "2S0_R0", "2S1_R0", "3R0",
+                       "all_R0", "all_with_R0"}
+    if args.which_pass in r0_pass_options and not args.enable_pass4:
+        print(f"!! --pass={args.which_pass} requires --enable-pass4",
+              file=sys.stderr)
+        return 2
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     subset = _load_subset(args.samples, args.limit,
@@ -785,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f">>> subset: {len(subset)} samples "
           f"(shard {args.shard_id}/{args.num_shards})", file=sys.stderr)
 
+    # ---------- R1 file layout (unchanged for back-compat) ----------
     rollout_path = args.out_dir / "rollout_cache.jsonl"
     per_model_paths = {
         "T":  args.out_dir / "tam_per_model_T.jsonl",
@@ -792,46 +861,125 @@ def main(argv: list[str] | None = None) -> int:
         "S1": args.out_dir / "tam_per_model_S1.jsonl",
     }
     alignment_path = args.out_dir / "alignment.jsonl"
+    # ---------- R0 file layout (Pass-4 prerequisite) ----------
+    rollout_path_R0 = args.out_dir / "rollout_cache_R0.jsonl"
+    per_model_paths_R0 = {
+        "T":  args.out_dir / "tam_per_model_T_R0.jsonl",
+        "S0": args.out_dir / "tam_per_model_S0_R0.jsonl",
+        "S1": args.out_dir / "tam_per_model_S1_R0.jsonl",
+    }
+    alignment_path_R0 = args.out_dir / "alignment_R0.jsonl"
 
-    # ----- Pass 1 -----
+    # ============================================================
+    # R1 sequence — default; skipped when --pass is an R0 variant.
+    # ============================================================
     rollout_cache: dict = {}
-    if args.which_pass in ("1", "all"):
-        rollout_cache = run_pass1(args, subset, rollout_path)
-    else:
-        rollout_cache = _load_jsonl(rollout_path)
-
-    if args.which_pass == "1":
-        return 0
-
-    # ----- Pass 2 (T / S0 / S1) -----
     per_model: dict[str, dict] = {"T": {}, "S0": {}, "S1": {}}
-    if args.which_pass in ("2T", "all"):
-        per_model["T"] = run_pass2_one_model(
-            args, subset, rollout_cache, "T", args.teacher, per_model_paths["T"]
-        )
-    else:
-        per_model["T"] = _load_jsonl(per_model_paths["T"])
+    if args.which_pass not in r0_pass_options:
+        # ----- Pass 1 -----
+        if args.which_pass in ("1", "all", "all_with_R0"):
+            rollout_cache = run_pass1(
+                args, subset, rollout_path,
+                source_name="S1", source_path=args.s1,
+            )
+        else:
+            rollout_cache = _load_jsonl(rollout_path)
 
-    if args.which_pass in ("2S0", "all"):
-        per_model["S0"] = run_pass2_one_model(
-            args, subset, rollout_cache, "S0", args.s0, per_model_paths["S0"]
-        )
-    else:
-        per_model["S0"] = _load_jsonl(per_model_paths["S0"])
+        if args.which_pass == "1":
+            return 0
 
-    if args.which_pass in ("2S1", "all"):
-        per_model["S1"] = run_pass2_one_model(
-            args, subset, rollout_cache, "S1", args.s1, per_model_paths["S1"]
-        )
-    else:
-        per_model["S1"] = _load_jsonl(per_model_paths["S1"])
+        # ----- Pass 2 (T / S0 / S1) -----
+        if args.which_pass in ("2T", "all", "all_with_R0"):
+            per_model["T"] = run_pass2_one_model(
+                args, subset, rollout_cache, "T", args.teacher,
+                per_model_paths["T"]
+            )
+        else:
+            per_model["T"] = _load_jsonl(per_model_paths["T"])
 
-    if args.which_pass.startswith("2"):
-        return 0
+        if args.which_pass in ("2S0", "all", "all_with_R0"):
+            per_model["S0"] = run_pass2_one_model(
+                args, subset, rollout_cache, "S0", args.s0,
+                per_model_paths["S0"]
+            )
+        else:
+            per_model["S0"] = _load_jsonl(per_model_paths["S0"])
 
-    # ----- Pass 3 -----
-    if args.which_pass in ("3", "all"):
-        run_pass3(args, subset, rollout_cache, per_model, alignment_path)
+        if args.which_pass in ("2S1", "all", "all_with_R0"):
+            per_model["S1"] = run_pass2_one_model(
+                args, subset, rollout_cache, "S1", args.s1,
+                per_model_paths["S1"]
+            )
+        else:
+            per_model["S1"] = _load_jsonl(per_model_paths["S1"])
+
+        if args.which_pass.startswith("2") and not args.which_pass.endswith("_R0"):
+            return 0
+
+        # ----- Pass 3 -----
+        if args.which_pass in ("3", "all", "all_with_R0"):
+            run_pass3(args, subset, rollout_cache, per_model, alignment_path,
+                      rollout_source="S1_greedy", rollout_model=args.s1,
+                      schema_version="v0.1")
+
+        if args.which_pass == "3":
+            return 0
+
+    # ============================================================
+    # R0 sequence — Pass 4 prerequisite. Only runs when:
+    #   --enable-pass4 AND --pass in {1R0,…,all_R0,all_with_R0}
+    # ============================================================
+    rollout_cache_R0: dict = {}
+    per_model_R0: dict[str, dict] = {"T": {}, "S0": {}, "S1": {}}
+    if args.enable_pass4 and args.which_pass in r0_pass_options | {"all_with_R0"}:
+        # ----- Pass 1 (R0 = S0 self) -----
+        if args.which_pass in ("1R0", "all_R0", "all_with_R0"):
+            rollout_cache_R0 = run_pass1(
+                args, subset, rollout_path_R0,
+                source_name="S0", source_path=args.s0,
+            )
+        else:
+            rollout_cache_R0 = _load_jsonl(rollout_path_R0)
+
+        if args.which_pass == "1R0":
+            return 0
+
+        # ----- Pass 2 on R0 (T@R0 / S0@R0 / S1@R0) -----
+        if args.which_pass in ("2T_R0", "all_R0", "all_with_R0"):
+            per_model_R0["T"] = run_pass2_one_model(
+                args, subset, rollout_cache_R0, "T", args.teacher,
+                per_model_paths_R0["T"]
+            )
+        else:
+            per_model_R0["T"] = _load_jsonl(per_model_paths_R0["T"])
+
+        if args.which_pass in ("2S0_R0", "all_R0", "all_with_R0"):
+            per_model_R0["S0"] = run_pass2_one_model(
+                args, subset, rollout_cache_R0, "S0", args.s0,
+                per_model_paths_R0["S0"]
+            )
+        else:
+            per_model_R0["S0"] = _load_jsonl(per_model_paths_R0["S0"])
+
+        if args.which_pass in ("2S1_R0", "all_R0", "all_with_R0"):
+            per_model_R0["S1"] = run_pass2_one_model(
+                args, subset, rollout_cache_R0, "S1", args.s1,
+                per_model_paths_R0["S1"]
+            )
+        else:
+            per_model_R0["S1"] = _load_jsonl(per_model_paths_R0["S1"])
+
+        if args.which_pass.endswith("_R0") and args.which_pass.startswith("2"):
+            return 0
+
+        # ----- Pass 3 on R0 -----
+        if args.which_pass in ("3R0", "all_R0", "all_with_R0"):
+            # We write to alignment_R0.jsonl with rollout_source="S0_greedy"
+            # and a bumped schema marker — Pass 4 compare keys on these.
+            run_pass3(args, subset, rollout_cache_R0, per_model_R0,
+                      alignment_path_R0,
+                      rollout_source="S0_greedy", rollout_model=args.s0,
+                      schema_version="v0.2")
 
     # Brief summary
     summary_path = args.out_dir / "summary.txt"
@@ -843,11 +991,21 @@ def main(argv: list[str] | None = None) -> int:
         fs.write(f"s1      = {args.s1}\n")
         fs.write(f"samples = {args.samples}\n")
         fs.write(f"n_samples (shard) = {len(subset)}\n")
+        fs.write(f"--enable-pass4    = {bool(args.enable_pass4)}\n")
+        fs.write(f"--pass            = {args.which_pass}\n")
+        fs.write("---- R1 (default) ----\n")
         fs.write(f"rollout cache     = {rollout_path}\n")
         for m, p in per_model_paths.items():
-            n = sum(1 for _ in p.open()) if p.exists() else 0
-            fs.write(f"per_model[{m}]    = {p}  (n={n})\n")
+            n_lines = sum(1 for _ in p.open()) if p.exists() else 0
+            fs.write(f"per_model[{m}]    = {p}  (n={n_lines})\n")
         fs.write(f"alignment         = {alignment_path}\n")
+        if args.enable_pass4:
+            fs.write("---- R0 (Pass 4 prerequisite) ----\n")
+            fs.write(f"rollout cache R0  = {rollout_path_R0}\n")
+            for m, p in per_model_paths_R0.items():
+                n_lines = sum(1 for _ in p.open()) if p.exists() else 0
+                fs.write(f"per_model[{m}]_R0 = {p}  (n={n_lines})\n")
+            fs.write(f"alignment R0      = {alignment_path_R0}\n")
     print(f">>> summary: {summary_path}", file=sys.stderr)
     return 0
 

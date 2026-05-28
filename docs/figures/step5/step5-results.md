@@ -143,7 +143,9 @@ It does **NOT** support the stronger counterfactual:
 
 Disambiguating the two requires **Pass 4**: an S0 self-rollout `R0`,
 cross-model TAM on `R0`, and population-level comparison of self-
-trajectory alignment between (S0, T)@R0 and (S1, T)@R1.
+trajectory alignment between (S0, T)@R0 and (S1, T)@R1. The Pass-4
+pipeline + analyzer were implemented 2026-05-28 and are waiting on a
+GPU run (see §6.6).
 
 ### 6.3 Why we deliberately chose S1 rollout
 
@@ -193,3 +195,28 @@ That stronger claim requires Pass 4 + bottleneck taxonomy. Until then,
 EA-OPD is one §Method candidate among others (e.g., grounded visual-
 premise distillation, visual-reasoning chain distillation); the
 relative-value comparison is open.
+
+### 6.6 Pass 4 implementation status (2026-05-28)
+
+The Pass 4 design above is now **implemented** but **not yet run**:
+
+- `scripts/audit/tam_step5_evidence_alignment.py` gained `--enable-pass4`
+  and `--pass {1R0, 2T_R0, 2S0_R0, 2S1_R0, 3R0, all_R0, all_with_R0}`.
+  R0 files use `_R0` suffixes in the same out-dir; safe to extend an
+  existing R1 audit in place.
+- `src/mllmopd/analysis/tam_step5_pass4_compare.py` consumes
+  `alignment.jsonl` + `alignment_R0.jsonl` and emits
+  `pass4_per_sample.jsonl`, `pass4_summary.json`,
+  `pass4_decision.json`, two CSV tables, and `pass4-results.md`.
+- `scripts/audit/run_tam_step5.sh` gained `PHASE=pass4` and
+  `PHASE=pass4_analyze`.
+
+Trigger from H800 box::
+
+    PHASE=pass4 RUN_ID=tam_step5_20260528-013142 \
+        bash scripts/audit/run_tam_step5.sh
+    PHASE=pass4_analyze RUN_ID=tam_step5_20260528-013142 \
+        bash scripts/audit/run_tam_step5.sh
+
+Expected runtime: ~2-3 hr on 8×H800 for n=350. Until Pass-4 results
+land, §6.1–§6.5 stand as written.

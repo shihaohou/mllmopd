@@ -18,6 +18,14 @@
 #             ${RUN_DIR}/alignment.jsonl.
 #   analyze : single-process — run tam_step5_analyzer.py to produce
 #             tables + 3 figures + decision-tree results.md.
+#   pass4   : multi-GPU fan-out — for each sample shard, re-run
+#             tam_step5_evidence_alignment.py with --enable-pass4
+#             --pass all_R0 (S0 rollout → T/S0/S1 TAM pass on R0 →
+#             per-token alignment on R0). Merges into
+#             ${RUN_DIR}/alignment_R0.jsonl. Requires R1 already done.
+#   pass4_analyze : single-process — run tam_step5_pass4_compare.py to
+#             produce cross-rollout self-trajectory comparison +
+#             pass4_decision.json.
 #
 # Required env (sourced from .env or pre-exported):
 #   MLLMOPD_RUNS         — output base
@@ -37,7 +45,10 @@
 #                          hard-fail on mismatch unless ALLOW_DEGRADED_MODE=1)
 #   MAX_NEW_TOKENS_TAM   — main runner rollout cap (default 4096)
 #   NUM_GPUS             — data-parallel shard count (default: 8 on H800)
-#   PHASE                — predict | bucket | tam | analyze | all (default all)
+#   PHASE                — predict | bucket | tam | analyze
+#                          | pass4 | pass4_analyze | all (default all)
+#                          NOTE: PHASE=all still defaults to R1-only;
+#                          pass4 phases must be requested explicitly.
 #
 # Usage::
 #
@@ -343,6 +354,93 @@ if [ "${PHASE}" = "tam" ] || [ "${PHASE}" = "all" ]; then
     done
   } > "${RUN_DIR}/summary.txt"
   echo ">>> summary: ${RUN_DIR}/summary.txt"
+fi
+
+# ============================================================================
+# PHASE: pass4 — R0 = S0 self rollout + 3-model TAM on R0 + Pass-3 on R0
+# (Re-uses the same RUN_DIR as the R1 audit; all R0 files use _R0 suffix.)
+# ============================================================================
+if [ "${PHASE}" = "pass4" ]; then
+  echo "----- Phase: pass4 (multi-GPU fan-out, R0 sequence) -----"
+
+  if [ ! -f "${SAMPLES_OUT}" ]; then
+    echo "!! samples not found at ${SAMPLES_OUT}; run PHASE=bucket first"
+    exit 1
+  fi
+  # R1 must already have been computed in this RUN_DIR (Pass 4 compare
+  # needs alignment.jsonl as one of its two inputs). We don't strictly
+  # need this for the R0 sub-passes themselves, but failing loud here
+  # surfaces the most common mistake (pointing PHASE=pass4 at a fresh
+  # RUN_DIR without R1 results).
+  if [ ! -f "${RUN_DIR}/alignment.jsonl" ] && \
+     [ "${ALLOW_R0_WITHOUT_R1:-0}" != "1" ]; then
+    echo "!! HARD FAIL: ${RUN_DIR}/alignment.jsonl missing. Run PHASE=tam first, "
+    echo "   or set ALLOW_R0_WITHOUT_R1=1 to compute R0 in isolation."
+    exit 41
+  fi
+
+  PIDS=()
+  for i in $(seq 0 $((NUM_GPUS - 1))); do
+    SHARD_DIR="${RUN_DIR}/shard_${i}"
+    mkdir -p "${SHARD_DIR}"
+    (
+      export CUDA_VISIBLE_DEVICES="${i}"
+      PYTHONPATH=src python -m scripts.audit.tam_step5_evidence_alignment \
+        --samples "${SAMPLES_OUT}" \
+        --teacher "${MMR1_7B_RL_CKPT}" \
+        --s0      "${MMR1_3B_SFT_CKPT}" \
+        --s1      "${S1_CKPT}" \
+        --out-dir "${SHARD_DIR}" \
+        --max-new-tokens "${MAX_NEW_TOKENS_TAM}" \
+        --image-root . \
+        --shard-id "${i}" \
+        --num-shards "${NUM_GPUS}" \
+        --enable-pass4 \
+        --pass all_R0 \
+        > "${SHARD_DIR}/stdout_R0.log" 2> "${SHARD_DIR}/stderr_R0.log"
+      echo "  pass4 shard ${i} done"
+    ) &
+    PIDS+=($!)
+  done
+  echo ">>> waiting for ${#PIDS[@]} pass4 shards (tail ${RUN_DIR}/shard_*/std*_R0.log)"
+  FAIL=0
+  for pid in "${PIDS[@]}"; do
+    wait "${pid}" || { FAIL=1; echo "!! pass4 shard pid ${pid} exited non-zero"; }
+  done
+  if [ "${FAIL}" -ne 0 ]; then
+    echo "!! HARD FAIL: pass4 phase had failing shard(s). See ${RUN_DIR}/shard_*/stderr_R0.log"
+    exit 42
+  fi
+
+  echo ">>> merging shard alignment_R0 files"
+  cat "${RUN_DIR}"/shard_*/alignment_R0.jsonl > "${RUN_DIR}/alignment_R0.jsonl" 2>/dev/null || true
+  N_ROWS_R0=$(wc -l < "${RUN_DIR}/alignment_R0.jsonl" 2>/dev/null || echo 0)
+  echo "  merged ${N_ROWS_R0} alignment_R0 rows"
+fi
+
+# ============================================================================
+# PHASE: pass4_analyze — cross-rollout self-trajectory comparison
+# ============================================================================
+if [ "${PHASE}" = "pass4_analyze" ]; then
+  echo "----- Phase: pass4_analyze (single process) -----"
+
+  A_R1="${RUN_DIR}/alignment.jsonl"
+  A_R0="${RUN_DIR}/alignment_R0.jsonl"
+  if [ ! -f "${A_R1}" ]; then
+    echo "!! ${A_R1} not found; run PHASE=tam first"; exit 1
+  fi
+  if [ ! -f "${A_R0}" ]; then
+    echo "!! ${A_R0} not found; run PHASE=pass4 first"; exit 1
+  fi
+
+  OUT_PASS4="docs/figures/step5/pass4"
+  mkdir -p "${OUT_PASS4}"
+  PYTHONPATH=src python -m mllmopd.analysis.tam_step5_pass4_compare \
+    --alignment-r1 "${A_R1}" \
+    --alignment-r0 "${A_R0}" \
+    --out-dir "${OUT_PASS4}/"
+  echo ">>> pass4 outputs at ${OUT_PASS4}/"
+  ls -la "${OUT_PASS4}/" || true
 fi
 
 # ============================================================================

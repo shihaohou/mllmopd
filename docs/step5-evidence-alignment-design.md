@@ -587,31 +587,57 @@ does its attention go relative to teacher?" This audit answers that
 question cleanly. The cost is that it cannot rule out self-rollout
 attention shifts.
 
-### 13.3 Future Pass 4 to close the gap
-
-A natural follow-up is **Pass 4**:
+### 13.3 Pass 4 to close the gap — implemented 2026-05-28
 
 1. Generate `R0 = S0_greedy_rollout(I, q)` per sample (alongside the
    existing `R1 = S1_greedy_rollout`).
 2. Cross-model TAM on `R0`: produce `T@R0`, `S0@R0`, `S1@R0` using the
    same Pass 2 pipeline (text trajectory differs, but per-sample
    alignment-summary metrics are still computable).
-3. Population-level comparison:
-   - `align(S0_self_on_R0, T@R0)` vs `align(S1_self_on_R1, T@R1)` —
-     does OPD raise self-trajectory teacher alignment?
-   - `align(S0@R0, T@R0)` vs `align(S0@R1, T@R1)` — does forcing S0 to
-     S1's trajectory mask out a divergence that S0's own trajectory
-     would show?
+3. Population-level comparison (paired across sample ids):
+   - Δ_self_traj = `align(S1_self_on_R1, T@R1) − align(S0_self_on_R0, T@R0)`
+     — does OPD raise self-trajectory teacher alignment?
+   - Δ_s0_cross  = `align(S0@R0, T@R0) − align(S0@R1, T@R1)` — does
+     forcing S0 to S1's trajectory mask out a divergence that S0's own
+     trajectory would show? (Non-zero ⇒ original Pass-3 protocol is
+     systematically biased; close to zero ⇒ Pass-3 Δ is fairly
+     interpretable.)
 4. Optional: hand-annotate 30-50 OPD_improved samples into a bottleneck
    taxonomy (L1 evidence-selection / L2 evidence-interpretation /
    L3 evidence-use / L4 language-prior) to characterize *which*
    bottleneck dominates the bucket.
 
-Pass 4 is **deferred to a follow-up session** and is **not a
-prerequisite** for the existing branch (b) conclusion — it strengthens
-the §Method motivation by disambiguating which mechanism EA-OPD or an
-alternative (e.g., grounded visual-premise distillation, visual-
-reasoning chain distillation) should target.
+Pass 4 is **not a prerequisite** for the existing branch (b) conclusion
+— it strengthens the §Method motivation by disambiguating which
+mechanism EA-OPD or an alternative (e.g., grounded visual-premise
+distillation, visual-reasoning chain distillation) should target.
+
+#### Implementation status (2026-05-28)
+
+- **Pipeline code: shipped.** `scripts/audit/tam_step5_evidence_alignment.py`
+  gained `--enable-pass4` + `--pass {1R0, 2T_R0, 2S0_R0, 2S1_R0, 3R0,
+  all_R0, all_with_R0}`. R0 files use the `_R0` suffix in the same
+  out-dir so an existing R1 audit can be Pass-4-extended in-place
+  (resume-safe). Schema bumped: R1 stays `v0.1`, R0 stamped `v0.2` with
+  `rollout_source = "S0_greedy"`.
+- **Analyzer: shipped.** New `src/mllmopd/analysis/tam_step5_pass4_compare.py`
+  reads `alignment.jsonl` + `alignment_R0.jsonl`, applies the same
+  reliability filter as Pass-3 primary cell (entropy_norm_T < 0.998),
+  pairs by sample id, and emits per-sample / overall / per-bucket
+  bootstrap-CI tables + TOST verdict, plus `pass4_decision.json` mirroring
+  the schema of the original `decision.json`. The decision tree has two
+  axes — SELF (A1 aligned / A2 flat / A3 inconclusive / A4 anti) and
+  CROSS (B1 neutral / B2 biased / B3 anti-biased / B4 inconclusive).
+- **Launcher: shipped.** `run_tam_step5.sh` gained `PHASE=pass4`
+  (multi-GPU R0 rollout + Pass-2 on R0 + Pass-3 on R0; reuses existing
+  RUN_DIR) and `PHASE=pass4_analyze` (single-process comparison →
+  `docs/figures/step5/pass4/`). `PHASE=all` is unchanged (R1-only) for
+  backward compatibility.
+- **Awaiting run.** No GPU run yet; ~2 hr on 8×H800 estimated at n=350.
+  Trigger via `PHASE=pass4 RUN_ID=tam_step5_20260528-013142
+  bash scripts/audit/run_tam_step5.sh` from the H800 box, then
+  `PHASE=pass4_analyze` with the same `RUN_ID`. Until results land, the
+  honest claim boundaries in §13.1/§13.5 stand as written.
 
 ### 13.4 What the qualitative cases hint at (and do not prove)
 
