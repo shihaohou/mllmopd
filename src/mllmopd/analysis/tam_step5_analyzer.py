@@ -744,48 +744,77 @@ def plot_per_category(per_category: dict, out_path: Path) -> None:
 # ============================================================================
 def pick_qualitative(rows: list[dict], k_per_bucket: int = 3,
                      tokens_per_case: int = 4,
-                     reliability_thresh: float = RELIABILITY_THRESH_DEFAULT
+                     reliability_thresh: float = RELIABILITY_THRESH_DEFAULT,
+                     restrict_ids: set[str] | None = None,
+                     all_valid_tokens: bool = False,
                      ) -> list[dict]:
-    """Pick representative cases per bucket. Within each sample, pick a
-    handful of tokens that (a) are C_local, (b) have valid TAM, (c)
-    teacher map is reasonably concentrated."""
+    """Pick representative cases per bucket.
+
+    Default: per bucket, take top-`k_per_bucket` samples by |ΔJS| and
+    within each take top-`tokens_per_case` C_local tokens by ascending
+    entropy_norm_T (most concentrated first).
+
+    `restrict_ids` (optional): only consider these sample ids; k_per_bucket
+    is then ignored and ALL matching samples are picked.
+
+    `all_valid_tokens`: per pick, return EVERY token where T/S0/S1 are all
+    tam_valid (no C_local filter, no entropy filter, no tokens_per_case
+    limit). Use for tracing the full reasoning trace of a specific sample.
+    """
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
+        if restrict_ids and r.get("id") not in restrict_ids:
+            continue
         by_bucket[r.get("bucket", "unknown")].append(r)
 
     picks: list[dict] = []
     c_local = {"content_noun", "visual_attribute", "proper_noun"}
     for bucket, lst in by_bucket.items():
-        # rank samples by mean ΔJS (largest first — most visually different)
-        scored: list[tuple[float, dict]] = []
-        for r in lst:
-            s = _per_sample_means(r, reliability_thresh=reliability_thresh)
-            if s is None:
-                continue
-            scored.append((s["delta_js"], r))
-        scored.sort(key=lambda x: -abs(x[0]))   # largest |Δ| first
-        for _, r in scored[:k_per_bucket]:
+        if restrict_ids:
+            # Bypass k_per_bucket — pick all matching ids in this bucket.
+            selected = lst
+        else:
+            # Existing logic: rank samples by |ΔJS| and take top k_per_bucket.
+            scored: list[tuple[float, dict]] = []
+            for r in lst:
+                s = _per_sample_means(r, reliability_thresh=reliability_thresh)
+                if s is None:
+                    continue
+                scored.append((s["delta_js"], r))
+            scored.sort(key=lambda x: -abs(x[0]))   # largest |Δ| first
+            selected = [r for _, r in scored[:k_per_bucket]]
+
+        for r in selected:
             R = r["response_length"]
-            candidates: list[tuple[int, str, float]] = []
-            for t in range(R):
-                if not (r["tam_valid_T"][t] and r["tam_valid_S0"][t]
-                        and r["tam_valid_S1"][t]):
-                    continue
-                cat = (r.get("token_category") or ["other"] * R)[t]
-                if cat not in c_local:
-                    continue
-                ent = r["T"]["tam_entropy_norm"][t]
-                if ent is None:
-                    continue
-                candidates.append((t, cat, ent))
-            # Rank by entropy ascending (most concentrated first) and take
-            # top-K. No absolute threshold — v0.1.3 long-CoT TAM has
-            # entropy saturated at 0.99+, so a hardcoded 0.92 cutoff (from
-            # Step 0 / short-prompt era) would always reject every token.
-            # Per-sample ranking instead picks the locally-most-concentrated
-            # tokens regardless of distribution shift.
-            candidates.sort(key=lambda x: x[2])
-            tok_indices = [t for t, _, _ in candidates[:tokens_per_case]]
+            if all_valid_tokens:
+                # All tokens where all 3 model TAM is valid. No C_local
+                # restriction, no entropy filter, no tokens_per_case cap.
+                tok_indices = [
+                    t for t in range(R)
+                    if (r["tam_valid_T"][t] and r["tam_valid_S0"][t]
+                        and r["tam_valid_S1"][t])
+                ]
+            else:
+                candidates: list[tuple[int, str, float]] = []
+                for t in range(R):
+                    if not (r["tam_valid_T"][t] and r["tam_valid_S0"][t]
+                            and r["tam_valid_S1"][t]):
+                        continue
+                    cat = (r.get("token_category") or ["other"] * R)[t]
+                    if cat not in c_local:
+                        continue
+                    ent = r["T"]["tam_entropy_norm"][t]
+                    if ent is None:
+                        continue
+                    candidates.append((t, cat, ent))
+                # Rank by entropy ascending (most concentrated first) and take
+                # top-K. No absolute threshold — v0.1.3 long-CoT TAM has
+                # entropy saturated at 0.99+, so a hardcoded 0.92 cutoff (from
+                # Step 0 / short-prompt era) would always reject every token.
+                # Per-sample ranking instead picks the locally-most-concentrated
+                # tokens regardless of distribution shift.
+                candidates.sort(key=lambda x: x[2])
+                tok_indices = [t for t, _, _ in candidates[:tokens_per_case]]
             picks.append({
                 "id":     r["id"],
                 "bucket": bucket,
@@ -1234,10 +1263,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--qualitative-k-per-bucket", type=int, default=3,
                     help="How many samples per bucket to pick for "
                          "qualitative overlays (default 3 → 12 cases × 4 "
-                         "tokens = 48 PNGs).")
+                         "tokens = 48 PNGs). Ignored when "
+                         "--qualitative-restrict-ids is set.")
     ap.add_argument("--qualitative-tokens-per-case", type=int, default=4,
                     help="How many top-concentrated C_local tokens to "
-                         "select per case (default 4).")
+                         "select per case (default 4). Ignored when "
+                         "--qualitative-all-tokens is set.")
+    ap.add_argument("--qualitative-restrict-ids", default=None,
+                    help="Comma-separated sample ids; only these will be "
+                         "picked (bypasses k_per_bucket ranking, takes all "
+                         "matching). Useful for forcing specific cases "
+                         "into the overlay set.")
+    ap.add_argument("--qualitative-all-tokens", action="store_true",
+                    help="Pick EVERY valid token per sample (skip C_local "
+                         "filter, entropy filter, and tokens_per_case cap). "
+                         "Useful for tracing the full reasoning trace token-"
+                         "by-token. Generates many PNGs — ~R per sample.")
     ap.add_argument("--picks-only", action="store_true",
                     help="Skip aggregation + null calibration + figures; only "
                          "re-pick `qualitative_cases.jsonl` from a fresh sort. "
@@ -1258,11 +1299,21 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         sys.exit("!! no rows — abort")
 
+    # Parse restrict_ids if given
+    restrict_ids: set[str] | None = None
+    if args.qualitative_restrict_ids:
+        restrict_ids = {s.strip() for s in args.qualitative_restrict_ids.split(",")
+                        if s.strip()}
+        print(f">>> qualitative-restrict-ids: {len(restrict_ids)} ids",
+              file=sys.stderr)
+
     # --- Fast path: --picks-only just regenerates qualitative_cases.jsonl ---
     if args.picks_only:
+        mode_desc = ("all_valid_tokens" if args.qualitative_all_tokens
+                     else f"top-{args.qualitative_tokens_per_case} C_local")
         print(f">>> --picks-only: regenerating qualitative_cases.jsonl "
               f"(k_per_bucket={args.qualitative_k_per_bucket}, "
-              f"tokens_per_case={args.qualitative_tokens_per_case}); "
+              f"mode={mode_desc}); "
               f"skipping aggregation + null calibration + figures",
               file=sys.stderr)
         picks = pick_qualitative(
@@ -1270,6 +1321,8 @@ def main(argv: list[str] | None = None) -> int:
             k_per_bucket=args.qualitative_k_per_bucket,
             tokens_per_case=args.qualitative_tokens_per_case,
             reliability_thresh=THRESH,
+            restrict_ids=restrict_ids,
+            all_valid_tokens=args.qualitative_all_tokens,
         )
         args.out_dir.mkdir(parents=True, exist_ok=True)
         out_path = args.out_dir / "qualitative_cases.jsonl"
@@ -1344,7 +1397,9 @@ def main(argv: list[str] | None = None) -> int:
     picks = pick_qualitative(rows,
                              k_per_bucket=args.qualitative_k_per_bucket,
                              tokens_per_case=args.qualitative_tokens_per_case,
-                             reliability_thresh=THRESH)
+                             reliability_thresh=THRESH,
+                             restrict_ids=restrict_ids,
+                             all_valid_tokens=args.qualitative_all_tokens)
     with (args.out_dir / "qualitative_cases.jsonl").open("w") as f:
         for p in picks:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
