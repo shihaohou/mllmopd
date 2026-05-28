@@ -542,7 +542,102 @@ launch unless they hold (override via explicit
 
 ---
 
-## 13. References used during design
+## 13. Framework limitations (added 2026-05-28 after audit + GPT review)
+
+The audit completed (run `2026-05-28-013142`, n=350) and decided branch
+(b) flat / TOST equivalent on the primary cell. A GPT framework review
+on the result identified a limitation that this section makes explicit
+so future readers and §Method work do not over-claim.
+
+### 13.1 Conditional-on-S1-rollout, not counterfactual self-rollout
+
+In Pass 1 only **S1** generates a greedy rollout `y_S1`. In Pass 2 all
+three models (T / S0 / S1) are then teacher-forced to decode that
+*same* `y_S1`, and per-token TAM is extracted at each position. The
+audit therefore measures **conditional TAM divergence** under a fixed
+trajectory:
+
+> Given the same image, question, prefix `y_<t`, and target token `y_t`
+> (drawn from S1's rollout), do T, S0, and S1 attend to the same
+> image regions?
+
+It does **not** measure the counterfactual:
+
+> When S0 *itself* generates its own rollout (which may emit different
+> tokens, visit different visual premises, and take a different
+> reasoning chain), where does S0 attend?
+
+The branch (b) TOST equivalence result therefore supports:
+
+> Under the OPD-distilled student's own deployment trajectory, vanilla
+> OPD does not systematically move token-level visual evidence maps
+> closer to the teacher.
+
+It does **NOT** support the stronger claim:
+
+> Vanilla OPD does not change where the model looks during its own
+> self-rollout.
+
+### 13.2 Why this design choice was deliberate
+
+The S1-rollout protocol is not an oversight. The OPD deployment target
+*is* S1, so the relevant question for downstream method design is "on
+the trajectory that the OPD-trained student actually generates, where
+does its attention go relative to teacher?" This audit answers that
+question cleanly. The cost is that it cannot rule out self-rollout
+attention shifts.
+
+### 13.3 Future Pass 4 to close the gap
+
+A natural follow-up is **Pass 4**:
+
+1. Generate `R0 = S0_greedy_rollout(I, q)` per sample (alongside the
+   existing `R1 = S1_greedy_rollout`).
+2. Cross-model TAM on `R0`: produce `T@R0`, `S0@R0`, `S1@R0` using the
+   same Pass 2 pipeline (text trajectory differs, but per-sample
+   alignment-summary metrics are still computable).
+3. Population-level comparison:
+   - `align(S0_self_on_R0, T@R0)` vs `align(S1_self_on_R1, T@R1)` —
+     does OPD raise self-trajectory teacher alignment?
+   - `align(S0@R0, T@R0)` vs `align(S0@R1, T@R1)` — does forcing S0 to
+     S1's trajectory mask out a divergence that S0's own trajectory
+     would show?
+4. Optional: hand-annotate 30-50 OPD_improved samples into a bottleneck
+   taxonomy (L1 evidence-selection / L2 evidence-interpretation /
+   L3 evidence-use / L4 language-prior) to characterize *which*
+   bottleneck dominates the bucket.
+
+Pass 4 is **deferred to a follow-up session** and is **not a
+prerequisite** for the existing branch (b) conclusion — it strengthens
+the §Method motivation by disambiguating which mechanism EA-OPD or an
+alternative (e.g., grounded visual-premise distillation, visual-
+reasoning chain distillation) should target.
+
+### 13.4 What the qualitative cases hint at (and do not prove)
+
+`POPE_adversarial/269` is illustrative: in S1's rollout S1 says "yellow
+basket on motorbike, not a bicycle → no" (correct); S0 in its *own*
+rollout says "wheel on a pole → yes" (wrong, gold = no). Under the
+conditional setting both S0 and S1 (forced to "basket") attend to the
+same yellow basket region; only the reasoning chain differs. This is
+consistent with a **Layer-2/3 bottleneck** (visual recognition /
+reasoning interpretation) dominating OPD_improved rather than a
+Layer-1 bottleneck (evidence localization). But it is anecdotal — a
+single case cannot characterize the bucket; §13.3 Pass 4 + taxonomy
+annotation are the proper measurement.
+
+### 13.5 Implications for the §Method line
+
+EA-OPD remains a well-defined method candidate: vanilla OPD does not
+distill evidence alignment in any sense (conditional or counterfactual),
+so adding an explicit teacher-TAM-distillation loss is a non-redundant
+supervision signal. The audit, however, does not establish that
+evidence-selection is the bottleneck of OPD_improved samples. The
+relative-value comparison between EA-OPD and alternative §Method
+directions (grounded visual-premise distillation, visual-reasoning
+chain distillation) is open and should be informed by Pass 4 results.
+
+## 14. References used during design
 
 - Li et al., *Token Activation Map to Visually Explain Multimodal
   LLMs*, ICCV 2025 (Oral), arXiv 2506.23270.

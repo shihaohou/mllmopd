@@ -1242,6 +1242,69 @@ def write_results_md(overall: dict, overall_rel: dict,
                 "ranked by |ΔJS|, C_local tokens with concentrated teacher TAM).\n\n")
         f.write("See `qualitative_cases.jsonl` for the picker output.\n")
 
+        # ----- Framework limitations (added 2026-05-28 per GPT framework review) -----
+        f.write("\n## 6. Framework limitations\n\n")
+        f.write("### 6.1 Conditional-on-S1-rollout: what we measure vs what we don't\n\n")
+        f.write("This audit measures **conditional TAM divergence**. In Pass 1 "
+                "only S1 generates a greedy rollout `y_S1`; in Pass 2 all three "
+                "models (T / S0 / S1) are teacher-forced to decode that same "
+                "`y_S1`, and per-token TAM is extracted at each position of "
+                "`y_S1`.\n\n")
+        f.write("- **What this audit measures**: given the same image, "
+                "question, prefix `y_<t`, and target token `y_t` (drawn from "
+                "S1's rollout), do T, S0, and S1 attend to the same image "
+                "regions?\n")
+        f.write("- **What this audit does NOT measure**: when S0 *itself* "
+                "generates its own rollout (which may visit different visual "
+                "premises, take a different reasoning chain, and emit "
+                "different tokens), where does S0 attend? Does that attention "
+                "diverge from T more or less than S1's attention does on its "
+                "own rollout?\n\n")
+        f.write("### 6.2 Honest claim boundaries\n\n")
+        f.write("Branch (b) TOST equivalence supports:\n\n")
+        f.write("> Under the OPD-distilled student's own deployment "
+                "trajectory (the tokens S1 would actually generate), vanilla "
+                "OPD does not systematically move token-level visual evidence "
+                "maps closer to the teacher.\n\n")
+        f.write("It does **NOT** support the stronger counterfactual:\n\n")
+        f.write("> Vanilla OPD does not change where the model looks during "
+                "its own self-rollout.\n\n")
+        f.write("Disambiguating the two requires **Pass 4**: an S0 self-"
+                "rollout `R0`, cross-model TAM on `R0`, and population-level "
+                "comparison of self-trajectory alignment between (S0, T)@R0 "
+                "and (S1, T)@R1.\n\n")
+        f.write("### 6.3 Why we deliberately chose S1 rollout\n\n")
+        f.write("The S1-rollout protocol was a deliberate design choice, not "
+                "an oversight. The OPD deployment target *is* S1, so the "
+                "relevant question for downstream method design is \"on the "
+                "trajectory that the OPD-trained student actually generates, "
+                "where does its attention go relative to teacher?\" The "
+                "audit cleanly answers this question. It does not answer "
+                "\"did OPD change attention patterns across all possible "
+                "rollouts.\"\n\n")
+        f.write("### 6.4 Bottleneck taxonomy not yet characterized\n\n")
+        f.write("Qualitative inspection of OPD_improved samples (e.g. "
+                "POPE_adversarial/269) suggests the OPD-recovered cases may "
+                "be **Layer-2/3 bottleneck** (visual recognition / visual-"
+                "reasoning relation interpretation) rather than Layer-1 "
+                "(evidence localization). But this is anecdotal. Proper "
+                "characterization requires hand-annotation of 30-50 "
+                "OPD_improved samples into a bottleneck taxonomy (L1 "
+                "evidence-selection / L2 evidence-interpretation / L3 "
+                "evidence-use / L4 language-prior).\n\n")
+        f.write("### 6.5 Implications for §Method (EA-OPD)\n\n")
+        f.write("This audit motivates **a method line that explicitly "
+                "targets evidence alignment**: vanilla OPD does not perform "
+                "evidence alignment in the conditional sense above, so "
+                "explicitly distilling teacher TAM is a well-defined, non-"
+                "redundant supervision signal. It does **NOT** motivate the "
+                "stronger claim that EA-OPD will recover accuracy because "
+                "evidence-selection is the bottleneck. That claim requires "
+                "Pass 4 + bottleneck taxonomy; until then EA-OPD is one "
+                "§Method candidate among others (e.g., grounded visual-"
+                "premise distillation, visual-reasoning chain "
+                "distillation).\n")
+
 
 # ============================================================================
 # Main
