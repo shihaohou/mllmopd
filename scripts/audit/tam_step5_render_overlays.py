@@ -168,6 +168,138 @@ def _compose_triplet(image, maps_T, maps_S0, maps_S1, alpha: float,
     return canvas
 
 
+def _write_sample_context(pick: dict, row: dict, sample_dir: Path,
+                          tok_indices: list[int]) -> None:
+    """Write per-sample context: _context.md (human-readable) +
+    _tokens.json (machine-readable per-token table).
+
+    This is what the user looks at to understand "why is this token
+    important / where are we in the CoT" alongside the PNG overlays.
+    """
+    R = row.get("response_length", 0)
+    tokens = row.get("tokens", [])
+    cat = row.get("token_category", [])
+    valid_T = row.get("tam_valid_T", [])
+    valid_S0 = row.get("tam_valid_S0", [])
+    valid_S1 = row.get("tam_valid_S1", [])
+    ent_T = row.get("T", {}).get("tam_entropy_norm", [])
+    align_S0 = row.get("align", {}).get("S0_T", {})
+    align_S1 = row.get("align", {}).get("S1_T", {})
+
+    picked_set = set(tok_indices)
+
+    # ----- _tokens.json — machine-readable -----
+    token_records = []
+    for t in range(R):
+        token_records.append({
+            "tok_idx": t,
+            "token": tokens[t] if t < len(tokens) else None,
+            "category": cat[t] if t < len(cat) else None,
+            "tam_valid_T": bool(valid_T[t]) if t < len(valid_T) else None,
+            "tam_valid_S0": bool(valid_S0[t]) if t < len(valid_S0) else None,
+            "tam_valid_S1": bool(valid_S1[t]) if t < len(valid_S1) else None,
+            "entropy_norm_T": float(ent_T[t]) if t < len(ent_T) and ent_T[t] is not None else None,
+            "js_S0_T": _safe_at(align_S0.get("js"), t),
+            "js_S1_T": _safe_at(align_S1.get("js"), t),
+            "iou_S0_T": _safe_at(align_S0.get("iou_top20"), t),
+            "iou_S1_T": _safe_at(align_S1.get("iou_top20"), t),
+            "cos_S0_T": _safe_at(align_S0.get("cos"), t),
+            "cos_S1_T": _safe_at(align_S1.get("cos"), t),
+            "in_picks":  t in picked_set,
+        })
+    (sample_dir / "_tokens.json").write_text(
+        json.dumps(token_records, ensure_ascii=False, indent=2)
+    )
+
+    # ----- _context.md — human-readable -----
+    lines: list[str] = []
+    lines.append(f"# {pick['id']}\n")
+    lines.append(f"**Bucket**: `{pick.get('bucket')}`  ")
+    lines.append(f"**Benchmark**: `{row.get('benchmark') or pick.get('benchmark')}`  ")
+    lines.append(f"**Image**: `{row.get('image_path')}`  ")
+    lines.append(f"**Response length**: {R} tokens  ")
+    lines.append(f"**Picked**: {len(tok_indices)} token(s) at indices "
+                 f"{tok_indices}\n")
+
+    lines.append("## Models\n")
+    lines.append("- **T**  = MMR1-7B-RL teacher")
+    lines.append("- **S0** = MMR1-3B-SFT base student (un-distilled)")
+    lines.append("- **S1** = T1-Full step_230 OPD student\n")
+
+    lines.append("## Question (prompt)\n")
+    lines.append(f"> {row.get('question') or pick.get('question')}\n")
+
+    lines.append(f"## Gold answer\n")
+    lines.append(f"> `{row.get('answer') or pick.get('answer')}`\n")
+
+    lines.append(f"## S0 response — correctness: "
+                 f"**{pick.get('s0_correct')}**\n")
+    s0_txt = (row.get("s0_response_text") or pick.get("s0_response_text")
+              or "(not stored)")
+    lines.append(f"```\n{s0_txt}\n```\n")
+
+    lines.append(f"## S1 response (= the shared rollout used for TAM) — "
+                 f"correctness: **{pick.get('s1_correct')}**\n")
+    s1_txt = (row.get("response_text")
+              or row.get("s1_response_text")
+              or pick.get("s1_response_text")
+              or "(not stored)")
+    lines.append(f"```\n{s1_txt}\n```\n")
+
+    # Picked tokens — link to PNGs
+    lines.append("## Picked tokens (have PNG overlays in this directory)\n")
+    lines.append("| tok_idx | token | category | entropy_norm_T | "
+                 "JS(S0,T) | JS(S1,T) | PNG |")
+    lines.append("|---:|---|---|---:|---:|---:|---|")
+    for t in tok_indices:
+        tok_txt = tokens[t] if t < len(tokens) else "?"
+        png_name = f"{t:04d}_{_safe_name(tok_txt)}.png"
+        ent_str = (f"{ent_T[t]:.4f}"
+                   if t < len(ent_T) and ent_T[t] is not None else "—")
+        js_s0_v = _safe_at(align_S0.get("js"), t)
+        js_s1_v = _safe_at(align_S1.get("js"), t)
+        js_s0_str = f"{js_s0_v:.4f}" if js_s0_v is not None else "—"
+        js_s1_str = f"{js_s1_v:.4f}" if js_s1_v is not None else "—"
+        c = cat[t] if t < len(cat) else "?"
+        lines.append(f"| {t} | `{tok_txt}` | {c} | {ent_str} | "
+                     f"{js_s0_str} | {js_s1_str} | [{png_name}]({png_name}) |")
+    lines.append("")
+
+    # Full token sequence — collapsible (markdown <details>)
+    lines.append("## Full token sequence (S1 rollout)\n")
+    lines.append("<details>")
+    lines.append("<summary>Click to expand all "
+                 f"{R} tokens</summary>\n")
+    lines.append("| tok_idx | token | category | valid_T | entropy_norm_T | "
+                 "JS(S0,T) | JS(S1,T) | picked? |")
+    lines.append("|---:|---|---|---|---:|---:|---:|:---:|")
+    for t in range(R):
+        tok_txt = tokens[t] if t < len(tokens) else "?"
+        # Escape pipes / backticks inside table cell
+        tok_safe = tok_txt.replace("|", "\\|").replace("`", "ʻ")
+        c = cat[t] if t < len(cat) else "?"
+        vT = valid_T[t] if t < len(valid_T) else None
+        ent_str = (f"{ent_T[t]:.4f}"
+                   if t < len(ent_T) and ent_T[t] is not None else "—")
+        js_s0_v = _safe_at(align_S0.get("js"), t)
+        js_s1_v = _safe_at(align_S1.get("js"), t)
+        js_s0_str = f"{js_s0_v:.4f}" if js_s0_v is not None else "—"
+        js_s1_str = f"{js_s1_v:.4f}" if js_s1_v is not None else "—"
+        picked_mark = "✓" if t in picked_set else ""
+        lines.append(f"| {t} | `{tok_safe}` | {c} | {vT} | {ent_str} | "
+                     f"{js_s0_str} | {js_s1_str} | {picked_mark} |")
+    lines.append("\n</details>\n")
+
+    (sample_dir / "_context.md").write_text("\n".join(lines))
+
+
+def _safe_at(lst, t):
+    if lst is None or t >= len(lst):
+        return None
+    v = lst[t]
+    return float(v) if isinstance(v, (int, float)) else None
+
+
 def render_pick(pick: dict, row: dict, image_root: Path, out_dir: Path,
                 alpha: float) -> tuple[int, str]:
     """Render all tok_indices in a single pick. Returns (n_rendered, msg)."""
@@ -190,6 +322,10 @@ def render_pick(pick: dict, row: dict, image_root: Path, out_dir: Path,
     bucket = pick.get("bucket", "unknown")
     sample_dir = out_dir / bucket / _safe_name(pick["id"])
     sample_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write per-sample context (Markdown + JSON) BEFORE rendering PNGs
+    # so users can browse the directory while waiting for big jobs.
+    _write_sample_context(pick, row, sample_dir, tok_indices)
 
     maps_b64 = row.get("maps_b64", {})
     T_b64 = maps_b64.get("T", [])
