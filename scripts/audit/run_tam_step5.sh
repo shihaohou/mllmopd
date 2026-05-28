@@ -32,7 +32,9 @@
 #   MMR1_7B_RL_CKPT      — teacher T
 #   MMR1_3B_SFT_CKPT     — S0 base student
 #   CKPT_T1_2            — S1 (T1-Full step_230); falls back to standard path
-#                          if unset
+#                          if unset. NOTE: variable name is legacy from the
+#                          atlas pre-pivot era ("T1_2" → "T1-Full");
+#                          fallback path was migrated 2026-05-28.
 #
 # Optional env (defaults shown):
 #   RUN_ID               — output subdir (default tam_step5_$(date +%Y%m%d-%H%M%S))
@@ -78,8 +80,9 @@ unset -v http_proxy https_proxy no_proxy || true
 # attention baseline so SDPA is fine. Keep eager available as override.
 export MLLMOPD_ATTN_IMPL="${MLLMOPD_ATTN_IMPL:-sdpa}"
 
-# Resolve S1 path
-S1_CKPT="${CKPT_T1_2:-${MLLMOPD_RUNS}/t1_v1p5b_T1_2_full_mm/ckpt/hf/step_230}"
+# Resolve S1 path. Default fallback updated to the post-atlas-pivot
+# directory name (T1-Full). Override via CKPT_T1_2 for any other arm.
+S1_CKPT="${CKPT_T1_2:-${MLLMOPD_RUNS}/t1_v2_T1-Full_mm/ckpt/hf/step_230}"
 
 PHASE="${PHASE:-all}"
 NUM_GPUS="${NUM_GPUS:-8}"
